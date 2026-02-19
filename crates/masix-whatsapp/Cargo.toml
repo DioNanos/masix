@@ -1,0 +1,19 @@
+# Masix WhatsApp Adapter
+
+[package]
+name = "masix-whatsapp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+masix-ipc = { path = "../masix-ipc" }
+masix-storage = { path = "../masix-storage" }
+masix-config = { path = "../masix-config" }
+
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

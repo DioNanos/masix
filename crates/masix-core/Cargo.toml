@@ -1,0 +1,43 @@
+# Masix Core
+
+[package]
+name = "masix-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Internal
+masix-config = { path = "../masix-config" }
+masix-storage = { path = "../masix-storage" }
+masix-policy = { path = "../masix-policy" }
+masix-ipc = { path = "../masix-ipc" }
+masix-providers = { path = "../masix-providers" }
+masix-mcp = { path = "../masix-mcp" }
+masix-telegram = { path = "../masix-telegram" }
+masix-whatsapp = { path = "../masix-whatsapp" }
+masix-sms = { path = "../masix-sms" }
+
+# Async
+tokio.workspace = true
+async-trait.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# HTTP
+reqwest.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Time
+chrono.workspace = true
+
+# Utils
+dirs.workspace = true

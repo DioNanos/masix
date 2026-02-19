@@ -1,0 +1,16 @@
+# Masix SMS (Termux:API)
+
+[package]
+name = "masix-sms"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+masix-storage = { path = "../masix-storage" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+chrono.workspace = true

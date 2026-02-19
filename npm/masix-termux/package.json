@@ -1,0 +1,45 @@
+{
+  "name": "@mmmbuto/masix",
+  "version": "0.1.0-beta.4",
+  "description": "MIT Messaging Agent for Termux - Telegram, WhatsApp, SMS with MCP + Cron",
+  "main": "index.js",
+  "files": [
+    "README.md",
+    "install.js",
+    "prebuilt/"
+  ],
+  "bin": {
+    "masix": "prebuilt/masix"
+  },
+  "scripts": {
+    "postinstall": "node install.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "termux",
+    "telegram",
+    "whatsapp",
+    "sms",
+    "mcp",
+    "cron",
+    "ai",
+    "messaging",
+    "android"
+  ],
+  "author": "Davide A. Guglielmi <dev@mmmbuto.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DioNanos/masix.git"
+  },
+  "homepage": "https://github.com/DioNanos/masix#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "android"
+  ],
+  "cpu": [
+    "arm64"
+  ]
+}

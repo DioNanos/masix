@@ -1,0 +1,70 @@
+# Masix Configuration Example
+
+[core]
+data_dir = "~/.masix"
+log_level = "info"
+soul_file = "~/.masix/SOUL.md"
+
+[telegram]
+poll_timeout_secs = 60
+client_recreate_interval_secs = 60
+default_policy = "mention_only"
+
+[[telegram.accounts]]
+bot_token = "YOUR_BOT_TOKEN_HERE"
+# allowed_chats = [123456789, -987654321]
+
+[whatsapp]
+enabled = false
+transport_path = "whatsapp-transport.js"
+
+[[whatsapp.accounts]]
+# session_file = "~/.masix/whatsapp/session.json"
+
+[sms]
+enabled = true
+watch_interval_secs = 30
+
+# [[sms.rules]]
+# event_type = "termux_sms"
+# pattern_type = "number_contains"
+# pattern_value = "+3906"
+# action_type = "telegram_notify"
+# action_config = '''
+# {
+#   "chat_id": 123456789,
+#   "template": "📨 SMS da {number}: {body}"
+# }
+# '''
+
+[mcp]
+enabled = true
+
+[[mcp.servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/data/data/com.termux/files/home"]
+
+[[mcp.servers]]
+name = "memory"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory"]
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "YOUR_OPENAI_API_KEY"
+model = "gpt-4o-mini"
+
+[[providers.providers]]
+name = "ollama"
+api_key = "not-needed"
+base_url = "http://localhost:11434/v1"
+model = "deepseek-r1:7b"
+
+[policy]
+# allowlist = ["123456789"]
+# denylist = ["987654321"]
+rate_limit = { messages_per_minute = 60 }

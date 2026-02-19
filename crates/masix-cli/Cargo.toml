@@ -1,0 +1,44 @@
+# Masix CLI
+
+[package]
+name = "masix-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "masix"
+path = "src/main.rs"
+
+[dependencies]
+# Internal
+masix-core = { path = "../masix-core" }
+masix-config = { path = "../masix-config" }
+masix-storage = { path = "../masix-storage" }
+masix-telegram = { path = "../masix-telegram" }
+masix-whatsapp = { path = "../masix-whatsapp" }
+masix-sms = { path = "../masix-sms" }
+masix-cron = { path = "../masix-cron" }
+
+# CLI
+clap.workspace = true
+
+# Async
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Time
+chrono.workspace = true
+
+# Utils
+dirs.workspace = true
