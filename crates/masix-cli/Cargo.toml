@@ -20,12 +20,16 @@ masix-telegram = { path = "../masix-telegram" }
 masix-whatsapp = { path = "../masix-whatsapp" }
 masix-sms = { path = "../masix-sms" }
 masix-cron = { path = "../masix-cron" }
+masix-providers = { path = "../masix-providers" }
 
 # CLI
 clap.workspace = true
 
 # Async
 tokio.workspace = true
+
+# HTTP client
+reqwest.workspace = true
 
 # Serialization
 serde.workspace = true

@@ -2,22 +2,24 @@
 //!
 //! Command-line interface for Masix messaging agent
 
+mod logging;
+
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use masix_config::Config;
 use masix_core::MasixRuntime;
 use masix_exec::{manage_termux_boot, BootAction};
+use masix_providers::{OpenAICompatibleProvider, Provider};
 use masix_storage::Storage;
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{self, EnvFilter};
 
 const PID_FILE: &str = "masix.pid";
-const LOG_FILE: &str = "logs/masix.log";
 
 #[derive(Parser)]
 #[command(name = "masix")]
@@ -95,6 +97,47 @@ enum Commands {
 
     /// Show version
     Version,
+
+    /// Test connections and credentials
+    Test {
+        #[command(subcommand)]
+        action: TestCommands,
+    },
+
+    /// Log management commands
+    Logs {
+        #[command(subcommand)]
+        action: LogCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum TestCommands {
+    /// Test Telegram bot token
+    Telegram,
+    /// Test LLM provider API key
+    Provider {
+        /// Provider name to test (default: all)
+        name: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum LogCommands {
+    /// Show log files and sizes
+    List,
+    /// Clean up old logs
+    Clean {
+        /// Keep only N days of logs
+        #[arg(short, long, default_value = "7")]
+        days: u64,
+    },
+    /// Show last N lines of log
+    Tail {
+        /// Number of lines to show
+        #[arg(short, long, default_value = "50")]
+        lines: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -208,9 +251,9 @@ enum ConfigCommands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
         .init();
 
     match cli.command {
@@ -262,7 +305,8 @@ async fn main() -> Result<()> {
                     if let Ok(uptime) = get_daemon_uptime(&pid_path) {
                         println!("Uptime: {}s", uptime);
                     }
-                    println!("Log: {}", data_dir.join(LOG_FILE).display());
+                    let log_manager = logging::LogManager::new(data_dir.join("logs"));
+                    println!("Log: {}", log_manager.get_current_log_path().display());
                 }
                 None => {
                     println!("Masix is not running");
@@ -645,6 +689,71 @@ async fn main() -> Result<()> {
         Commands::Version => {
             println!("masix {}", env!("CARGO_PKG_VERSION"));
         }
+
+        Commands::Test { action } => match action {
+            TestCommands::Telegram => {
+                println!("Testing Telegram bot connection...\n");
+                let config = load_config(cli.config)?;
+                test_telegram_bots(&config).await?;
+            }
+            TestCommands::Provider { name } => {
+                println!("Testing LLM provider connection...\n");
+                let config = load_config(cli.config)?;
+                test_providers(&config, name.as_deref()).await?;
+            }
+        },
+
+        Commands::Logs { action } => {
+            let config = load_config(cli.config.clone())?;
+            let data_dir = get_data_dir(&config);
+            let log_dir = data_dir.join("logs");
+            match action {
+                LogCommands::List => {
+                    let manager = logging::LogManager::new(log_dir);
+                    let files = manager.get_log_files()?;
+                    let total_size = manager.get_log_size()?;
+                    println!(
+                        "Log files ({} total):\n",
+                        logging::LogManager::format_size(total_size)
+                    );
+                    for file in files {
+                        let metadata = fs::metadata(&file)?;
+                        let size = logging::LogManager::format_size(metadata.len());
+                        let modified: chrono::DateTime<chrono::Local> = metadata.modified()?.into();
+                        println!(
+                            "  {} ({}, modified {})",
+                            file.file_name().unwrap().to_string_lossy(),
+                            size,
+                            modified.format("%Y-%m-%d %H:%M:%S")
+                        );
+                    }
+                }
+                LogCommands::Clean { days } => {
+                    let mut manager = logging::LogManager::new(log_dir);
+                    let files_before = manager.get_log_files()?.len();
+                    manager.cleanup_old_logs()?;
+                    let files_after = manager.get_log_files()?.len();
+                    println!(
+                        "Cleaned {} old log file(s)",
+                        files_before.saturating_sub(files_after)
+                    );
+                }
+                LogCommands::Tail { lines } => {
+                    let manager = logging::LogManager::new(log_dir);
+                    let current_log = manager.get_current_log_path();
+                    if current_log.exists() {
+                        let content = fs::read_to_string(&current_log)?;
+                        let all_lines: Vec<&str> = content.lines().collect();
+                        let start = all_lines.len().saturating_sub(lines);
+                        for line in &all_lines[start..] {
+                            println!("{}", line);
+                        }
+                    } else {
+                        println!("No log file found at {}", current_log.display());
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -724,6 +833,137 @@ fn print_redacted_config(config: &Config) -> Result<()> {
 }
 
 // ============================================================================
+// Test Functions
+// ============================================================================
+
+async fn test_telegram_bots(config: &Config) -> Result<()> {
+    let Some(telegram) = &config.telegram else {
+        println!("No Telegram accounts configured.");
+        return Ok(());
+    };
+
+    if telegram.accounts.is_empty() {
+        println!("No Telegram accounts configured.");
+        return Ok(());
+    }
+
+    let client = reqwest::Client::new();
+    let mut success_count = 0;
+    let mut fail_count = 0;
+
+    for (idx, account) in telegram.accounts.iter().enumerate() {
+        let bot_id = account.bot_token.split(':').next().unwrap_or("unknown");
+
+        println!("Testing account #{} (bot_id: {})...", idx + 1, bot_id);
+
+        let api_url = format!("https://api.telegram.org/bot{}/getMe", account.bot_token);
+
+        match client.post(&api_url).send().await {
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+
+                if status.is_success() {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+                        if parsed["ok"].as_bool().unwrap_or(false) {
+                            let username =
+                                parsed["result"]["username"].as_str().unwrap_or("unknown");
+                            let first_name =
+                                parsed["result"]["first_name"].as_str().unwrap_or("unknown");
+                            println!("  ✓ SUCCESS: @{} ({})", username, first_name);
+                            success_count += 1;
+                        } else {
+                            let error = parsed["description"].as_str().unwrap_or("Unknown error");
+                            println!("  ✗ FAILED: {}", error);
+                            fail_count += 1;
+                        }
+                    } else {
+                        println!("  ✗ FAILED: Invalid response");
+                        fail_count += 1;
+                    }
+                } else {
+                    println!("  ✗ FAILED: HTTP {}", status);
+                    fail_count += 1;
+                }
+            }
+            Err(e) => {
+                println!("  ✗ FAILED: Network error: {}", e);
+                fail_count += 1;
+            }
+        }
+        println!();
+    }
+
+    println!("Summary: {} passed, {} failed", success_count, fail_count);
+    Ok(())
+}
+
+async fn test_providers(config: &Config, name: Option<&str>) -> Result<()> {
+    if config.providers.providers.is_empty() {
+        println!("No providers configured.");
+        return Ok(());
+    }
+
+    let mut success_count = 0;
+    let mut fail_count = 0;
+
+    for provider_config in &config.providers.providers {
+        if let Some(filter) = name {
+            if provider_config.name != filter {
+                continue;
+            }
+        }
+
+        println!("Testing provider '{}'...", provider_config.name);
+        println!(
+            "  Base URL: {}",
+            provider_config.base_url.as_deref().unwrap_or("default")
+        );
+        println!(
+            "  Model: {}",
+            provider_config.model.as_deref().unwrap_or("default")
+        );
+
+        let key_preview = if provider_config.api_key.len() > 8 {
+            format!(
+                "{}...{}",
+                &provider_config.api_key[..4],
+                &provider_config.api_key[provider_config.api_key.len() - 4..]
+            )
+        } else {
+            "***".to_string()
+        };
+        println!("  API Key: {}", key_preview);
+
+        let provider = OpenAICompatibleProvider::new(
+            provider_config.name.clone(),
+            provider_config.api_key.clone(),
+            provider_config.base_url.clone(),
+            provider_config.model.clone(),
+        );
+
+        match provider.health_check().await {
+            Ok(true) => {
+                println!("  ✓ SUCCESS: Connection OK");
+                success_count += 1;
+            }
+            Ok(false) => {
+                println!("  ✗ FAILED: Health check returned false");
+                fail_count += 1;
+            }
+            Err(e) => {
+                println!("  ✗ FAILED: {}", e);
+                fail_count += 1;
+            }
+        }
+        println!();
+    }
+
+    println!("Summary: {} passed, {} failed", success_count, fail_count);
+    Ok(())
+}
+
+// ============================================================================
 // Daemon Management Functions
 // ============================================================================
 
@@ -731,7 +971,10 @@ fn start_daemon(data_dir: &PathBuf, config_path: Option<String>, log_level: Stri
     let log_dir = data_dir.join("logs");
     fs::create_dir_all(&log_dir)?;
 
-    let log_path = data_dir.join(LOG_FILE);
+    let log_manager = logging::LogManager::new(log_dir.clone());
+    log_manager.cleanup_old_logs()?;
+
+    let log_path = log_manager.get_current_log_path();
     let pid_path = data_dir.join(PID_FILE);
 
     // Get current executable
