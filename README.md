@@ -60,7 +60,6 @@ For local endpoint setup:
 - [Main usage guide](docs/USER_GUIDE.md)
 - [NPM package docs](npm/masix-termux/README.md)
 - [Example config](config/config.example.toml)
-- [Worker docs](.docs/)
 
 ## Repository Layout
 
