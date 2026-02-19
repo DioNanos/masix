@@ -3,8 +3,12 @@
 //! OpenAI-compatible API client with tool calling support
 
 use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
+use reqwest::header::HeaderMap;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -62,14 +66,38 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    pub window_secs: u64,
+    pub initial_delay_secs: u64,
+    pub backoff_factor: u32,
+    pub max_delay_secs: u64,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            window_secs: 600,
+            initial_delay_secs: 2,
+            backoff_factor: 2,
+            max_delay_secs: 30,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
-    async fn chat(&self, messages: Vec<ChatMessage>) -> Result<ChatResponse>;
+    async fn chat(
+        &self,
+        messages: Vec<ChatMessage>,
+        retry_policy: Option<&RetryPolicy>,
+    ) -> Result<ChatResponse>;
     async fn chat_with_tools(
         &self,
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
+        retry_policy: Option<&RetryPolicy>,
     ) -> Result<ChatResponse>;
     async fn health_check(&self) -> Result<bool>;
 }
@@ -115,36 +143,92 @@ impl OpenAICompatibleProvider {
         }
     }
 
-    async fn request_chat(&self, body: serde_json::Value) -> Result<ChatResponse> {
+    async fn request_chat(
+        &self,
+        body: serde_json::Value,
+        retry_policy: Option<&RetryPolicy>,
+    ) -> Result<ChatResponse> {
         let url = format!("{}/chat/completions", self.base_url);
+        let policy = retry_policy.cloned().unwrap_or_default();
+        let start = Instant::now();
+        let mut attempt: u32 = 1;
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        loop {
+            let response = self
+                .client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await;
 
-        let status = response.status();
-        let raw_body = response.text().await?;
+            match response {
+                Ok(response) => {
+                    let status = response.status();
+                    let headers = response.headers().clone();
+                    let raw_body = response.text().await?;
 
-        if !status.is_success() {
-            let snippet = Self::truncate_for_error(&raw_body, 600);
-            return Err(anyhow!("Provider HTTP {} at {}: {}", status, url, snippet));
+                    if status.is_success() {
+                        let parsed: serde_json::Value =
+                            serde_json::from_str(&raw_body).map_err(|e| {
+                                anyhow!(
+                                    "Provider response decode failed at {}: {} | body={}",
+                                    url,
+                                    e,
+                                    Self::truncate_for_error(&raw_body, 600)
+                                )
+                            })?;
+                        return self.parse_response(parsed);
+                    }
+
+                    let snippet = Self::truncate_for_error(&raw_body, 600);
+                    let error_msg = format!("Provider HTTP {} at {}: {}", status, url, snippet);
+                    if !Self::is_retryable_status(status.as_u16()) {
+                        return Err(anyhow!(error_msg));
+                    }
+
+                    if let Some(delay) =
+                        Self::next_retry_delay(&policy, attempt, &headers, start.elapsed())
+                    {
+                        tracing::warn!(
+                            provider = %self.name,
+                            status = %status.as_u16(),
+                            attempt = attempt,
+                            delay_ms = delay.as_millis(),
+                            "Retrying provider request after transient HTTP error"
+                        );
+                        sleep(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+
+                    return Err(anyhow!(error_msg));
+                }
+                Err(err) => {
+                    if !Self::is_retryable_reqwest(&err) {
+                        return Err(err.into());
+                    }
+
+                    if let Some(delay) =
+                        Self::next_retry_delay(&policy, attempt, &HeaderMap::new(), start.elapsed())
+                    {
+                        tracing::warn!(
+                            provider = %self.name,
+                            attempt = attempt,
+                            delay_ms = delay.as_millis(),
+                            error = %err,
+                            "Retrying provider request after transient network error"
+                        );
+                        sleep(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+
+                    return Err(err.into());
+                }
+            }
         }
-
-        let parsed: serde_json::Value = serde_json::from_str(&raw_body).map_err(|e| {
-            anyhow!(
-                "Provider response decode failed at {}: {} | body={}",
-                url,
-                e,
-                Self::truncate_for_error(&raw_body, 600)
-            )
-        })?;
-
-        self.parse_response(parsed)
     }
 
     fn parse_response(&self, response: serde_json::Value) -> Result<ChatResponse> {
@@ -430,6 +514,87 @@ impl OpenAICompatibleProvider {
         let snippet = &trimmed[start..=end];
         serde_json::from_str::<serde_json::Value>(snippet).ok()
     }
+
+    fn is_retryable_status(status: u16) -> bool {
+        matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+    }
+
+    fn is_retryable_reqwest(err: &reqwest::Error) -> bool {
+        err.is_timeout() || err.is_connect() || err.is_request()
+    }
+
+    fn next_retry_delay(
+        policy: &RetryPolicy,
+        attempt: u32,
+        headers: &HeaderMap,
+        elapsed: Duration,
+    ) -> Option<Duration> {
+        let window = Duration::from_secs(policy.window_secs.max(1));
+        if elapsed >= window {
+            return None;
+        }
+
+        let header_delay = Self::parse_retry_after_headers(headers);
+        let fallback_delay = Self::exponential_delay(policy, attempt);
+        let mut delay = header_delay.unwrap_or(fallback_delay);
+
+        let remaining = window.saturating_sub(elapsed);
+        if remaining.is_zero() {
+            return None;
+        }
+        if delay > remaining {
+            delay = remaining;
+        }
+
+        if delay.is_zero() {
+            Some(Duration::from_millis(1))
+        } else {
+            Some(delay)
+        }
+    }
+
+    fn exponential_delay(policy: &RetryPolicy, attempt: u32) -> Duration {
+        let initial = policy.initial_delay_secs.max(1);
+        let factor = policy.backoff_factor.max(1) as u64;
+        let max_delay = policy.max_delay_secs.max(1);
+
+        let exponent = attempt.saturating_sub(1).min(20) as u32;
+        let multiplier = factor.saturating_pow(exponent);
+        let secs = initial.saturating_mul(multiplier).min(max_delay);
+        Duration::from_secs(secs)
+    }
+
+    fn parse_retry_after_headers(headers: &HeaderMap) -> Option<Duration> {
+        if let Some(v) = headers.get("retry-after-ms").and_then(|h| h.to_str().ok()) {
+            if let Ok(ms) = v.trim().parse::<u64>() {
+                if ms > 0 {
+                    return Some(Duration::from_millis(ms));
+                }
+            }
+        }
+
+        if let Some(v) = headers.get("retry-after").and_then(|h| h.to_str().ok()) {
+            let trimmed = v.trim();
+            if let Ok(secs) = trimmed.parse::<u64>() {
+                if secs > 0 {
+                    return Some(Duration::from_secs(secs));
+                }
+            }
+
+            if let Ok(http_date) = DateTime::parse_from_rfc2822(trimmed) {
+                let now = Utc::now();
+                let target = http_date.with_timezone(&Utc);
+                if target > now {
+                    let millis = (target - now).num_milliseconds();
+                    if millis > 0 {
+                        return Some(Duration::from_millis(millis as u64));
+                    }
+                }
+            }
+        }
+
+        None
+    }
 }
 
 #[async_trait::async_trait]
@@ -438,11 +603,18 @@ impl Provider for OpenAICompatibleProvider {
         &self.name
     }
 
-    async fn chat(&self, messages: Vec<ChatMessage>) -> Result<ChatResponse> {
-        self.request_chat(serde_json::json!({
-            "model": self.model,
-            "messages": messages
-        }))
+    async fn chat(
+        &self,
+        messages: Vec<ChatMessage>,
+        retry_policy: Option<&RetryPolicy>,
+    ) -> Result<ChatResponse> {
+        self.request_chat(
+            serde_json::json!({
+                "model": self.model,
+                "messages": messages
+            }),
+            retry_policy,
+        )
         .await
     }
 
@@ -450,13 +622,17 @@ impl Provider for OpenAICompatibleProvider {
         &self,
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
+        retry_policy: Option<&RetryPolicy>,
     ) -> Result<ChatResponse> {
-        self.request_chat(serde_json::json!({
-            "model": self.model,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto"
-        }))
+        self.request_chat(
+            serde_json::json!({
+                "model": self.model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto"
+            }),
+            retry_policy,
+        )
         .await
     }
 
@@ -504,11 +680,12 @@ impl ProviderRouter {
         &self,
         messages: Vec<ChatMessage>,
         provider: Option<&str>,
+        retry_policy: Option<&RetryPolicy>,
     ) -> Result<ChatResponse> {
         let provider = self
             .get_provider(provider)
             .ok_or_else(|| anyhow::anyhow!("Provider not found"))?;
-        provider.chat(messages).await
+        provider.chat(messages, retry_policy).await
     }
 
     pub async fn chat_with_tools(
@@ -516,17 +693,22 @@ impl ProviderRouter {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
         provider: Option<&str>,
+        retry_policy: Option<&RetryPolicy>,
     ) -> Result<ChatResponse> {
         let provider = self
             .get_provider(provider)
             .ok_or_else(|| anyhow::anyhow!("Provider not found"))?;
-        provider.chat_with_tools(messages, tools).await
+        provider
+            .chat_with_tools(messages, tools, retry_policy)
+            .await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::OpenAICompatibleProvider;
+    use super::{OpenAICompatibleProvider, RetryPolicy};
+    use reqwest::header::{HeaderMap, HeaderValue};
+    use std::time::Duration;
 
     #[test]
     fn parse_response_errors_on_missing_choices() {
@@ -673,5 +855,37 @@ mod tests {
         assert!(content.contains("Eseguo una ricerca."));
         assert!(content.contains("Attendo il risultato."));
         assert!(!content.contains("### TOOL_CALL"));
+    }
+
+    #[test]
+    fn retry_header_precedence_prefers_retry_after_ms() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after-ms", HeaderValue::from_static("1500"));
+        headers.insert("retry-after", HeaderValue::from_static("99"));
+
+        let delay =
+            OpenAICompatibleProvider::parse_retry_after_headers(&headers).expect("expected delay");
+        assert_eq!(delay, Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn retry_fallback_sequence_has_exponential_cap() {
+        let policy = RetryPolicy::default();
+        assert_eq!(
+            OpenAICompatibleProvider::exponential_delay(&policy, 1),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            OpenAICompatibleProvider::exponential_delay(&policy, 2),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            OpenAICompatibleProvider::exponential_delay(&policy, 5),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            OpenAICompatibleProvider::exponential_delay(&policy, 6),
+            Duration::from_secs(30)
+        );
     }
 }

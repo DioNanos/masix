@@ -3,20 +3,41 @@
 //! Main runtime orchestration with MCP + Cron + LLM support
 
 use anyhow::Result;
-use masix_config::Config;
+use masix_config::{Config, RetryPolicyConfig};
 use masix_ipc::{Envelope, EventBus, MessageKind, OutboundMessage};
 use masix_mcp::McpClient;
 use masix_policy::PolicyEngine;
 use masix_providers::{
-    ChatMessage, OpenAICompatibleProvider, ProviderRouter, ToolCall, ToolDefinition,
+    ChatMessage, OpenAICompatibleProvider, ProviderRouter, RetryPolicy, ToolCall, ToolDefinition,
 };
 use masix_storage::Storage;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::fs::{self, OpenOptions};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{error, info, warn};
 
 const MAX_TOOL_ITERATIONS: usize = 5;
+const MEMORY_MAX_CONTEXT_ENTRIES: usize = 12;
+
+#[derive(Debug, Clone)]
+struct BotContext {
+    profile_name: String,
+    workdir: PathBuf,
+    memory_dir: PathBuf,
+    memory_file: PathBuf,
+    provider_chain: Vec<String>,
+    retry_policy: RetryPolicy,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ChatMemoryEntry {
+    role: String,
+    content: String,
+    ts: String,
+}
 
 pub struct MasixRuntime {
     config: Config,
@@ -90,8 +111,11 @@ impl MasixRuntime {
         self.init_mcp_servers().await;
 
         let outbound_sender = self.event_bus.outbound_sender();
+        let base_data_dir = self.get_data_dir()?;
+        let bot_contexts = Arc::new(self.build_bot_contexts(&base_data_dir)?);
 
-        self.start_telegram_adapters().await?;
+        self.start_telegram_adapters(Arc::clone(&bot_contexts))
+            .await?;
 
         let mut inbound_rx = self.event_bus.subscribe();
         let outbound_for_processor = outbound_sender.clone();
@@ -102,6 +126,7 @@ impl MasixRuntime {
         let policy = self.policy.clone();
         let rate_state: Arc<Mutex<HashMap<String, (i64, u32)>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let bot_contexts_for_processor = Arc::clone(&bot_contexts);
 
         tokio::spawn(async move {
             let mut cron_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
@@ -119,6 +144,7 @@ impl MasixRuntime {
                                     &system_prompt,
                                     &policy,
                                     &rate_state,
+                                    &bot_contexts_for_processor,
                                 ).await {
                                     error!("Error processing inbound message: {}", e);
                                 }
@@ -212,7 +238,10 @@ impl MasixRuntime {
         }
     }
 
-    async fn start_telegram_adapters(&self) -> Result<()> {
+    async fn start_telegram_adapters(
+        &self,
+        bot_contexts: Arc<HashMap<String, BotContext>>,
+    ) -> Result<()> {
         if let Some(telegram_config) = &self.config.telegram {
             let data_dir = self.get_data_dir()?;
             let poll_timeout = telegram_config.poll_timeout_secs;
@@ -222,7 +251,11 @@ impl MasixRuntime {
                 info!("Telegram adapter enabled for account #{}", idx + 1);
 
                 let account_clone = account.clone();
-                let data_dir_clone = data_dir.clone();
+                let account_tag = Self::account_tag_from_token(&account.bot_token);
+                let data_dir_clone = bot_contexts
+                    .get(&account_tag)
+                    .map(|ctx| ctx.workdir.clone())
+                    .unwrap_or_else(|| data_dir.clone());
                 let event_bus = self.event_bus.clone();
 
                 tokio::spawn(async move {
@@ -253,6 +286,143 @@ impl MasixRuntime {
             }
         }
         Ok(())
+    }
+
+    fn build_bot_contexts(&self, base_data_dir: &Path) -> Result<HashMap<String, BotContext>> {
+        let mut contexts = HashMap::new();
+        let default_context = self.default_bot_context(base_data_dir)?;
+        contexts.insert("__default__".to_string(), default_context.clone());
+
+        let mut profile_map: HashMap<String, &masix_config::BotProfileConfig> = HashMap::new();
+        if let Some(bots) = &self.config.bots {
+            for profile in &bots.profiles {
+                profile_map.insert(profile.name.clone(), profile);
+            }
+        }
+
+        if let Some(telegram) = &self.config.telegram {
+            for account in &telegram.accounts {
+                let account_tag = Self::account_tag_from_token(&account.bot_token);
+                let context = if let Some(profile_name) = &account.bot_profile {
+                    if let Some(profile) = profile_map.get(profile_name) {
+                        let workdir =
+                            Self::resolve_path_with_base(&profile.workdir, base_data_dir)?;
+                        let memory_file =
+                            Self::resolve_path_with_base(&profile.memory_file, &workdir)?;
+                        let mut provider_chain = vec![profile.provider_primary.clone()];
+                        provider_chain.extend(profile.provider_fallback.clone());
+
+                        BotContext {
+                            profile_name: profile.name.clone(),
+                            memory_dir: workdir.join("memory"),
+                            workdir,
+                            memory_file,
+                            provider_chain,
+                            retry_policy: Self::retry_policy_from_config(profile.retry.as_ref()),
+                        }
+                    } else {
+                        default_context.clone()
+                    }
+                } else {
+                    default_context.clone()
+                };
+
+                Self::ensure_bot_context_dirs(&context)?;
+                contexts.insert(account_tag, context);
+            }
+        }
+
+        Ok(contexts)
+    }
+
+    fn default_bot_context(&self, base_data_dir: &Path) -> Result<BotContext> {
+        let workdir = base_data_dir.to_path_buf();
+        let memory_file = if let Some(path) = &self.config.core.soul_file {
+            Self::resolve_path_with_base(path, base_data_dir)?
+        } else {
+            workdir.join("MEMORY.md")
+        };
+        let context = BotContext {
+            profile_name: "default".to_string(),
+            workdir: workdir.clone(),
+            memory_dir: workdir.join("memory/default"),
+            memory_file,
+            provider_chain: vec![self.config.providers.default_provider.clone()],
+            retry_policy: RetryPolicy::default(),
+        };
+        Self::ensure_bot_context_dirs(&context)?;
+        Ok(context)
+    }
+
+    fn ensure_bot_context_dirs(context: &BotContext) -> Result<()> {
+        std::fs::create_dir_all(&context.workdir)?;
+        std::fs::create_dir_all(&context.memory_dir)?;
+        if let Some(parent) = context.memory_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if !context.memory_file.exists() {
+            std::fs::write(&context.memory_file, "")?;
+        }
+        Ok(())
+    }
+
+    fn resolve_path_with_base(path: &str, base: &Path) -> Result<PathBuf> {
+        if path == "~" || path.starts_with("~/") {
+            let home =
+                dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Home directory not found"))?;
+            if path == "~" {
+                Ok(home)
+            } else {
+                Ok(home.join(path.trim_start_matches("~/")))
+            }
+        } else {
+            let p = PathBuf::from(path);
+            if p.is_absolute() {
+                Ok(p)
+            } else {
+                Ok(base.join(p))
+            }
+        }
+    }
+
+    fn retry_policy_from_config(config: Option<&RetryPolicyConfig>) -> RetryPolicy {
+        let default = RetryPolicy::default();
+        if let Some(cfg) = config {
+            RetryPolicy {
+                window_secs: cfg.window_secs.unwrap_or(default.window_secs),
+                initial_delay_secs: cfg.initial_delay_secs.unwrap_or(default.initial_delay_secs),
+                backoff_factor: cfg.backoff_factor.unwrap_or(default.backoff_factor),
+                max_delay_secs: cfg.max_delay_secs.unwrap_or(default.max_delay_secs),
+            }
+        } else {
+            default
+        }
+    }
+
+    fn account_tag_from_token(token: &str) -> String {
+        token.split(':').next().unwrap_or("default").to_string()
+    }
+
+    fn resolve_bot_context(
+        bot_contexts: &Arc<HashMap<String, BotContext>>,
+        account_tag: Option<&str>,
+    ) -> BotContext {
+        if let Some(tag) = account_tag {
+            if let Some(ctx) = bot_contexts.get(tag) {
+                return ctx.clone();
+            }
+        }
+        bot_contexts
+            .get("__default__")
+            .cloned()
+            .unwrap_or(BotContext {
+                profile_name: "default".to_string(),
+                workdir: PathBuf::from("."),
+                memory_dir: PathBuf::from("./memory/default"),
+                memory_file: PathBuf::from("./MEMORY.md"),
+                provider_chain: vec!["openai".to_string()],
+                retry_policy: RetryPolicy::default(),
+            })
     }
 
     async fn get_mcp_tools(mcp_client: &Option<Arc<Mutex<McpClient>>>) -> Vec<ToolDefinition> {
@@ -333,12 +503,14 @@ impl MasixRuntime {
         system_prompt: &str,
         policy: &PolicyEngine,
         rate_state: &Arc<Mutex<HashMap<String, (i64, u32)>>>,
+        bot_contexts: &Arc<HashMap<String, BotContext>>,
     ) -> Result<()> {
         let account_tag = envelope
             .payload
             .get("account_tag")
             .and_then(|v| v.as_str())
             .map(|value| value.to_string());
+        let bot_context = Self::resolve_bot_context(bot_contexts, account_tag.as_deref());
 
         match &envelope.kind {
             MessageKind::Message { from, text } => {
@@ -415,26 +587,41 @@ impl MasixRuntime {
 
                 let tools = Self::get_mcp_tools(mcp_client).await;
                 let has_tools = !tools.is_empty();
+                let mut system_context = system_prompt.to_string();
+                if let Some(memory) = Self::load_bot_memory_file(&bot_context).await {
+                    if !memory.trim().is_empty() {
+                        system_context.push_str("\n\n# Bot Memory\n");
+                        system_context.push_str(&memory);
+                    }
+                }
 
-                let mut messages = vec![
-                    ChatMessage {
-                        role: "system".to_string(),
-                        content: Some(system_prompt.to_string()),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        name: None,
-                    },
-                    ChatMessage {
-                        role: "user".to_string(),
-                        content: Some(text.clone()),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        name: None,
-                    },
-                ];
+                let mut messages = vec![ChatMessage {
+                    role: "system".to_string(),
+                    content: Some(system_context),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                }];
+                if let Some(chat_id) = envelope.chat_id {
+                    let history = Self::load_chat_memory_history(
+                        &bot_context,
+                        chat_id,
+                        MEMORY_MAX_CONTEXT_ENTRIES,
+                    )
+                    .await;
+                    messages.extend(history);
+                }
+                messages.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: Some(text.clone()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                });
 
                 let mut final_response = String::new();
                 let mut iterations = 0;
+                let mut selected_provider: Option<String> = None;
 
                 loop {
                     iterations += 1;
@@ -443,13 +630,30 @@ impl MasixRuntime {
                         break;
                     }
 
-                    let response = if has_tools {
-                        provider_router
-                            .chat_with_tools(messages.clone(), tools.clone(), None)
-                            .await?
+                    let (response, provider_used) = if has_tools {
+                        Self::chat_with_fallback_chain(
+                            provider_router,
+                            messages.clone(),
+                            Some(tools.clone()),
+                            &bot_context.provider_chain,
+                            selected_provider.as_deref(),
+                            &bot_context.retry_policy,
+                            &bot_context.profile_name,
+                        )
+                        .await?
                     } else {
-                        provider_router.chat(messages.clone(), None).await?
+                        Self::chat_with_fallback_chain(
+                            provider_router,
+                            messages.clone(),
+                            None,
+                            &bot_context.provider_chain,
+                            selected_provider.as_deref(),
+                            &bot_context.retry_policy,
+                            &bot_context.profile_name,
+                        )
+                        .await?
                     };
+                    selected_provider = Some(provider_used);
 
                     if let Some(content) = &response.content {
                         if !content.is_empty() {
@@ -499,6 +703,18 @@ impl MasixRuntime {
                 }
 
                 if let Some(chat_id) = envelope.chat_id {
+                    let _ = Self::append_chat_memory(&bot_context, chat_id, "user", text).await;
+                    let _ = Self::append_chat_memory(
+                        &bot_context,
+                        chat_id,
+                        "assistant",
+                        &final_response,
+                    )
+                    .await;
+                    let _ = Self::update_summary_snapshot(&bot_context, chat_id).await;
+                }
+
+                if let Some(chat_id) = envelope.chat_id {
                     let msg = OutboundMessage {
                         channel: envelope.channel.clone(),
                         account_tag: account_tag.clone(),
@@ -540,6 +756,208 @@ impl MasixRuntime {
             }
         }
 
+        Ok(())
+    }
+
+    async fn chat_with_fallback_chain(
+        provider_router: &ProviderRouter,
+        messages: Vec<ChatMessage>,
+        tools: Option<Vec<ToolDefinition>>,
+        provider_chain: &[String],
+        preferred_provider: Option<&str>,
+        retry_policy: &RetryPolicy,
+        profile_name: &str,
+    ) -> Result<(masix_providers::ChatResponse, String)> {
+        if let Some(provider_name) = preferred_provider {
+            let response = if let Some(tool_defs) = &tools {
+                provider_router
+                    .chat_with_tools(
+                        messages,
+                        tool_defs.clone(),
+                        Some(provider_name),
+                        Some(retry_policy),
+                    )
+                    .await?
+            } else {
+                provider_router
+                    .chat(messages, Some(provider_name), Some(retry_policy))
+                    .await?
+            };
+            return Ok((response, provider_name.to_string()));
+        }
+
+        let mut last_error: Option<anyhow::Error> = None;
+        let chain = if provider_chain.is_empty() {
+            vec!["".to_string()]
+        } else {
+            provider_chain.to_vec()
+        };
+
+        for provider_name in chain {
+            let result = if let Some(tool_defs) = &tools {
+                provider_router
+                    .chat_with_tools(
+                        messages.clone(),
+                        tool_defs.clone(),
+                        if provider_name.is_empty() {
+                            None
+                        } else {
+                            Some(provider_name.as_str())
+                        },
+                        Some(retry_policy),
+                    )
+                    .await
+            } else {
+                provider_router
+                    .chat(
+                        messages.clone(),
+                        if provider_name.is_empty() {
+                            None
+                        } else {
+                            Some(provider_name.as_str())
+                        },
+                        Some(retry_policy),
+                    )
+                    .await
+            };
+
+            match result {
+                Ok(response) => {
+                    let used = if provider_name.is_empty() {
+                        "default".to_string()
+                    } else {
+                        provider_name
+                    };
+                    return Ok((response, used));
+                }
+                Err(e) => {
+                    let provider_label = if provider_name.is_empty() {
+                        "default"
+                    } else {
+                        provider_name.as_str()
+                    };
+
+                    if Self::is_auth_error(&e) {
+                        return Err(anyhow::anyhow!(
+                            "Provider '{}' auth/permission error for bot '{}': {}",
+                            provider_label,
+                            profile_name,
+                            e
+                        ));
+                    }
+
+                    warn!(
+                        "Provider '{}' failed for bot '{}', trying fallback: {}",
+                        provider_label, profile_name, e
+                    );
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No provider available")))
+    }
+
+    fn is_auth_error(err: &anyhow::Error) -> bool {
+        let msg = err.to_string().to_lowercase();
+        msg.contains("401")
+            || msg.contains("403")
+            || msg.contains("unauthorized")
+            || msg.contains("forbidden")
+            || msg.contains("api key")
+    }
+
+    async fn load_bot_memory_file(context: &BotContext) -> Option<String> {
+        fs::read_to_string(&context.memory_file).await.ok()
+    }
+
+    async fn load_chat_memory_history(
+        context: &BotContext,
+        chat_id: i64,
+        max_entries: usize,
+    ) -> Vec<ChatMessage> {
+        let path = context.memory_dir.join(format!("chat_{}.jsonl", chat_id));
+        let content = match fs::read_to_string(path).await {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut entries = Vec::new();
+        for line in content.lines() {
+            if let Ok(entry) = serde_json::from_str::<ChatMemoryEntry>(line) {
+                if !entry.content.trim().is_empty()
+                    && (entry.role == "user" || entry.role == "assistant")
+                {
+                    entries.push(entry);
+                }
+            }
+        }
+
+        let start = entries.len().saturating_sub(max_entries);
+        entries[start..]
+            .iter()
+            .map(|entry| ChatMessage {
+                role: entry.role.clone(),
+                content: Some(entry.content.clone()),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            })
+            .collect()
+    }
+
+    async fn append_chat_memory(
+        context: &BotContext,
+        chat_id: i64,
+        role: &str,
+        content: &str,
+    ) -> Result<()> {
+        if content.trim().is_empty() {
+            return Ok(());
+        }
+        fs::create_dir_all(&context.memory_dir).await?;
+        let path = context.memory_dir.join(format!("chat_{}.jsonl", chat_id));
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await?;
+        let entry = ChatMemoryEntry {
+            role: role.to_string(),
+            content: content.to_string(),
+            ts: chrono::Utc::now().to_rfc3339(),
+        };
+        let line = serde_json::to_string(&entry)?;
+        file.write_all(line.as_bytes()).await?;
+        file.write_all(b"\n").await?;
+        Ok(())
+    }
+
+    async fn update_summary_snapshot(context: &BotContext, chat_id: i64) -> Result<()> {
+        let history = Self::load_chat_memory_history(context, chat_id, 6).await;
+        if history.is_empty() {
+            return Ok(());
+        }
+
+        let mut lines = vec![
+            format!("# Chat Summary ({})", chat_id),
+            format!("Updated: {}", chrono::Utc::now().to_rfc3339()),
+            String::new(),
+        ];
+
+        for msg in history {
+            let role = msg.role;
+            let content = msg.content.unwrap_or_default();
+            let shortened = if content.chars().count() > 220 {
+                format!("{}...", content.chars().take(220).collect::<String>())
+            } else {
+                content
+            };
+            lines.push(format!("- {}: {}", role, shortened.replace('\n', " ")));
+        }
+
+        let path = context.memory_dir.join(format!("summary_{}.md", chat_id));
+        fs::write(path, lines.join("\n")).await?;
         Ok(())
     }
 
@@ -619,7 +1037,7 @@ impl MasixRuntime {
     }
 
     pub async fn chat(&self, messages: Vec<ChatMessage>, provider: Option<&str>) -> Result<String> {
-        let response = self.provider_router.chat(messages, provider).await?;
+        let response = self.provider_router.chat(messages, provider, None).await?;
         Ok(response.content.unwrap_or_default())
     }
 }

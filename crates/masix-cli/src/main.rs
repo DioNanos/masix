@@ -129,6 +129,8 @@ enum ConfigCommands {
     Init,
     /// Show current configuration
     Show,
+    /// Validate configuration
+    Validate,
 }
 
 #[tokio::main]
@@ -365,6 +367,10 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => eprintln!("Error loading config: {}", e),
             },
+            ConfigCommands::Validate => match load_config(cli.config) {
+                Ok(_) => println!("Configuration is valid."),
+                Err(e) => eprintln!("Configuration is invalid: {}", e),
+            },
         },
 
         Commands::Stats => {
@@ -385,8 +391,35 @@ async fn main() -> Result<()> {
                     config.providers.providers.len()
                 );
 
+                if let Some(bots) = &config.bots {
+                    println!("  Bot profiles: {}", bots.profiles.len());
+                    println!(
+                        "  Strict bot/profile mapping: {}",
+                        bots.strict_account_profile_mapping.unwrap_or(false)
+                    );
+                    for profile in &bots.profiles {
+                        println!(
+                            "    - {} => primary: {}, fallback: {}",
+                            profile.name,
+                            profile.provider_primary,
+                            if profile.provider_fallback.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                profile.provider_fallback.join(", ")
+                            }
+                        );
+                    }
+                }
+
                 if let Some(telegram) = &config.telegram {
                     println!("  Telegram accounts: {}", telegram.accounts.len());
+                    for (idx, account) in telegram.accounts.iter().enumerate() {
+                        println!(
+                            "    - account #{} bot_profile: {}",
+                            idx + 1,
+                            account.bot_profile.as_deref().unwrap_or("(default)")
+                        );
+                    }
                 }
 
                 if let Some(mcp) = &config.mcp {

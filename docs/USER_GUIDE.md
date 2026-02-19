@@ -229,6 +229,12 @@ masix start
 
 Starts the full runtime (adapters, inbound processing, provider routing, tool-calling, outbound responses).
 
+When `bots.profiles` are configured:
+
+- runtime resolves bot context from Telegram account (`account_tag`)
+- each bot uses primary provider plus configured fallback chain
+- each bot stores memory files in its own workdir
+
 ## 3.2 Telegram
 
 ```bash
@@ -275,9 +281,11 @@ masix cron cancel 1
 ```bash
 masix config init
 masix config show
+masix config validate
 ```
 
 - `show`: redacted output for safe diagnostics
+- `validate`: checks provider/profile mapping and config consistency
 
 ## 3.7 Stats / Version
 
