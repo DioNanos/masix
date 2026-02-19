@@ -601,6 +601,7 @@ mod tests {
         let account = TelegramAccount {
             bot_token: "123456:TESTTOKEN".to_string(),
             allowed_chats: None,
+            bot_profile: None,
         };
         TelegramAdapter::new(&account, std::env::temp_dir(), Some(60), Some(60))
     }

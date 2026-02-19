@@ -3,6 +3,7 @@
 //! TOML configuration loading with environment variable support
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +14,7 @@ pub struct Config {
     pub sms: Option<SmsConfig>,
     pub mcp: Option<McpConfig>,
     pub providers: ProvidersConfig,
+    pub bots: Option<BotsConfig>,
     pub policy: Option<PolicyConfig>,
 }
 
@@ -36,6 +38,7 @@ pub struct TelegramConfig {
 pub struct TelegramAccount {
     pub bot_token: String,
     pub allowed_chats: Option<Vec<i64>>,
+    pub bot_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +101,33 @@ pub struct ProviderConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotsConfig {
+    #[serde(default)]
+    pub strict_account_profile_mapping: Option<bool>,
+    #[serde(default)]
+    pub profiles: Vec<BotProfileConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotProfileConfig {
+    pub name: String,
+    pub workdir: String,
+    pub memory_file: String,
+    pub provider_primary: String,
+    #[serde(default)]
+    pub provider_fallback: Vec<String>,
+    pub retry: Option<RetryPolicyConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryPolicyConfig {
+    pub window_secs: Option<u64>,
+    pub initial_delay_secs: Option<u64>,
+    pub backoff_factor: Option<u32>,
+    pub max_delay_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyConfig {
     pub allowlist: Option<Vec<String>>,
     pub denylist: Option<Vec<String>>,
@@ -113,10 +143,263 @@ impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())?;
         let config: Config = toml::from_str(&content)?;
+        config.validate()?;
         Ok(config)
     }
 
     pub fn default_path() -> Option<std::path::PathBuf> {
         dirs::config_dir().map(|dir| dir.join("masix").join("config.toml"))
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let mut provider_names = HashSet::new();
+        for provider in &self.providers.providers {
+            let name = provider.name.trim();
+            if name.is_empty() {
+                anyhow::bail!("Provider name cannot be empty");
+            }
+            if !provider_names.insert(name.to_string()) {
+                anyhow::bail!("Duplicate provider name '{}'", name);
+            }
+        }
+
+        if !provider_names.contains(&self.providers.default_provider) {
+            anyhow::bail!(
+                "default_provider '{}' is not defined in providers.providers",
+                self.providers.default_provider
+            );
+        }
+
+        let mut profile_names = HashSet::new();
+        let mut has_profiles = false;
+        let mut strict_mapping = false;
+
+        if let Some(bots) = &self.bots {
+            has_profiles = !bots.profiles.is_empty();
+            strict_mapping = bots.strict_account_profile_mapping.unwrap_or(false);
+
+            for profile in &bots.profiles {
+                let profile_name = profile.name.trim();
+                if profile_name.is_empty() {
+                    anyhow::bail!("Bot profile name cannot be empty");
+                }
+                if !profile_names.insert(profile_name.to_string()) {
+                    anyhow::bail!("Duplicate bot profile '{}'", profile_name);
+                }
+
+                if profile.workdir.trim().is_empty() {
+                    anyhow::bail!("Bot profile '{}' has empty workdir", profile_name);
+                }
+                if profile.memory_file.trim().is_empty() {
+                    anyhow::bail!("Bot profile '{}' has empty memory_file", profile_name);
+                }
+
+                if !provider_names.contains(profile.provider_primary.trim()) {
+                    anyhow::bail!(
+                        "Bot profile '{}' primary provider '{}' is not defined",
+                        profile_name,
+                        profile.provider_primary
+                    );
+                }
+
+                let mut seen_fallbacks = HashSet::new();
+                for fallback in &profile.provider_fallback {
+                    let f = fallback.trim();
+                    if f.is_empty() {
+                        anyhow::bail!(
+                            "Bot profile '{}' contains empty fallback provider entry",
+                            profile_name
+                        );
+                    }
+                    if !provider_names.contains(f) {
+                        anyhow::bail!(
+                            "Bot profile '{}' fallback provider '{}' is not defined",
+                            profile_name,
+                            f
+                        );
+                    }
+                    if !seen_fallbacks.insert(f.to_string()) {
+                        anyhow::bail!(
+                            "Bot profile '{}' contains duplicate fallback provider '{}'",
+                            profile_name,
+                            f
+                        );
+                    }
+                }
+
+                if let Some(retry) = &profile.retry {
+                    if let Some(window) = retry.window_secs {
+                        if window == 0 {
+                            anyhow::bail!(
+                                "Bot profile '{}' retry.window_secs must be > 0",
+                                profile_name
+                            );
+                        }
+                    }
+                    if let Some(initial) = retry.initial_delay_secs {
+                        if initial == 0 {
+                            anyhow::bail!(
+                                "Bot profile '{}' retry.initial_delay_secs must be > 0",
+                                profile_name
+                            );
+                        }
+                    }
+                    if let Some(factor) = retry.backoff_factor {
+                        if factor < 1 {
+                            anyhow::bail!(
+                                "Bot profile '{}' retry.backoff_factor must be >= 1",
+                                profile_name
+                            );
+                        }
+                    }
+                    if let Some(max_delay) = retry.max_delay_secs {
+                        if max_delay == 0 {
+                            anyhow::bail!(
+                                "Bot profile '{}' retry.max_delay_secs must be > 0",
+                                profile_name
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(telegram) = &self.telegram {
+            for account in &telegram.accounts {
+                if let Some(profile_name) = &account.bot_profile {
+                    if !has_profiles {
+                        anyhow::bail!(
+                            "Telegram account references bot_profile '{}' but no bots.profiles are defined",
+                            profile_name
+                        );
+                    }
+                    if !profile_names.contains(profile_name) {
+                        anyhow::bail!(
+                            "Telegram account references unknown bot_profile '{}'",
+                            profile_name
+                        );
+                    }
+                } else if strict_mapping && has_profiles {
+                    anyhow::bail!(
+                        "strict_account_profile_mapping is enabled but a telegram account has no bot_profile"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    fn parse_config(input: &str) -> Config {
+        let cfg: Config = toml::from_str(input).expect("valid TOML");
+        cfg
+    }
+
+    #[test]
+    fn validate_accepts_legacy_config_without_bots() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+"#,
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_unknown_default_provider() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[providers]
+default_provider = "missing"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_unknown_bot_profile_in_telegram_account() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[telegram]
+[[telegram.accounts]]
+bot_token = "123:abc"
+bot_profile = "missing"
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+
+[bots]
+[[bots.profiles]]
+name = "ops"
+workdir = "~/.masix/bots/ops"
+memory_file = "~/.masix/bots/ops/MEMORY.md"
+provider_primary = "openai"
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_bot_profiles_with_valid_provider_chain() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[telegram]
+[[telegram.accounts]]
+bot_token = "123:abc"
+bot_profile = "ops"
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+
+[[providers.providers]]
+name = "openrouter"
+api_key = "k"
+
+[bots]
+strict_account_profile_mapping = true
+[[bots.profiles]]
+name = "ops"
+workdir = "~/.masix/bots/ops"
+memory_file = "~/.masix/bots/ops/MEMORY.md"
+provider_primary = "openai"
+provider_fallback = ["openrouter"]
+[bots.profiles.retry]
+window_secs = 600
+initial_delay_secs = 2
+backoff_factor = 2
+max_delay_secs = 30
+"#,
+        );
+        assert!(cfg.validate().is_ok());
     }
 }

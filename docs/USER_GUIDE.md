@@ -79,6 +79,7 @@ client_recreate_interval_secs = 60
 
 [[telegram.accounts]]
 bot_token = "YOUR_TELEGRAM_BOT_TOKEN"
+# bot_profile = "ops_bot"
 
 [mcp]
 enabled = true
@@ -162,7 +163,58 @@ Notes:
   - z.ai: `https://docs.z.ai/`
   - chutes.ai: `https://docs.chutes.ai/`
 
-### 2.3 Secret handling
+### 2.3 Per-bot model selection and fallback
+
+Use `bots.profiles` to assign model chains per bot and isolate workdir/memory.
+
+Example:
+
+```toml
+[telegram]
+poll_timeout_secs = 60
+client_recreate_interval_secs = 60
+
+[[telegram.accounts]]
+bot_token = "BOT_A_TOKEN"
+allowed_chats = [111111111]
+bot_profile = "ops_bot"
+
+[[telegram.accounts]]
+bot_token = "BOT_B_TOKEN"
+allowed_chats = [222222222]
+bot_profile = "sales_bot"
+
+[bots]
+strict_account_profile_mapping = true
+
+[[bots.profiles]]
+name = "ops_bot"
+workdir = "~/.masix/bots/ops_bot"
+memory_file = "~/.masix/bots/ops_bot/MEMORY.md"
+provider_primary = "openrouter"
+provider_fallback = ["zai", "openai", "llama_local"]
+
+[bots.profiles.retry]
+window_secs = 600
+initial_delay_secs = 2
+backoff_factor = 2
+max_delay_secs = 30
+
+[[bots.profiles]]
+name = "sales_bot"
+workdir = "~/.masix/bots/sales_bot"
+memory_file = "~/.masix/bots/sales_bot/MEMORY.md"
+provider_primary = "openai"
+provider_fallback = ["openrouter"]
+```
+
+Notes:
+
+- Each `telegram.accounts[].bot_profile` must exist in `bots.profiles`.
+- `provider_primary` and each fallback provider must exist in `providers.providers`.
+- `strict_account_profile_mapping = true` enforces profile mapping for every Telegram account.
+
+### 2.4 Secret handling
 
 - `masix config show` prints a redacted view (`***REDACTED***`)
 - Do not commit real keys/tokens to git

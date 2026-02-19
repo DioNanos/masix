@@ -13,6 +13,7 @@ default_policy = "mention_only"
 [[telegram.accounts]]
 bot_token = "YOUR_BOT_TOKEN_HERE"
 # allowed_chats = [123456789, -987654321]
+# bot_profile = "ops_bot"
 
 [whatsapp]
 enabled = false
@@ -82,6 +83,24 @@ model = "deepseek-r1:7b"
 # api_key = "YOUR_CHUTES_API_KEY"
 # base_url = "https://llm.chutes.ai/v1"
 # model = "zai-org/GLM-5-TEE"
+
+# Optional per-bot isolation and model fallback chains
+#
+# [bots]
+# strict_account_profile_mapping = false
+#
+# [[bots.profiles]]
+# name = "ops_bot"
+# workdir = "~/.masix/bots/ops_bot"
+# memory_file = "~/.masix/bots/ops_bot/MEMORY.md"
+# provider_primary = "openrouter"
+# provider_fallback = ["zai", "openai", "ollama"]
+#
+# [bots.profiles.retry]
+# window_secs = 600
+# initial_delay_secs = 2
+# backoff_factor = 2
+# max_delay_secs = 30
 
 [policy]
 # allowlist = ["123456789"]
