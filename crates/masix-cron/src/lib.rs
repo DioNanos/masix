@@ -249,9 +249,14 @@ impl CronExecutor {
                         let message = job.message.clone();
 
                         if let Ok(chat_id) = recipient.parse::<i64>() {
+                            let account_tag = if job.account_tag == "__default__" {
+                                None
+                            } else {
+                                Some(job.account_tag.clone())
+                            };
                             let msg = masix_ipc::OutboundMessage {
                                 channel,
-                                account_tag: None,
+                                account_tag,
                                 chat_id,
                                 text: message,
                                 reply_to: None,

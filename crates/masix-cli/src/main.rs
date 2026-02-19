@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use masix_config::Config;
 use masix_core::MasixRuntime;
+use masix_exec::{manage_termux_boot, BootAction};
 use masix_storage::Storage;
 use serde_json::json;
 use tracing::info;
@@ -55,6 +56,12 @@ enum Commands {
     Cron {
         #[command(subcommand)]
         action: CronCommands,
+    },
+
+    /// Termux specific commands
+    Termux {
+        #[command(subcommand)]
+        action: TermuxCommands,
     },
 
     /// Configuration commands
@@ -113,14 +120,46 @@ enum CronCommands {
     Add {
         /// Natural language schedule (e.g., "Manda domani alle 11 sms a Gino \"Ricorda la partita\"")
         schedule: String,
+        /// Optional account tag scope (Telegram bot id prefix)
+        #[arg(long)]
+        account_tag: Option<String>,
+        /// Optional default recipient override
+        #[arg(long)]
+        recipient: Option<String>,
     },
     /// List cron jobs
-    List,
+    List {
+        /// Optional account tag scope
+        #[arg(long)]
+        account_tag: Option<String>,
+        /// Optional recipient filter
+        #[arg(long)]
+        recipient: Option<String>,
+    },
     /// Cancel a cron job
     Cancel {
         /// Cron job ID
         id: i64,
+        /// Optional account tag scope
+        #[arg(long)]
+        account_tag: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum TermuxCommands {
+    /// Configure MasiX startup at Android boot (Termux:Boot)
+    Boot {
+        #[command(subcommand)]
+        action: TermuxBootCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum TermuxBootCommands {
+    Enable,
+    Disable,
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -283,23 +322,33 @@ async fn main() -> Result<()> {
             let storage = Storage::new(&db_path)?;
 
             match action {
-                CronCommands::Add { schedule } => {
+                CronCommands::Add {
+                    schedule,
+                    account_tag,
+                    recipient,
+                } => {
                     println!("Creating cron job: {}", schedule);
 
                     let parser = masix_cron::CronParser::new();
-                    match parser.parse(&schedule, "telegram", "default") {
+                    let default_recipient = recipient.unwrap_or_else(|| "default".to_string());
+                    match parser.parse(&schedule, "telegram", &default_recipient) {
                         Ok(parsed) => {
+                            let resolved_account_tag = account_tag
+                                .or_else(|| default_telegram_account_tag(&config))
+                                .unwrap_or_else(|| "__default__".to_string());
                             match storage.create_cron_job(
                                 "cli",
                                 &parsed.schedule,
                                 &parsed.channel,
                                 &parsed.recipient,
+                                Some(&resolved_account_tag),
                                 &parsed.message,
                                 &parsed.timezone,
                                 parsed.recurring,
                             ) {
                                 Ok(id) => {
                                     println!("Cron job created with ID: {}", id);
+                                    println!("  Account tag: {}", resolved_account_tag);
                                     println!("  Schedule: {}", parsed.schedule);
                                     println!("  Channel: {}", parsed.channel);
                                     println!("  Recipient: {}", parsed.recipient);
@@ -312,17 +361,30 @@ async fn main() -> Result<()> {
                         Err(e) => eprintln!("Parse error: {}", e),
                     }
                 }
-                CronCommands::List => {
+                CronCommands::List {
+                    account_tag,
+                    recipient,
+                } => {
                     println!("Listing cron jobs...");
-                    match storage.list_enabled_cron_jobs() {
+                    let jobs_result = if let Some(tag) = account_tag.as_deref() {
+                        if let Some(target) = recipient.as_deref() {
+                            storage.list_enabled_cron_jobs_for_account_recipient(tag, target)
+                        } else {
+                            storage.list_enabled_cron_jobs_for_account(tag)
+                        }
+                    } else {
+                        storage.list_enabled_cron_jobs()
+                    };
+
+                    match jobs_result {
                         Ok(jobs) => {
                             if jobs.is_empty() {
                                 println!("No active cron jobs found.");
                             } else {
                                 for job in jobs {
                                     println!(
-                                        "ID: {} | Channel: {} | Recipient: {}",
-                                        job.id, job.channel, job.recipient
+                                        "ID: {} | Account: {} | Channel: {} | Recipient: {}",
+                                        job.id, job.account_tag, job.channel, job.recipient
                                     );
                                     println!("  Message: {}", job.message);
                                     println!(
@@ -336,15 +398,53 @@ async fn main() -> Result<()> {
                         Err(e) => eprintln!("Error listing jobs: {}", e),
                     }
                 }
-                CronCommands::Cancel { id } => {
+                CronCommands::Cancel { id, account_tag } => {
                     println!("Cancelling cron job {}", id);
-                    match storage.disable_cron_job(id) {
+                    let result = if let Some(tag) = account_tag.as_deref() {
+                        match storage.disable_cron_job_for_account(id, tag) {
+                            Ok(true) => Ok(()),
+                            Ok(false) => {
+                                eprintln!("Cron job {} not found for account scope '{}'.", id, tag);
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        }
+                    } else {
+                        storage.disable_cron_job(id)
+                    };
+
+                    match result {
                         Ok(_) => println!("Cron job {} cancelled.", id),
                         Err(e) => eprintln!("Error: {}", e),
                     }
                 }
             }
         }
+
+        Commands::Termux { action } => match action {
+            TermuxCommands::Boot { action } => {
+                let boot_action = match action {
+                    TermuxBootCommands::Enable => BootAction::Enable,
+                    TermuxBootCommands::Disable => BootAction::Disable,
+                    TermuxBootCommands::Status => BootAction::Status,
+                };
+                let masix_bin = std::env::current_exe().unwrap_or_else(|_| "masix".into());
+                let config_path_buf = cli.config.clone().map(std::path::PathBuf::from);
+                match manage_termux_boot(boot_action, &masix_bin, config_path_buf.as_deref()).await
+                {
+                    Ok(status) => {
+                        println!("Script: {}", status.script_path.display());
+                        println!("Enabled: {}", status.enabled);
+                        if matches!(boot_action, BootAction::Enable) {
+                            println!(
+                                "Make sure Termux:Boot app is installed and permission granted."
+                            );
+                        }
+                    }
+                    Err(e) => eprintln!("Termux boot error: {}", e),
+                }
+            }
+        },
 
         Commands::Config { action } => match action {
             ConfigCommands::Init => {
@@ -462,6 +562,19 @@ fn load_config(config_path: Option<String>) -> Result<Config> {
     } else {
         anyhow::bail!("No config file found")
     }
+}
+
+fn default_telegram_account_tag(config: &Config) -> Option<String> {
+    config.telegram.as_ref().and_then(|telegram| {
+        telegram.accounts.first().map(|account| {
+            account
+                .bot_token
+                .split(':')
+                .next()
+                .unwrap_or("default")
+                .to_string()
+        })
+    })
 }
 
 fn get_data_dir(config: &Config) -> std::path::PathBuf {

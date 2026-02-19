@@ -102,6 +102,17 @@ model = "deepseek-r1:7b"
 # backoff_factor = 2
 # max_delay_secs = 30
 
+# Optional guarded command execution
+#
+# [exec]
+# enabled = true
+# allow_base = true
+# allow_termux = true
+# timeout_secs = 15
+# max_output_chars = 3500
+# base_allowlist = ["pwd", "ls", "date", "uname", "df", "free"]
+# termux_allowlist = ["termux-info", "termux-battery-status", "termux-location"]
+
 [policy]
 # allowlist = ["123456789"]
 # denylist = ["987654321"]

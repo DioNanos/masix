@@ -889,6 +889,7 @@ dependencies = [
  "masix-config",
  "masix-core",
  "masix-cron",
+ "masix-exec",
  "masix-sms",
  "masix-storage",
  "masix-telegram",
@@ -919,6 +920,8 @@ dependencies = [
  "chrono",
  "dirs",
  "masix-config",
+ "masix-cron",
+ "masix-exec",
  "masix-ipc",
  "masix-mcp",
  "masix-policy",
@@ -948,6 +951,17 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "masix-exec"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "shlex",
+ "tokio",
 ]
 
 [[package]]

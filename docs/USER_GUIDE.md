@@ -2,6 +2,8 @@
 
 This guide covers setup, commands, runtime behavior, and operational workflows.
 
+Last updated: 2026-02-19
+
 ## 1. Installation
 
 ### 1.1 Termux (Android)
@@ -153,7 +155,9 @@ default_provider = "llama_local"
 
 Notes:
 
-- Current runtime uses `default_provider` for inbound chat handling.
+- Runtime selection rules:
+  - If a Telegram account is mapped to `bots.profiles`, runtime uses that profile chain (`provider_primary` + `provider_fallback`).
+  - If no profile is mapped, runtime falls back to `[providers].default_provider`.
 - If your z.ai account/model requires coding endpoint, use:
   - `https://api.z.ai/api/coding/paas/v4`
 - For chutes.ai, verify your account docs if your tenant uses a different base URL.
@@ -219,6 +223,27 @@ Notes:
 - `masix config show` prints a redacted view (`***REDACTED***`)
 - Do not commit real keys/tokens to git
 
+### 2.5 Exec module (guarded command execution)
+
+`exec` is disabled by default and must be explicitly enabled.
+
+```toml
+[exec]
+enabled = true
+allow_base = true
+allow_termux = true
+timeout_secs = 15
+max_output_chars = 3500
+base_allowlist = ["pwd", "ls", "date", "uname", "df", "free"]
+termux_allowlist = ["termux-info", "termux-battery-status", "termux-location"]
+```
+
+Notes:
+
+- Commands run in the bot profile `workdir`
+- Only allowlisted binaries can run
+- Absolute paths, `..`, and unsafe shell characters are blocked
+
 ## 3. CLI Commands
 
 ## 3.1 Runtime
@@ -275,6 +300,16 @@ masix cron cancel 1
 - `add`: parses natural language and stores the schedule
 - `list`: shows enabled jobs
 - `cancel`: disables a job by ID
+- Jobs now carry an `account_tag` scope to prevent cross-bot execution
+
+Scoped examples:
+
+```bash
+masix cron add 'domani alle 9 "Ops check"' --account-tag 123456789
+masix cron list --account-tag 123456789
+masix cron list --account-tag 123456789 --recipient 111111111
+masix cron cancel 42 --account-tag 123456789
+```
 
 ## 3.6 Config
 
@@ -296,6 +331,27 @@ masix version
 
 - `stats`: prints runtime metadata, provider counts, DB size, active cron jobs
 
+## 3.8 Termux boot management
+
+```bash
+masix termux boot enable
+masix termux boot disable
+masix termux boot status
+```
+
+Notes:
+
+- This manages `~/.termux/boot/masix`
+- Requires Termux + Termux:Boot app
+- `enable` writes an auto-start script for `masix start`
+
+## 3.9 Cron scope behavior
+
+- Reminder jobs are saved with `account_tag` scope.
+- This prevents collisions when multiple Telegram bots share one DB.
+- Runtime `/cron` commands are scoped to current bot + current chat.
+- Legacy jobs without explicit scope are mapped to `__default__`.
+
 ## 4. Telegram Runtime Behavior
 
 ## 4.1 Interactive menus
@@ -313,6 +369,12 @@ Menu sections:
 - Settings
 
 Navigation uses callback queries and message editing when possible.
+
+Runtime commands available in chat:
+
+- `/cron ...`, `/cron list`, `/cron cancel <id>`
+- `/exec <allowlisted-command>`
+- `/termux info|battery|cmd <termux-command>|boot on|off|status`
 
 ## 4.2 Message handling flow
 
@@ -422,12 +484,26 @@ Generated tarball pattern:
 - Check provider supports tool-calling in OpenAI-compatible API
 - Check MCP servers are enabled and started
 - Check runtime logs for `Executing tool: ...`
+- If the model prints `### TOOL_CALL` text but no real `tool_calls` payload, verify provider compatibility and response format.
 
 ## 9.4 Cron jobs do not fire
 
 - Confirm schedule parsing at creation time
 - Confirm `masix start` process is running
 - Check active jobs with `masix cron list`
+- If running multiple bots, verify `account_tag` scope (`masix cron list --account-tag <tag>`).
+
+## 9.5 `/exec` or `/termux` rejected
+
+- Verify `[exec]` section is enabled in config.
+- Verify command is in allowlist.
+- Remember: absolute paths, `..`, and unsafe shell chars are blocked by design.
+
+## 9.6 Termux boot not starting
+
+- Verify Termux:Boot app is installed.
+- Verify script exists at `~/.termux/boot/masix`.
+- Check boot logs at `~/.masix/logs/boot.log`.
 
 ## 10. Operational Notes
 

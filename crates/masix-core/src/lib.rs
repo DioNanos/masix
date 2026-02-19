@@ -2,8 +2,9 @@
 //!
 //! Main runtime orchestration with MCP + Cron + LLM support
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use masix_config::{Config, RetryPolicyConfig};
+use masix_exec::{manage_termux_boot, run_command, BootAction, ExecMode, ExecPolicy};
 use masix_ipc::{Envelope, EventBus, MessageKind, OutboundMessage};
 use masix_mcp::McpClient;
 use masix_policy::PolicyEngine;
@@ -30,6 +31,7 @@ struct BotContext {
     memory_file: PathBuf,
     provider_chain: Vec<String>,
     retry_policy: RetryPolicy,
+    exec_policy: ExecPolicy,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -127,6 +129,7 @@ impl MasixRuntime {
         let rate_state: Arc<Mutex<HashMap<String, (i64, u32)>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let bot_contexts_for_processor = Arc::clone(&bot_contexts);
+        let default_cron_account_tag = self.default_telegram_account_tag();
 
         tokio::spawn(async move {
             let mut cron_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
@@ -140,6 +143,7 @@ impl MasixRuntime {
                                     envelope,
                                     outbound_for_processor.clone(),
                                     &provider_router,
+                                    &storage_for_processor,
                                     &mcp_client,
                                     &system_prompt,
                                     &policy,
@@ -159,7 +163,11 @@ impl MasixRuntime {
                         }
                     }
                     _ = cron_interval.tick() => {
-                        if let Err(e) = Self::check_cron_jobs(&storage_for_processor, &outbound_for_processor).await {
+                        if let Err(e) = Self::check_cron_jobs(
+                            &storage_for_processor,
+                            &outbound_for_processor,
+                            default_cron_account_tag.as_deref(),
+                        ).await {
                             error!("Error checking cron jobs: {}", e);
                         }
                     }
@@ -176,6 +184,7 @@ impl MasixRuntime {
     async fn check_cron_jobs(
         storage: &Arc<Mutex<Storage>>,
         outbound_sender: &broadcast::Sender<OutboundMessage>,
+        default_account_tag: Option<&str>,
     ) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -189,11 +198,16 @@ impl MasixRuntime {
             let channel = job.channel.clone();
             let recipient = job.recipient.clone();
             let message = job.message.clone();
+            let account_tag = if job.account_tag == "__default__" || job.account_tag.is_empty() {
+                default_account_tag.map(|tag| tag.to_string())
+            } else {
+                Some(job.account_tag.clone())
+            };
 
             if let Ok(chat_id) = recipient.parse::<i64>() {
                 let msg = OutboundMessage {
                     channel,
-                    account_tag: None,
+                    account_tag,
                     chat_id,
                     text: message,
                     reply_to: None,
@@ -319,6 +333,7 @@ impl MasixRuntime {
                             memory_file,
                             provider_chain,
                             retry_policy: Self::retry_policy_from_config(profile.retry.as_ref()),
+                            exec_policy: Self::exec_policy_from_config(self.config.exec.as_ref()),
                         }
                     } else {
                         default_context.clone()
@@ -349,6 +364,7 @@ impl MasixRuntime {
             memory_file,
             provider_chain: vec![self.config.providers.default_provider.clone()],
             retry_policy: RetryPolicy::default(),
+            exec_policy: Self::exec_policy_from_config(self.config.exec.as_ref()),
         };
         Self::ensure_bot_context_dirs(&context)?;
         Ok(context)
@@ -399,8 +415,35 @@ impl MasixRuntime {
         }
     }
 
+    fn exec_policy_from_config(config: Option<&masix_config::ExecConfig>) -> ExecPolicy {
+        let mut policy = ExecPolicy::default();
+        if let Some(cfg) = config {
+            policy.enabled = cfg.enabled.unwrap_or(policy.enabled);
+            policy.allow_base = cfg.allow_base.unwrap_or(policy.allow_base);
+            policy.allow_termux = cfg.allow_termux.unwrap_or(policy.allow_termux);
+            policy.timeout_secs = cfg.timeout_secs.unwrap_or(policy.timeout_secs);
+            policy.max_output_chars = cfg.max_output_chars.unwrap_or(policy.max_output_chars);
+            if !cfg.base_allowlist.is_empty() {
+                policy.base_allowlist = cfg.base_allowlist.clone();
+            }
+            if !cfg.termux_allowlist.is_empty() {
+                policy.termux_allowlist = cfg.termux_allowlist.clone();
+            }
+        }
+        policy
+    }
+
     fn account_tag_from_token(token: &str) -> String {
         token.split(':').next().unwrap_or("default").to_string()
+    }
+
+    fn default_telegram_account_tag(&self) -> Option<String> {
+        self.config.telegram.as_ref().and_then(|telegram| {
+            telegram
+                .accounts
+                .first()
+                .map(|account| Self::account_tag_from_token(&account.bot_token))
+        })
     }
 
     fn resolve_bot_context(
@@ -422,6 +465,7 @@ impl MasixRuntime {
                 memory_file: PathBuf::from("./MEMORY.md"),
                 provider_chain: vec!["openai".to_string()],
                 retry_policy: RetryPolicy::default(),
+                exec_policy: ExecPolicy::default(),
             })
     }
 
@@ -499,6 +543,7 @@ impl MasixRuntime {
         envelope: Envelope,
         outbound_sender: broadcast::Sender<OutboundMessage>,
         provider_router: &ProviderRouter,
+        storage: &Arc<Mutex<Storage>>,
         mcp_client: &Option<Arc<Mutex<McpClient>>>,
         system_prompt: &str,
         policy: &PolicyEngine,
@@ -582,6 +627,30 @@ impl MasixRuntime {
                         };
                         let _ = outbound_sender.send(msg);
                     }
+                    return Ok(());
+                }
+
+                if Self::handle_cron_command(
+                    text,
+                    &envelope,
+                    &outbound_sender,
+                    storage,
+                    account_tag.clone(),
+                )
+                .await?
+                {
+                    return Ok(());
+                }
+
+                if Self::handle_exec_command(
+                    text,
+                    &envelope,
+                    &outbound_sender,
+                    &bot_context,
+                    account_tag.clone(),
+                )
+                .await?
+                {
                     return Ok(());
                 }
 
@@ -757,6 +826,305 @@ impl MasixRuntime {
         }
 
         Ok(())
+    }
+
+    async fn handle_cron_command(
+        text: &str,
+        envelope: &Envelope,
+        outbound_sender: &broadcast::Sender<OutboundMessage>,
+        storage: &Arc<Mutex<Storage>>,
+        account_tag: Option<String>,
+    ) -> Result<bool> {
+        let trimmed = text.trim();
+        if !(trimmed == "/cron" || trimmed.starts_with("/cron ")) {
+            return Ok(false);
+        }
+
+        let Some(chat_id) = envelope.chat_id else {
+            return Ok(true);
+        };
+
+        let rest = trimmed.strip_prefix("/cron").unwrap_or("").trim();
+        let scoped_account_tag = account_tag
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("__default__")
+            .to_string();
+        let recipient = chat_id.to_string();
+
+        if rest.is_empty() || rest.eq_ignore_ascii_case("help") {
+            let help = "Reminder commands:\n\
+                        - `/cron domani alle 9 \"Meeting\"`\n\
+                        - `/cron list`\n\
+                        - `/cron cancel <id>`";
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag.clone(),
+                chat_id,
+                help,
+                envelope.message_id,
+            );
+            return Ok(true);
+        }
+
+        if rest.eq_ignore_ascii_case("list") {
+            let storage_guard = storage.lock().await;
+            let jobs = storage_guard
+                .list_enabled_cron_jobs_for_account_recipient(&scoped_account_tag, &recipient)?;
+            drop(storage_guard);
+
+            if jobs.is_empty() {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag.clone(),
+                    chat_id,
+                    "Nessun reminder attivo per questa chat.",
+                    envelope.message_id,
+                );
+            } else {
+                let mut lines = vec!["Reminder attivi:".to_string()];
+                for job in jobs {
+                    lines.push(format!(
+                        "- ID {} | {} | recurring: {}\n  {}",
+                        job.id, job.schedule, job.recurring, job.message
+                    ));
+                }
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag.clone(),
+                    chat_id,
+                    &lines.join("\n"),
+                    envelope.message_id,
+                );
+            }
+            return Ok(true);
+        }
+
+        let lower = rest.to_lowercase();
+        if lower.starts_with("cancel ") || lower.starts_with("delete ") {
+            let id_part = rest.split_whitespace().nth(1).unwrap_or_default();
+            let id = id_part
+                .parse::<i64>()
+                .map_err(|_| anyhow!("Invalid cron id '{}'", id_part))?;
+            let storage_guard = storage.lock().await;
+            let changed = storage_guard.disable_cron_job_for_account(id, &scoped_account_tag)?;
+            drop(storage_guard);
+
+            let out = if changed {
+                format!("Reminder {} eliminato.", id)
+            } else {
+                format!(
+                    "Reminder {} non trovato per questo bot/chat (scope account: {}).",
+                    id, scoped_account_tag
+                )
+            };
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag.clone(),
+                chat_id,
+                &out,
+                envelope.message_id,
+            );
+            return Ok(true);
+        }
+
+        let parser = masix_cron::CronParser::new();
+        let parsed = parser.parse(rest, "telegram", &recipient)?;
+        let storage_guard = storage.lock().await;
+        let id = storage_guard.create_cron_job(
+            "telegram",
+            &parsed.schedule,
+            &parsed.channel,
+            &parsed.recipient,
+            Some(&scoped_account_tag),
+            &parsed.message,
+            &parsed.timezone,
+            parsed.recurring,
+        )?;
+        drop(storage_guard);
+
+        let confirmation = format!(
+            "Reminder creato.\nID: {}\nSchedule: {}\nRecurring: {}\nMessage: {}",
+            id, parsed.schedule, parsed.recurring, parsed.message
+        );
+        Self::send_outbound_text(
+            outbound_sender,
+            &envelope.channel,
+            account_tag.clone(),
+            chat_id,
+            &confirmation,
+            envelope.message_id,
+        );
+
+        Ok(true)
+    }
+
+    async fn handle_exec_command(
+        text: &str,
+        envelope: &Envelope,
+        outbound_sender: &broadcast::Sender<OutboundMessage>,
+        bot_context: &BotContext,
+        account_tag: Option<String>,
+    ) -> Result<bool> {
+        let trimmed = text.trim();
+        let Some(chat_id) = envelope.chat_id else {
+            return Ok(false);
+        };
+
+        if trimmed == "/exec" || trimmed.starts_with("/exec ") {
+            let rest = trimmed.strip_prefix("/exec").unwrap_or("");
+            let command = rest.trim();
+            if command.is_empty() || command.eq_ignore_ascii_case("help") {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag.clone(),
+                    chat_id,
+                    "Uso: `/exec <command>`\nEsempio: `/exec ls -la`\nEsegue solo comandi in allowlist nella workdir del bot.",
+                    envelope.message_id,
+                );
+                return Ok(true);
+            }
+
+            let response = match run_command(
+                &bot_context.exec_policy,
+                ExecMode::Base,
+                command,
+                &bot_context.workdir,
+            )
+            .await
+            {
+                Ok(result) => result.format_for_chat(),
+                Err(e) => format!("Exec error: {}", e),
+            };
+
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag.clone(),
+                chat_id,
+                &response,
+                envelope.message_id,
+            );
+            return Ok(true);
+        }
+
+        if trimmed == "/termux" || trimmed.starts_with("/termux ") {
+            let rest = trimmed.strip_prefix("/termux").unwrap_or("");
+            let command = rest.trim();
+
+            if command.is_empty() || command.eq_ignore_ascii_case("help") {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag.clone(),
+                    chat_id,
+                    "Uso:\n- `/termux info`\n- `/termux battery`\n- `/termux cmd <termux-command>`\n- `/termux boot on|off|status`",
+                    envelope.message_id,
+                );
+                return Ok(true);
+            }
+
+            if let Some(boot_value) = command.strip_prefix("boot ").map(str::trim) {
+                let action = match boot_value.to_lowercase().as_str() {
+                    "on" | "enable" => BootAction::Enable,
+                    "off" | "disable" => BootAction::Disable,
+                    "status" => BootAction::Status,
+                    _ => {
+                        Self::send_outbound_text(
+                            outbound_sender,
+                            &envelope.channel,
+                            account_tag.clone(),
+                            chat_id,
+                            "Valore non valido. Usa `/termux boot on|off|status`.",
+                            envelope.message_id,
+                        );
+                        return Ok(true);
+                    }
+                };
+
+                let masix_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("masix"));
+                let out = match manage_termux_boot(action, &masix_bin, None).await {
+                    Ok(status) => {
+                        if action == BootAction::Status {
+                            format!(
+                                "Termux boot script: `{}`\nEnabled: {}",
+                                status.script_path.display(),
+                                status.enabled
+                            )
+                        } else {
+                            format!(
+                                "Termux boot aggiornato.\nScript: `{}`\nEnabled: {}",
+                                status.script_path.display(),
+                                status.enabled
+                            )
+                        }
+                    }
+                    Err(e) => format!("Termux boot error: {}", e),
+                };
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag.clone(),
+                    chat_id,
+                    &out,
+                    envelope.message_id,
+                );
+                return Ok(true);
+            }
+
+            let mapped_command = if let Some(cmd) = command.strip_prefix("cmd ").map(str::trim) {
+                cmd.to_string()
+            } else {
+                match command.to_lowercase().as_str() {
+                    "info" => "termux-info".to_string(),
+                    "battery" => "termux-battery-status".to_string(),
+                    "location" => "termux-location".to_string(),
+                    "wifi" => "termux-wifi-connectioninfo".to_string(),
+                    "device" => "termux-telephony-deviceinfo".to_string(),
+                    "clipboard" => "termux-clipboard-get".to_string(),
+                    _ => {
+                        Self::send_outbound_text(
+                            outbound_sender,
+                            &envelope.channel,
+                            account_tag.clone(),
+                            chat_id,
+                            "Comando non riconosciuto. Usa `/termux help`.",
+                            envelope.message_id,
+                        );
+                        return Ok(true);
+                    }
+                }
+            };
+
+            let response = match run_command(
+                &bot_context.exec_policy,
+                ExecMode::Termux,
+                &mapped_command,
+                &bot_context.workdir,
+            )
+            .await
+            {
+                Ok(result) => result.format_for_chat(),
+                Err(e) => format!("Termux exec error: {}", e),
+            };
+
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag.clone(),
+                chat_id,
+                &response,
+                envelope.message_id,
+            );
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     async fn chat_with_fallback_chain(

@@ -20,7 +20,11 @@ MasiX is a Rust-first automation runtime focused on Termux/Linux mobile workflow
 - Telegram long polling with persisted offsets and inline-menu callbacks
 - Tool-calling pipeline: LLM -> MCP execution -> final LLM response
 - OpenAI-compatible provider layer
+- Per-bot profiles (workdir, memory, primary model + fallback chain)
 - SQLite persistence for reminders/cron and offsets
+- Cron reminders scoped by Telegram bot/account to avoid cross-bot overlap
+- Guarded exec module for base and Termux commands in bot workdir
+- Termux boot management (`masix termux boot enable|disable|status`)
 - SOUL.md startup context support
 - NPM package: `@mmmbuto/masix`
 
@@ -32,11 +36,20 @@ masix --help
 masix config init
 ```
 
+## Quick Ops
+
+```bash
+masix start
+masix config validate
+masix cron add 'domani alle 9 "Daily check"' --account-tag 123456789
+masix termux boot status
+```
+
 ## Build From Source
 
 ```bash
 git clone https://github.com/DioNanos/masix.git
-cd MasiX
+cd masix
 
 cargo build --release
 ./target/release/masix --help
@@ -60,6 +73,7 @@ For local endpoint setup:
 - [Main usage guide](docs/USER_GUIDE.md)
 - [NPM package docs](npm/masix-termux/README.md)
 - [Example config](config/config.example.toml)
+- [Termux llama.cpp local endpoint guide](docs/TERMUX_LLAMA_CPP_LOCAL_ENDPOINT.md)
 
 ## Repository Layout
 

@@ -119,3 +119,45 @@ masix start
 - Keep the llama server process running while MasiX is active.
 - Start with `-c 2048` or `-c 4096` to avoid memory pressure.
 - Use Snapdragon build if you are unsure which CPU profile to use.
+
+## 9. Recommended Fallback Chain in MasiX
+
+You can keep local llama.cpp as primary and cloud fallback as backup:
+
+```toml
+[providers]
+default_provider = "openrouter"
+
+[[providers.providers]]
+name = "llama_local"
+api_key = "not-needed"
+base_url = "http://127.0.0.1:8080/v1"
+model = "local-model"
+
+[[providers.providers]]
+name = "openrouter"
+api_key = "OPENROUTER_API_KEY"
+base_url = "https://openrouter.ai/api/v1"
+model = "openai/gpt-4o-mini"
+
+[bots]
+strict_account_profile_mapping = false
+
+[[bots.profiles]]
+name = "termux_bot"
+workdir = "~/.masix/bots/termux_bot"
+memory_file = "~/.masix/bots/termux_bot/MEMORY.md"
+provider_primary = "llama_local"
+provider_fallback = ["openrouter"]
+```
+
+## 10. Optional Boot Automation (MasiX Runtime)
+
+If you want MasiX to auto-start at Android boot:
+
+```bash
+masix termux boot enable
+masix termux boot status
+```
+
+This writes `~/.termux/boot/masix` and requires the Termux:Boot app.

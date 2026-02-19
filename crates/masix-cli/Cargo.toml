@@ -15,6 +15,7 @@ path = "src/main.rs"
 masix-core = { path = "../masix-core" }
 masix-config = { path = "../masix-config" }
 masix-storage = { path = "../masix-storage" }
+masix-exec = { path = "../masix-exec" }
 masix-telegram = { path = "../masix-telegram" }
 masix-whatsapp = { path = "../masix-whatsapp" }
 masix-sms = { path = "../masix-sms" }

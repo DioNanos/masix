@@ -15,6 +15,7 @@ pub struct Config {
     pub mcp: Option<McpConfig>,
     pub providers: ProvidersConfig,
     pub bots: Option<BotsConfig>,
+    pub exec: Option<ExecConfig>,
     pub policy: Option<PolicyConfig>,
 }
 
@@ -125,6 +126,19 @@ pub struct RetryPolicyConfig {
     pub initial_delay_secs: Option<u64>,
     pub backoff_factor: Option<u32>,
     pub max_delay_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecConfig {
+    pub enabled: Option<bool>,
+    pub allow_base: Option<bool>,
+    pub allow_termux: Option<bool>,
+    pub timeout_secs: Option<u64>,
+    pub max_output_chars: Option<usize>,
+    #[serde(default)]
+    pub base_allowlist: Vec<String>,
+    #[serde(default)]
+    pub termux_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +297,29 @@ impl Config {
                     anyhow::bail!(
                         "strict_account_profile_mapping is enabled but a telegram account has no bot_profile"
                     );
+                }
+            }
+        }
+
+        if let Some(exec) = &self.exec {
+            if let Some(timeout) = exec.timeout_secs {
+                if timeout == 0 {
+                    anyhow::bail!("exec.timeout_secs must be > 0");
+                }
+            }
+            if let Some(max_output) = exec.max_output_chars {
+                if max_output < 128 {
+                    anyhow::bail!("exec.max_output_chars must be >= 128");
+                }
+            }
+            for item in &exec.base_allowlist {
+                if item.trim().is_empty() {
+                    anyhow::bail!("exec.base_allowlist contains an empty command");
+                }
+            }
+            for item in &exec.termux_allowlist {
+                if item.trim().is_empty() {
+                    anyhow::bail!("exec.termux_allowlist contains an empty command");
                 }
             }
         }

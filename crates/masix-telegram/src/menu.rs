@@ -52,14 +52,26 @@ pub fn utility_menu() -> (String, Vec<Vec<InlineButton>>) {
     (
         "🔧 *Utility*\n\nStrumenti disponibili:".to_string(),
         vec![
-            vec![InlineButton {
-                text: "📁 Filesystem".to_string(),
-                callback_data: "utility:fs".to_string(),
-            }],
-            vec![InlineButton {
-                text: "📊 Info Sistema".to_string(),
-                callback_data: "utility:info".to_string(),
-            }],
+            vec![
+                InlineButton {
+                    text: "📁 Filesystem".to_string(),
+                    callback_data: "utility:fs".to_string(),
+                },
+                InlineButton {
+                    text: "🖥 Exec".to_string(),
+                    callback_data: "utility:exec".to_string(),
+                },
+            ],
+            vec![
+                InlineButton {
+                    text: "📱 Termux".to_string(),
+                    callback_data: "utility:termux".to_string(),
+                },
+                InlineButton {
+                    text: "📊 Info Sistema".to_string(),
+                    callback_data: "utility:info".to_string(),
+                },
+            ],
             vec![InlineButton {
                 text: "🏠 Home".to_string(),
                 callback_data: "menu:home".to_string(),
@@ -197,6 +209,90 @@ pub fn handle_callback(
                     Some(nav_keyboard("menu:utility")),
                 ));
             }
+            "exec" => {
+                return Some(action_message(
+                    chat_id,
+                    account_tag.clone(),
+                    message_id,
+                    "Esecuzione comandi base (allowlist) nella workdir del bot.\n\
+                     Esempi:\n\
+                     - `/exec pwd`\n\
+                     - `/exec ls -la`\n\
+                     - `/exec df -h`"
+                        .to_string(),
+                    Some(nav_keyboard("menu:utility")),
+                ));
+            }
+            "termux" => {
+                return Some(action_message(
+                    chat_id,
+                    account_tag.clone(),
+                    message_id,
+                    "Comandi Termux disponibili.\n\
+                     Esempi:\n\
+                     - `/termux battery`\n\
+                     - `/termux info`\n\
+                     - `/termux cmd termux-location`\n\
+                     - `/termux boot status`"
+                        .to_string(),
+                    Some(vec![
+                        vec![
+                            InlineButton {
+                                text: "🔋 Battery".to_string(),
+                                callback_data: "utility:termux_battery".to_string(),
+                            },
+                            InlineButton {
+                                text: "ℹ️ Info".to_string(),
+                                callback_data: "utility:termux_info".to_string(),
+                            },
+                        ],
+                        vec![InlineButton {
+                            text: "🚀 Boot".to_string(),
+                            callback_data: "utility:termux_boot".to_string(),
+                        }],
+                        vec![InlineButton {
+                            text: "⬅️ Utility".to_string(),
+                            callback_data: "menu:utility".to_string(),
+                        }],
+                        vec![InlineButton {
+                            text: "🏠 Home".to_string(),
+                            callback_data: "menu:home".to_string(),
+                        }],
+                    ]),
+                ));
+            }
+            "termux_battery" => {
+                return Some(action_message(
+                    chat_id,
+                    account_tag.clone(),
+                    message_id,
+                    "Esegui: `/termux battery`".to_string(),
+                    Some(nav_keyboard("utility:termux")),
+                ));
+            }
+            "termux_info" => {
+                return Some(action_message(
+                    chat_id,
+                    account_tag.clone(),
+                    message_id,
+                    "Esegui: `/termux info`".to_string(),
+                    Some(nav_keyboard("utility:termux")),
+                ));
+            }
+            "termux_boot" => {
+                return Some(action_message(
+                    chat_id,
+                    account_tag.clone(),
+                    message_id,
+                    "Gestione avvio automatico su boot Android:\n\
+                     - `/termux boot on`\n\
+                     - `/termux boot off`\n\
+                     - `/termux boot status`\n\
+                     Richiede app Termux:Boot installata."
+                        .to_string(),
+                    Some(nav_keyboard("utility:termux")),
+                ));
+            }
             "info" => {
                 return Some(action_message(
                     chat_id,
@@ -260,5 +356,13 @@ mod tests {
     #[test]
     fn unknown_callback_returns_none() {
         assert!(handle_callback("unknown:test", 1, Some(1), None).is_none());
+    }
+
+    #[test]
+    fn utility_termux_callback_returns_buttons() {
+        let out = handle_callback("utility:termux", 123, Some(77), Some("bot".to_string()))
+            .expect("expected outbound");
+        assert!(out.inline_keyboard.is_some());
+        assert!(out.text.contains("/termux"));
     }
 }
