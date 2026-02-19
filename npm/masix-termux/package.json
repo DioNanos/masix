@@ -1,6 +1,6 @@
 {
   "name": "@mmmbuto/masix",
-  "version": "0.1.0-beta.6",
+  "version": "0.1.0-beta.7",
   "description": "MIT Messaging Agent for Termux - Telegram, WhatsApp, SMS with MCP + Cron",
   "main": "index.js",
   "files": [
