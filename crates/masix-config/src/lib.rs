@@ -6,27 +6,29 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
+    #[serde(default)]
     pub core: CoreConfig,
     pub telegram: Option<TelegramConfig>,
     pub whatsapp: Option<WhatsappConfig>,
     pub sms: Option<SmsConfig>,
     pub mcp: Option<McpConfig>,
+    #[serde(default)]
     pub providers: ProvidersConfig,
     pub bots: Option<BotsConfig>,
     pub exec: Option<ExecConfig>,
     pub policy: Option<PolicyConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CoreConfig {
     pub data_dir: Option<String>,
     pub log_level: Option<String>,
     pub soul_file: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TelegramConfig {
     pub poll_timeout_secs: Option<u64>,
     pub client_recreate_interval_secs: Option<u64>,
@@ -72,8 +74,9 @@ pub struct SmsRule {
     pub action_config: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpConfig {
+    #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub servers: Vec<McpServer>,
@@ -88,9 +91,19 @@ pub struct McpServer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvidersConfig {
+    #[serde(default)]
     pub default_provider: String,
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+}
+
+impl Default for ProvidersConfig {
+    fn default() -> Self {
+        Self {
+            default_provider: String::new(),
+            providers: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

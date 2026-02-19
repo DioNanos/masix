@@ -2,15 +2,22 @@
 //!
 //! Command-line interface for Masix messaging agent
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use masix_config::Config;
 use masix_core::MasixRuntime;
 use masix_exec::{manage_termux_boot, BootAction};
 use masix_storage::Storage;
 use serde_json::json;
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
 use tracing_subscriber::{self, EnvFilter};
+
+const PID_FILE: &str = "masix.pid";
+const LOG_FILE: &str = "logs/masix.log";
 
 #[derive(Parser)]
 #[command(name = "masix")]
@@ -31,8 +38,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the Masix runtime
-    Start,
+    /// Start the Masix runtime (daemon mode, returns immediately)
+    Start {
+        /// Run in foreground (for debugging)
+        #[arg(short, long)]
+        foreground: bool,
+    },
+
+    /// Stop the Masix daemon
+    Stop,
+
+    /// Show daemon status
+    Status,
+
+    /// Restart the Masix daemon
+    Restart,
 
     /// Telegram commands
     Telegram {
@@ -164,12 +184,24 @@ enum TermuxBootCommands {
 
 #[derive(Subcommand)]
 enum ConfigCommands {
-    /// Initialize configuration
-    Init,
+    /// Initialize configuration with interactive wizard
+    Init {
+        /// Skip wizard, use defaults
+        #[arg(short, long)]
+        defaults: bool,
+    },
     /// Show current configuration
     Show,
     /// Validate configuration
     Validate,
+    /// Configure Telegram bot interactively
+    Telegram,
+    /// Configure LLM provider interactively
+    Provider {
+        /// Provider name (openai, openrouter, zai, chutes, ollama)
+        #[arg(short, long)]
+        name: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -182,17 +214,81 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        Commands::Start => {
-            let config = load_config(cli.config)?;
+        Commands::Start { foreground } => {
+            let config = load_config(cli.config.clone())?;
             let data_dir = get_data_dir(&config);
             std::fs::create_dir_all(&data_dir)?;
 
-            let db_path = data_dir.join("masix.db");
-            let storage = Storage::new(&db_path)?;
-            let runtime = MasixRuntime::new(config, storage)?;
+            let pid_path = data_dir.join(PID_FILE);
 
-            info!("Starting Masix runtime...");
-            runtime.run().await?;
+            // Check if already running
+            if let Some(running_pid) = check_daemon_running(&pid_path)? {
+                return Err(anyhow!("Masix is already running (PID: {})", running_pid));
+            }
+
+            if foreground {
+                // Foreground mode (for debugging)
+                acquire_termux_wake_lock();
+                let db_path = data_dir.join("masix.db");
+                let storage = Storage::new(&db_path)?;
+                let runtime = MasixRuntime::new(config, storage)?;
+                info!("Starting Masix runtime in foreground...");
+                runtime.run().await?;
+            } else {
+                // Daemon mode - fork and detach
+                start_daemon(&data_dir, cli.config, cli.log_level)?;
+            }
+        }
+
+        Commands::Stop => {
+            let config = load_config(cli.config)?;
+            let data_dir = get_data_dir(&config);
+            let pid_path = data_dir.join(PID_FILE);
+
+            match stop_daemon(&pid_path) {
+                Ok(pid) => println!("Masix stopped (was PID: {})", pid),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+
+        Commands::Status => {
+            let config = load_config(cli.config)?;
+            let data_dir = get_data_dir(&config);
+            let pid_path = data_dir.join(PID_FILE);
+
+            match check_daemon_running(&pid_path)? {
+                Some(pid) => {
+                    println!("Masix is running (PID: {})", pid);
+                    if let Ok(uptime) = get_daemon_uptime(&pid_path) {
+                        println!("Uptime: {}s", uptime);
+                    }
+                    println!("Log: {}", data_dir.join(LOG_FILE).display());
+                }
+                None => {
+                    println!("Masix is not running");
+                    if pid_path.exists() {
+                        println!("(stale PID file found, cleaning up)");
+                        let _ = fs::remove_file(&pid_path);
+                    }
+                }
+            }
+        }
+
+        Commands::Restart => {
+            let config = load_config(cli.config.clone())?;
+            let data_dir = get_data_dir(&config);
+            let pid_path = data_dir.join(PID_FILE);
+
+            // Stop if running
+            if let Some(running_pid) = check_daemon_running(&pid_path)? {
+                println!("Stopping Masix (PID: {})...", running_pid);
+                stop_daemon(&pid_path)?;
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+
+            // Start again
+            println!("Starting Masix...");
+            start_daemon(&data_dir, cli.config, cli.log_level)?;
         }
 
         Commands::Telegram { action } => {
@@ -447,18 +543,12 @@ async fn main() -> Result<()> {
         },
 
         Commands::Config { action } => match action {
-            ConfigCommands::Init => {
-                println!("Creating default configuration...");
-                let config_dir = dirs::config_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from(".config"))
-                    .join("masix");
-                std::fs::create_dir_all(&config_dir)?;
-
-                let config_path = config_dir.join("config.toml");
-                let config_content = include_str!("../../../config/config.example.toml");
-                std::fs::write(&config_path, config_content)?;
-
-                println!("Configuration created at: {}", config_path.display());
+            ConfigCommands::Init { defaults } => {
+                if defaults {
+                    create_default_config(cli.config.clone())?;
+                } else {
+                    run_config_wizard(cli.config.clone())?;
+                }
             }
             ConfigCommands::Show => match load_config(cli.config) {
                 Ok(config) => {
@@ -471,6 +561,12 @@ async fn main() -> Result<()> {
                 Ok(_) => println!("Configuration is valid."),
                 Err(e) => eprintln!("Configuration is invalid: {}", e),
             },
+            ConfigCommands::Telegram => {
+                run_telegram_wizard(cli.config.clone())?;
+            }
+            ConfigCommands::Provider { name } => {
+                run_provider_wizard(cli.config.clone(), name)?;
+            }
         },
 
         Commands::Stats => {
@@ -625,4 +721,576 @@ fn print_redacted_config(config: &Config) -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+// ============================================================================
+// Daemon Management Functions
+// ============================================================================
+
+fn start_daemon(data_dir: &PathBuf, config_path: Option<String>, log_level: String) -> Result<()> {
+    let log_dir = data_dir.join("logs");
+    fs::create_dir_all(&log_dir)?;
+
+    let log_path = data_dir.join(LOG_FILE);
+    let pid_path = data_dir.join(PID_FILE);
+
+    // Get current executable
+    let masix_bin = std::env::current_exe().context("Failed to get masix executable path")?;
+
+    // Build daemon command with global flags before subcommand (clap requirement)
+    let args = build_daemon_args(config_path.as_deref(), &log_level);
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let log_file_err = log_file
+        .try_clone()
+        .context("Failed to duplicate log file handle")?;
+
+    // Spawn daemon process
+    let mut child = Command::new(&masix_bin)
+        .args(&args)
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file_err))
+        .spawn()
+        .context("Failed to spawn daemon process")?;
+
+    // Detect immediate startup failures so we do not leave stale PID files.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    if let Some(status) = child
+        .try_wait()
+        .context("Failed to check daemon startup status")?
+    {
+        anyhow::bail!(
+            "Masix daemon exited immediately with status {}. Check log: {}",
+            status,
+            log_path.display()
+        );
+    }
+
+    let pid = child.id();
+
+    // Write PID file with timestamp
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    fs::write(&pid_path, format!("{}\n{}", pid, timestamp))?;
+
+    println!("Masix started (PID: {})", pid);
+    println!("Log: {}", log_path.display());
+
+    Ok(())
+}
+
+fn build_daemon_args(config_path: Option<&str>, log_level: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(path) = config_path {
+        args.push("--config".to_string());
+        args.push(path.to_string());
+    }
+    args.push("--log-level".to_string());
+    args.push(log_level.to_string());
+    args.push("start".to_string());
+    args.push("--foreground".to_string());
+    args
+}
+
+fn stop_daemon(pid_path: &PathBuf) -> Result<u32> {
+    let content = fs::read_to_string(pid_path).context("Failed to read PID file")?;
+
+    let pid: u32 = content
+        .lines()
+        .next()
+        .and_then(|s| s.trim().parse().ok())
+        .context("Invalid PID in PID file")?;
+
+    // Send SIGTERM
+    #[cfg(unix)]
+    {
+        use std::process::Command as UnixCommand;
+        let _ = UnixCommand::new("kill").arg(pid.to_string()).output();
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output();
+    }
+
+    // Wait a bit and check if stopped
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if !is_process_running(pid) {
+            break;
+        }
+    }
+
+    // Force kill if still running
+    if is_process_running(pid) {
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+        }
+    }
+
+    fs::remove_file(pid_path).ok();
+    release_termux_wake_lock();
+
+    Ok(pid)
+}
+
+fn check_daemon_running(pid_path: &PathBuf) -> Result<Option<u32>> {
+    if !pid_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(pid_path)?;
+    let pid = match content
+        .lines()
+        .next()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+    {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    if is_process_running(pid) {
+        Ok(Some(pid))
+    } else {
+        Ok(None)
+    }
+}
+
+fn get_daemon_uptime(pid_path: &PathBuf) -> Result<u64> {
+    let content = fs::read_to_string(pid_path)?;
+    let start_time: u64 = content
+        .lines()
+        .nth(1)
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    Ok(now.saturating_sub(start_time))
+}
+
+fn is_process_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(unix))]
+    {
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid)])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+            .unwrap_or(false)
+    }
+}
+
+fn acquire_termux_wake_lock() {
+    // Check if running in Termux
+    if std::env::var("TERMUX_VERSION").is_ok()
+        || std::path::Path::new("/data/data/com.termux").exists()
+    {
+        let _ = Command::new("termux-wake-lock").output();
+    }
+}
+
+fn release_termux_wake_lock() {
+    if std::env::var("TERMUX_VERSION").is_ok()
+        || std::path::Path::new("/data/data/com.termux").exists()
+    {
+        let _ = Command::new("termux-wake-unlock").output();
+    }
+}
+
+// ============================================================================
+// Config Wizard Functions
+// ============================================================================
+
+fn create_default_config(config_path: Option<String>) -> Result<()> {
+    let config_path = get_config_path(config_path)?;
+    let config_content = include_str!("../../../config/config.example.toml");
+    std::fs::write(&config_path, config_content)?;
+
+    println!("Configuration created at: {}", config_path.display());
+    println!("\nEdit the file to add your tokens and API keys, or run:");
+    println!("  masix config telegram   - Configure Telegram bot");
+    println!("  masix config provider   - Configure LLM provider");
+
+    Ok(())
+}
+
+fn run_config_wizard(config_path: Option<String>) -> Result<()> {
+    println!("╔════════════════════════════════════════════╗");
+    println!("║       MasiX Configuration Wizard           ║");
+    println!("╚════════════════════════════════════════════╝");
+    println!();
+
+    let config_path = get_config_path(config_path)?;
+
+    let mut config = if config_path.exists() {
+        println!("Found existing config at: {}", config_path.display());
+        if prompt_confirm("Update existing configuration?", true)? {
+            Config::load(&config_path)?
+        } else {
+            return Ok(());
+        }
+    } else {
+        Config::default()
+    };
+
+    // Core settings
+    println!("\n── Core Settings ──");
+    let data_dir = prompt_input("Data directory", "~/.masix")?;
+    config.core.data_dir = Some(data_dir);
+
+    // Telegram
+    println!("\n── Telegram Setup ──");
+    if prompt_confirm("Configure Telegram bot?", true)? {
+        let bot_token = prompt_input("Bot token (from @BotFather)", "")?;
+        if !bot_token.is_empty() {
+            let account = masix_config::TelegramAccount {
+                bot_token,
+                allowed_chats: None,
+                bot_profile: None,
+            };
+            config
+                .telegram
+                .get_or_insert_with(Default::default)
+                .accounts
+                .push(account);
+            println!("✓ Telegram bot configured");
+        }
+    }
+
+    // Provider
+    println!("\n── LLM Provider Setup ──");
+    let providers = vec![
+        (
+            "openai",
+            "OpenAI",
+            "https://api.openai.com/v1",
+            "gpt-4o-mini",
+        ),
+        (
+            "openrouter",
+            "OpenRouter",
+            "https://openrouter.ai/api/v1",
+            "openai/gpt-4o-mini",
+        ),
+        ("zai", "z.ai", "https://api.z.ai/api/paas/v4", "glm-4.5"),
+        (
+            "chutes",
+            "Chutes.ai",
+            "https://llm.chutes.ai/v1",
+            "zai-org/GLM-5-TEE",
+        ),
+        (
+            "ollama",
+            "Ollama (local)",
+            "http://localhost:11434/v1",
+            "llama3",
+        ),
+    ];
+
+    println!("Available providers:");
+    for (i, (_, name, _, _)) in providers.iter().enumerate() {
+        println!("  {}. {}", i + 1, name);
+    }
+
+    let choice = prompt_input("Select provider (1-5) or press Enter to skip", "")?;
+    if let Ok(idx) = choice.parse::<usize>() {
+        if idx >= 1 && idx <= providers.len() {
+            let (key, name, base_url, default_model) = &providers[idx - 1];
+            let api_key = if *key == "ollama" {
+                "not-needed".to_string()
+            } else {
+                prompt_input(&format!("{} API key", name), "")?
+            };
+            let model = prompt_input("Model name", *default_model)?;
+
+            let provider = masix_config::ProviderConfig {
+                name: key.to_string(),
+                api_key,
+                base_url: Some(base_url.to_string()),
+                model: Some(model),
+            };
+            config.providers.providers.push(provider);
+            config.providers.default_provider = key.to_string();
+            println!("✓ {} provider configured", name);
+        }
+    }
+
+    // MCP
+    println!("\n── MCP (Model Context Protocol) ──");
+    if prompt_confirm("Enable MCP for tool calling?", true)? {
+        config.mcp.get_or_insert_with(Default::default).enabled = true;
+        println!("✓ MCP enabled (filesystem + memory servers)");
+    }
+
+    // Write config
+    let config_toml = toml::to_string_pretty(&config)?;
+    fs::write(&config_path, config_toml)?;
+
+    println!("\n✅ Configuration saved to: {}", config_path.display());
+    println!("\nNext steps:");
+    println!("  1. Review config: masix config show");
+    println!("  2. Start daemon:  masix start");
+
+    Ok(())
+}
+
+fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
+    println!("╔════════════════════════════════════════════╗");
+    println!("║       Telegram Bot Configuration           ║");
+    println!("╚════════════════════════════════════════════╝");
+    println!();
+    println!("To get a bot token:");
+    println!("  1. Open Telegram and search for @BotFather");
+    println!("  2. Send /newbot and follow the instructions");
+    println!("  3. Copy the token you receive");
+    println!();
+
+    let bot_token = prompt_input("Bot token", "")?;
+    if bot_token.is_empty() {
+        println!("No token provided, aborting.");
+        return Ok(());
+    }
+
+    let allowed_chats = prompt_input(
+        "Allowed chat IDs (comma-separated, or press Enter for all)",
+        "",
+    )?;
+    let bot_profile = prompt_input("Bot profile name (optional)", "")?;
+
+    // Load or create config
+    let config_path = get_config_path(config_path)?;
+    let mut config = if config_path.exists() {
+        Config::load(&config_path)?
+    } else {
+        Config::default()
+    };
+
+    let account = masix_config::TelegramAccount {
+        bot_token,
+        allowed_chats: if allowed_chats.is_empty() {
+            None
+        } else {
+            Some(
+                allowed_chats
+                    .split(',')
+                    .map(|s| s.trim().parse::<i64>().unwrap_or(0))
+                    .filter(|&id| id != 0)
+                    .collect(),
+            )
+        },
+        bot_profile: if bot_profile.is_empty() {
+            None
+        } else {
+            Some(bot_profile)
+        },
+    };
+
+    config
+        .telegram
+        .get_or_insert_with(Default::default)
+        .accounts
+        .push(account);
+
+    let config_toml = toml::to_string_pretty(&config)?;
+    fs::write(&config_path, config_toml)?;
+
+    println!("\n✅ Telegram bot configured");
+    println!("Config saved to: {}", config_path.display());
+
+    Ok(())
+}
+
+fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Result<()> {
+    println!("╔════════════════════════════════════════════╗");
+    println!("║       LLM Provider Configuration           ║");
+    println!("╚════════════════════════════════════════════╝");
+    println!();
+
+    let providers = vec![
+        (
+            "openai",
+            "OpenAI",
+            "https://api.openai.com/v1",
+            "gpt-4o-mini",
+        ),
+        (
+            "openrouter",
+            "OpenRouter",
+            "https://openrouter.ai/api/v1",
+            "openai/gpt-4o-mini",
+        ),
+        ("zai", "z.ai", "https://api.z.ai/api/paas/v4", "glm-4.5"),
+        (
+            "chutes",
+            "Chutes.ai",
+            "https://llm.chutes.ai/v1",
+            "zai-org/GLM-5-TEE",
+        ),
+        (
+            "ollama",
+            "Ollama (local)",
+            "http://localhost:11434/v1",
+            "llama3",
+        ),
+    ];
+
+    let selected = if let Some(n) = name {
+        providers.iter().find(|(key, _, _, _)| *key == n.as_str())
+    } else {
+        println!("Available providers:");
+        for (i, (_, name, _, _)) in providers.iter().enumerate() {
+            println!("  {}. {}", i + 1, name);
+        }
+
+        let choice = prompt_input("Select provider (1-5)", "")?;
+        let idx = choice.parse::<usize>().unwrap_or(0);
+        if idx >= 1 && idx <= providers.len() {
+            Some(&providers[idx - 1])
+        } else {
+            None
+        }
+    };
+
+    let Some((key, name, base_url, default_model)) = selected else {
+        println!("Invalid provider selection.");
+        return Ok(());
+    };
+
+    println!("\nConfiguring {}...", name);
+
+    let api_key = if *key == "ollama" {
+        println!("Ollama runs locally, no API key needed.");
+        "not-needed".to_string()
+    } else {
+        prompt_input(&format!("{} API key", name), "")?
+    };
+
+    let model = prompt_input("Model name", *default_model)?;
+    let set_default = prompt_confirm("Set as default provider?", true)?;
+
+    // Load or create config
+    let config_path = get_config_path(config_path)?;
+    let mut config = if config_path.exists() {
+        Config::load(&config_path)?
+    } else {
+        Config::default()
+    };
+
+    let provider = masix_config::ProviderConfig {
+        name: key.to_string(),
+        api_key,
+        base_url: Some(base_url.to_string()),
+        model: Some(model),
+    };
+
+    config.providers.providers.push(provider);
+    if set_default {
+        config.providers.default_provider = key.to_string();
+    }
+
+    let config_toml = toml::to_string_pretty(&config)?;
+    fs::write(&config_path, config_toml)?;
+
+    println!("\n✅ {} provider configured", name);
+    if set_default {
+        println!("Set as default provider");
+    }
+    println!("Config saved to: {}", config_path.display());
+
+    Ok(())
+}
+
+fn get_config_path(config_path: Option<String>) -> Result<PathBuf> {
+    if let Some(path) = config_path {
+        let path = PathBuf::from(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        Ok(path)
+    } else {
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from(".config"))
+            .join("masix");
+        std::fs::create_dir_all(&config_dir)?;
+        Ok(config_dir.join("config.toml"))
+    }
+}
+
+fn prompt_input(prompt: &str, default: &str) -> Result<String> {
+    use std::io::{self, BufRead, Write};
+
+    if default.is_empty() {
+        print!("{}: ", prompt);
+    } else {
+        print!("{} [{}]: ", prompt, default);
+    }
+    io::stdout().flush()?;
+
+    let stdin = io::stdin();
+    let mut input = String::new();
+    stdin.lock().read_line(&mut input)?;
+
+    let trimmed = input.trim().to_string();
+    if trimmed.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(trimmed)
+    }
+}
+
+fn prompt_confirm(prompt: &str, default: bool) -> Result<bool> {
+    let default_str = if default { "Y/n" } else { "y/N" };
+    let input = prompt_input(&format!("{} ({})", prompt, default_str), "")?;
+
+    if input.is_empty() {
+        Ok(default)
+    } else {
+        Ok(input.to_lowercase() == "y" || input.to_lowercase() == "yes")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_daemon_args;
+
+    #[test]
+    fn daemon_args_put_global_options_before_subcommand() {
+        let args = build_daemon_args(Some("/tmp/config.toml"), "debug");
+        assert_eq!(
+            args,
+            vec![
+                "--config",
+                "/tmp/config.toml",
+                "--log-level",
+                "debug",
+                "start",
+                "--foreground"
+            ]
+        );
+    }
+
+    #[test]
+    fn daemon_args_without_config_are_valid() {
+        let args = build_daemon_args(None, "info");
+        assert_eq!(args, vec!["--log-level", "info", "start", "--foreground"]);
+    }
 }
