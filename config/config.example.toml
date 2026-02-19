@@ -56,6 +56,7 @@ default_provider = "openai"
 [[providers.providers]]
 name = "openai"
 api_key = "YOUR_OPENAI_API_KEY"
+base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 
 [[providers.providers]]
@@ -63,6 +64,24 @@ name = "ollama"
 api_key = "not-needed"
 base_url = "http://localhost:11434/v1"
 model = "deepseek-r1:7b"
+
+# [[providers.providers]]
+# name = "openrouter"
+# api_key = "YOUR_OPENROUTER_API_KEY"
+# base_url = "https://openrouter.ai/api/v1"
+# model = "openai/gpt-4o-mini"
+
+# [[providers.providers]]
+# name = "zai"
+# api_key = "YOUR_ZAI_API_KEY"
+# base_url = "https://api.z.ai/api/paas/v4"
+# model = "glm-4.5"
+
+# [[providers.providers]]
+# name = "chutes"
+# api_key = "YOUR_CHUTES_API_KEY"
+# base_url = "https://llm.chutes.ai/v1"
+# model = "zai-org/GLM-5-TEE"
 
 [policy]
 # allowlist = ["123456789"]

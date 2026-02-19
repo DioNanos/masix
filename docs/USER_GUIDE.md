@@ -97,7 +97,72 @@ api_key = "YOUR_API_KEY"
 model = "gpt-4o-mini"
 ```
 
-### 2.2 Secret handling
+### 2.2 Multiple endpoints and providers
+
+MasiX supports multiple OpenAI-compatible providers at the same time.
+
+- Define one entry per provider in `[[providers.providers]]`
+- Set `base_url` for non-default OpenAI endpoints
+- Select active provider with `[providers].default_provider`
+- Restart runtime after config changes
+
+Example with OpenAI, OpenRouter, llama.cpp, z.ai, and chutes.ai:
+
+```toml
+[providers]
+default_provider = "openrouter"
+
+[[providers.providers]]
+name = "openai"
+api_key = "OPENAI_API_KEY"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+
+[[providers.providers]]
+name = "openrouter"
+api_key = "OPENROUTER_API_KEY"
+base_url = "https://openrouter.ai/api/v1"
+model = "openai/gpt-4o-mini"
+
+[[providers.providers]]
+name = "llama_local"
+api_key = "not-needed"
+base_url = "http://127.0.0.1:8080/v1"
+model = "local-model"
+
+[[providers.providers]]
+name = "zai"
+api_key = "ZAI_API_KEY"
+base_url = "https://api.z.ai/api/paas/v4"
+model = "glm-4.5"
+
+[[providers.providers]]
+name = "chutes"
+api_key = "CHUTES_API_KEY"
+base_url = "https://llm.chutes.ai/v1"
+model = "zai-org/GLM-5-TEE"
+```
+
+Switch active endpoint/provider:
+
+```toml
+[providers]
+default_provider = "llama_local"
+```
+
+Notes:
+
+- Current runtime uses `default_provider` for inbound chat handling.
+- If your z.ai account/model requires coding endpoint, use:
+  - `https://api.z.ai/api/coding/paas/v4`
+- For chutes.ai, verify your account docs if your tenant uses a different base URL.
+- Provider docs:
+  - OpenAI: `https://platform.openai.com/docs/api-reference`
+  - OpenRouter: `https://openrouter.ai/docs`
+  - z.ai: `https://docs.z.ai/`
+  - chutes.ai: `https://docs.chutes.ai/`
+
+### 2.3 Secret handling
 
 - `masix config show` prints a redacted view (`***REDACTED***`)
 - Do not commit real keys/tokens to git
