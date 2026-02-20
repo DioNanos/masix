@@ -14,6 +14,7 @@ members = [
     "crates/masix-whatsapp",
     "crates/masix-sms",
     "crates/masix-cli",
+    "crates/masix-wasm-tools",
 ]
 
 [workspace.package]
@@ -71,3 +72,6 @@ shlex = "1.3"
 
 # MCP
 serde_repr = "0.1"
+
+# WASM
+wasmi = "0.40"

@@ -19,6 +19,7 @@ masix-cron = { path = "../masix-cron" }
 masix-telegram = { path = "../masix-telegram" }
 masix-whatsapp = { path = "../masix-whatsapp" }
 masix-sms = { path = "../masix-sms" }
+masix-wasm-tools = { path = "../masix-wasm-tools" }
 
 # Async
 tokio.workspace = true
@@ -43,3 +44,5 @@ chrono.workspace = true
 
 # Utils
 dirs.workspace = true
+url.workspace = true
+scraper = "0.21"
