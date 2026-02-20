@@ -5,7 +5,7 @@
 use anyhow::{anyhow, Result};
 use masix_config::{Config, RetryPolicyConfig};
 use masix_exec::{manage_termux_boot, run_command, BootAction, ExecMode, ExecPolicy};
-use masix_ipc::{Envelope, EventBus, MessageKind, OutboundMessage};
+use masix_ipc::{Envelope, EventBus, InlineButton, MessageKind, OutboundMessage};
 use masix_mcp::McpClient;
 use masix_policy::PolicyEngine;
 use masix_providers::{
@@ -19,6 +19,8 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{error, info, warn};
+
+use masix_telegram::menu::Language;
 
 const MAX_TOOL_ITERATIONS: usize = 5;
 const MEMORY_MAX_CONTEXT_ENTRIES: usize = 12;
@@ -49,6 +51,7 @@ pub struct MasixRuntime {
     mcp_client: Option<Arc<Mutex<McpClient>>>,
     event_bus: EventBus,
     system_prompt: String,
+    user_languages: Arc<Mutex<HashMap<i64, Language>>>,
 }
 
 impl MasixRuntime {
@@ -89,6 +92,7 @@ impl MasixRuntime {
             mcp_client,
             event_bus: EventBus::new(),
             system_prompt,
+            user_languages: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -130,6 +134,7 @@ impl MasixRuntime {
             Arc::new(Mutex::new(HashMap::new()));
         let bot_contexts_for_processor = Arc::clone(&bot_contexts);
         let default_cron_account_tag = self.default_telegram_account_tag();
+        let user_languages_for_processor = Arc::clone(&self.user_languages);
 
         tokio::spawn(async move {
             let mut cron_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
@@ -149,6 +154,7 @@ impl MasixRuntime {
                                     &policy,
                                     &rate_state,
                                     &bot_contexts_for_processor,
+                                    &user_languages_for_processor,
                                 ).await {
                                     error!("Error processing inbound message: {}", e);
                                 }
@@ -550,6 +556,7 @@ impl MasixRuntime {
         policy: &PolicyEngine,
         rate_state: &Arc<Mutex<HashMap<String, (i64, u32)>>>,
         bot_contexts: &Arc<HashMap<String, BotContext>>,
+        user_languages: &Arc<Mutex<HashMap<i64, masix_telegram::menu::Language>>>,
     ) -> Result<()> {
         let account_tag = envelope
             .payload
@@ -597,17 +604,53 @@ impl MasixRuntime {
                     return Ok(());
                 }
 
-                if text.starts_with("/start") {
-                    let (menu_text, keyboard) = masix_telegram::menu::home_menu();
+                if text.starts_with("/start") || text.starts_with("/menu") {
+                    info!("Processing menu command");
                     if let Some(chat_id) = envelope.chat_id {
+                        let lang = user_languages
+                            .lock()
+                            .await
+                            .get(&chat_id)
+                            .copied()
+                            .unwrap_or_default();
+                        let (menu_text, keyboard) = masix_telegram::menu::home_menu(lang);
+                        info!("Sending home menu to chat_id: {}", chat_id);
                         let msg = OutboundMessage {
                             channel: envelope.channel.clone(),
                             account_tag: account_tag.clone(),
                             chat_id,
                             text: menu_text,
                             reply_to: None,
-                            edit_message_id: envelope.message_id,
+                            edit_message_id: None,
                             inline_keyboard: Some(keyboard),
+                            chat_action: None,
+                        };
+                        if let Err(e) = outbound_sender.send(msg) {
+                            error!("Failed to send menu: {}", e);
+                        }
+                    }
+                    return Ok(());
+                }
+
+                if text.starts_with("/new") {
+                    info!("Processing /new - session reset");
+                    if let Some(chat_id) = envelope.chat_id {
+                        let lang = user_languages
+                            .lock()
+                            .await
+                            .get(&chat_id)
+                            .copied()
+                            .unwrap_or_default();
+                        let reset_text = masix_telegram::menu::session_reset_text(lang);
+                        Self::clear_chat_memory(&bot_context, chat_id).await;
+                        let msg = OutboundMessage {
+                            channel: envelope.channel.clone(),
+                            account_tag: account_tag.clone(),
+                            chat_id,
+                            text: reset_text,
+                            reply_to: None,
+                            edit_message_id: None,
+                            inline_keyboard: None,
                             chat_action: None,
                         };
                         let _ = outbound_sender.send(msg);
@@ -615,16 +658,48 @@ impl MasixRuntime {
                     return Ok(());
                 }
 
-                if text.starts_with("/menu") {
-                    let (menu_text, keyboard) = masix_telegram::menu::home_menu();
+                if text.starts_with("/help") {
+                    info!("Processing /help");
                     if let Some(chat_id) = envelope.chat_id {
+                        let lang = user_languages
+                            .lock()
+                            .await
+                            .get(&chat_id)
+                            .copied()
+                            .unwrap_or_default();
+                        let help_text = masix_telegram::menu::help_text(lang);
+                        let msg = OutboundMessage {
+                            channel: envelope.channel.clone(),
+                            account_tag: account_tag.clone(),
+                            chat_id,
+                            text: help_text,
+                            reply_to: None,
+                            edit_message_id: None,
+                            inline_keyboard: None,
+                            chat_action: None,
+                        };
+                        let _ = outbound_sender.send(msg);
+                    }
+                    return Ok(());
+                }
+
+                if text.starts_with("/language") {
+                    info!("Processing /language");
+                    if let Some(chat_id) = envelope.chat_id {
+                        let lang = user_languages
+                            .lock()
+                            .await
+                            .get(&chat_id)
+                            .copied()
+                            .unwrap_or_default();
+                        let (menu_text, keyboard) = masix_telegram::menu::language_menu(lang);
                         let msg = OutboundMessage {
                             channel: envelope.channel.clone(),
                             account_tag: account_tag.clone(),
                             chat_id,
                             text: menu_text,
                             reply_to: None,
-                            edit_message_id: envelope.message_id,
+                            edit_message_id: None,
                             inline_keyboard: Some(keyboard),
                             chat_action: None,
                         };
@@ -824,11 +899,40 @@ impl MasixRuntime {
                         warn!("Blocked callback by policy from chat {}", chat_id);
                         return Ok(());
                     }
+
+                    // Handle language change
+                    if data.starts_with("lang:") {
+                        let lang_code = data.strip_prefix("lang:").unwrap_or("en");
+                        if let Ok(new_lang) = lang_code.parse::<Language>() {
+                            user_languages.lock().await.insert(chat_id, new_lang);
+                            let (text, keyboard) = masix_telegram::menu::settings_menu(new_lang);
+                            let msg = OutboundMessage {
+                                channel: envelope.channel.clone(),
+                                account_tag: account_tag.clone(),
+                                chat_id,
+                                text: masix_telegram::menu::language_changed_text(new_lang),
+                                reply_to: None,
+                                edit_message_id: envelope.message_id,
+                                inline_keyboard: Some(keyboard),
+                                chat_action: None,
+                            };
+                            let _ = outbound_sender.send(msg);
+                            return Ok(());
+                        }
+                    }
+
+                    let lang = user_languages
+                        .lock()
+                        .await
+                        .get(&chat_id)
+                        .copied()
+                        .unwrap_or_default();
                     if let Some(msg) = masix_telegram::menu::handle_callback(
                         data,
                         chat_id,
                         envelope.message_id,
                         account_tag.clone(),
+                        lang,
                     ) {
                         let _ = outbound_sender.send(msg);
                     }
@@ -1340,6 +1444,14 @@ impl MasixRuntime {
         file.write_all(line.as_bytes()).await?;
         file.write_all(b"\n").await?;
         Ok(())
+    }
+
+    async fn clear_chat_memory(context: &BotContext, chat_id: i64) {
+        let path = context.memory_dir.join(format!("chat_{}.jsonl", chat_id));
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+            info!("Cleared chat memory for chat_id: {}", chat_id);
+        }
     }
 
     async fn update_summary_snapshot(context: &BotContext, chat_id: i64) -> Result<()> {
