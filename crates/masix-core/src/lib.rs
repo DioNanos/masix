@@ -1156,94 +1156,115 @@ impl MasixRuntime {
         retry_policy: &RetryPolicy,
         profile_name: &str,
     ) -> Result<(masix_providers::ChatResponse, String)> {
-        if let Some(provider_name) = preferred_provider {
+        const MAX_ATTEMPTS_PER_PROVIDER: usize = 3;
+
+        // Single provider mode: use retry logic inside provider
+        if provider_chain.len() <= 1 {
+            let provider_name = provider_chain
+                .first()
+                .map(|s| s.as_str())
+                .or(preferred_provider);
             let response = if let Some(tool_defs) = &tools {
                 provider_router
                     .chat_with_tools(
                         messages,
                         tool_defs.clone(),
-                        Some(provider_name),
+                        provider_name,
                         Some(retry_policy),
                     )
                     .await?
             } else {
                 provider_router
-                    .chat(messages, Some(provider_name), Some(retry_policy))
+                    .chat(messages, provider_name, Some(retry_policy))
                     .await?
             };
-            return Ok((response, provider_name.to_string()));
+            let used = provider_name.unwrap_or("default").to_string();
+            return Ok((response, used));
         }
 
+        // Multi-provider fallback mode: rotate after 3 failures
+        let mut current_idx = 0;
+        let mut attempts_on_current = 0;
         let mut last_error: Option<anyhow::Error> = None;
-        let chain = if provider_chain.is_empty() {
-            vec!["".to_string()]
-        } else {
-            provider_chain.to_vec()
-        };
+        let mut tried_all = false;
 
-        for provider_name in chain {
+        loop {
+            let provider_name = &provider_chain[current_idx];
+
             let result = if let Some(tool_defs) = &tools {
                 provider_router
                     .chat_with_tools(
                         messages.clone(),
                         tool_defs.clone(),
-                        if provider_name.is_empty() {
-                            None
-                        } else {
-                            Some(provider_name.as_str())
-                        },
-                        Some(retry_policy),
+                        Some(provider_name),
+                        None, // No internal retry, we manage fallback ourselves
                     )
                     .await
             } else {
                 provider_router
-                    .chat(
-                        messages.clone(),
-                        if provider_name.is_empty() {
-                            None
-                        } else {
-                            Some(provider_name.as_str())
-                        },
-                        Some(retry_policy),
-                    )
+                    .chat(messages.clone(), Some(provider_name), None)
                     .await
             };
 
             match result {
                 Ok(response) => {
-                    let used = if provider_name.is_empty() {
-                        "default".to_string()
-                    } else {
-                        provider_name
-                    };
-                    return Ok((response, used));
+                    info!(
+                        "Provider '{}' succeeded for bot '{}' after {} attempts",
+                        provider_name,
+                        profile_name,
+                        attempts_on_current + 1
+                    );
+                    return Ok((response, provider_name.clone()));
                 }
                 Err(e) => {
-                    let provider_label = if provider_name.is_empty() {
-                        "default"
-                    } else {
-                        provider_name.as_str()
-                    };
+                    attempts_on_current += 1;
+                    let err_msg = e.to_string();
 
                     if Self::is_auth_error(&e) {
                         return Err(anyhow::anyhow!(
                             "Provider '{}' auth/permission error for bot '{}': {}",
-                            provider_label,
+                            provider_name,
                             profile_name,
-                            e
+                            err_msg
                         ));
                     }
 
                     warn!(
-                        "Provider '{}' failed for bot '{}', trying fallback: {}",
-                        provider_label, profile_name, e
+                        "Provider '{}' failed for bot '{}' (attempt {}/{}): {}",
+                        provider_name,
+                        profile_name,
+                        attempts_on_current,
+                        MAX_ATTEMPTS_PER_PROVIDER,
+                        err_msg
                     );
+
                     last_error = Some(e);
+
+                    // Switch to next provider after max attempts
+                    if attempts_on_current >= MAX_ATTEMPTS_PER_PROVIDER {
+                        let prev_idx = current_idx;
+                        current_idx = (current_idx + 1) % provider_chain.len();
+
+                        // Check if we've tried all providers
+                        if current_idx == 0 {
+                            if tried_all {
+                                // Full cycle completed, all providers exhausted
+                                break;
+                            }
+                            tried_all = true;
+                        }
+
+                        warn!(
+                            "Switching from '{}' to '{}' for bot '{}'",
+                            provider_chain[prev_idx], provider_chain[current_idx], profile_name
+                        );
+                        attempts_on_current = 0;
+                    }
                 }
             }
         }
 
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No provider available")))
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All providers exhausted")))
     }
 
     fn is_auth_error(err: &anyhow::Error) -> bool {
