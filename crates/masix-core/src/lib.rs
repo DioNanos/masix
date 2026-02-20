@@ -2,7 +2,10 @@
 //!
 //! Main runtime orchestration with MCP + Cron + LLM support
 
+mod builtin_tools;
+
 use anyhow::{anyhow, Result};
+use builtin_tools::{execute_builtin_tool, get_builtin_tool_definitions, is_builtin_tool};
 use masix_config::{Config, RetryPolicyConfig};
 use masix_exec::{manage_termux_boot, run_command, BootAction, ExecMode, ExecPolicy};
 use masix_ipc::{Envelope, EventBus, InlineButton, MessageKind, OutboundMessage};
@@ -477,7 +480,7 @@ impl MasixRuntime {
     }
 
     async fn get_mcp_tools(mcp_client: &Option<Arc<Mutex<McpClient>>>) -> Vec<ToolDefinition> {
-        let mut tools = Vec::new();
+        let mut tools = get_builtin_tool_definitions();
 
         if let Some(client) = mcp_client {
             let mcp = client.lock().await;
@@ -502,8 +505,20 @@ impl MasixRuntime {
     async fn execute_tool_call(
         mcp_client: &Option<Arc<Mutex<McpClient>>>,
         tool_call: &ToolCall,
+        exec_policy: &ExecPolicy,
+        workdir: &Path,
     ) -> Result<String> {
-        let parts: Vec<&str> = tool_call.function.name.splitn(2, '_').collect();
+        let tool_name = &tool_call.function.name;
+
+        // Check if it's a builtin tool
+        if is_builtin_tool(tool_name) {
+            let arguments = serde_json::from_str(&tool_call.function.arguments)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            return execute_builtin_tool(tool_name, arguments, exec_policy, workdir).await;
+        }
+
+        // Otherwise, it's an MCP tool
+        let parts: Vec<&str> = tool_name.splitn(2, '_').collect();
         if parts.len() != 2 {
             return Err(anyhow::anyhow!(
                 "Invalid tool name format: {}",
@@ -512,14 +527,14 @@ impl MasixRuntime {
         }
 
         let server_name = parts[0];
-        let tool_name = parts[1];
+        let mcp_tool_name = parts[1];
 
         let arguments: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
             .unwrap_or_else(|_| serde_json::json!({}));
 
         if let Some(client) = mcp_client {
             let mcp = client.lock().await;
-            let result = mcp.call_tool(server_name, tool_name, arguments).await?;
+            let result = mcp.call_tool(server_name, mcp_tool_name, arguments).await?;
 
             let mut content_parts = Vec::new();
             for item in &result.content {
@@ -600,6 +615,31 @@ impl MasixRuntime {
                             "Rate limit exceeded. Please retry shortly.",
                             envelope.message_id,
                         );
+                    }
+                    return Ok(());
+                }
+
+                // Show command list when user types just "/"
+                if text == "/" {
+                    if let Some(chat_id) = envelope.chat_id {
+                        let lang = user_languages
+                            .lock()
+                            .await
+                            .get(&chat_id)
+                            .copied()
+                            .unwrap_or_default();
+                        let cmd_list = masix_telegram::menu::command_list(lang);
+                        let msg = OutboundMessage {
+                            channel: envelope.channel.clone(),
+                            account_tag: account_tag.clone(),
+                            chat_id,
+                            text: cmd_list,
+                            reply_to: None,
+                            edit_message_id: None,
+                            inline_keyboard: None,
+                            chat_action: None,
+                        };
+                        let _ = outbound_sender.send(msg);
                     }
                     return Ok(());
                 }
@@ -841,11 +881,17 @@ impl MasixRuntime {
                         for tool_call in tool_calls {
                             info!("Executing tool: {}", tool_call.function.name);
 
-                            let tool_result =
-                                match Self::execute_tool_call(mcp_client, tool_call).await {
-                                    Ok(result) => result,
-                                    Err(e) => format!("Error: {}", e),
-                                };
+                            let tool_result = match Self::execute_tool_call(
+                                mcp_client,
+                                tool_call,
+                                &bot_context.exec_policy,
+                                &bot_context.workdir,
+                            )
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(e) => format!("Error: {}", e),
+                            };
 
                             let tool_message = ChatMessage {
                                 role: "tool".to_string(),

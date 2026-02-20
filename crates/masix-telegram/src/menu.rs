@@ -173,6 +173,16 @@ pub fn help_text(lang: Language) -> String {
     }.to_string()
 }
 
+pub fn command_list(lang: Language) -> String {
+    match lang {
+        Language::English => "📋 *Commands*\n\n/start - Main menu\n/menu - Main menu\n/new - Reset session\n/help - Help\n/language - Language\n/cron - Reminders\n/exec - Run commands\n/termux - Termux tools",
+        Language::Spanish => "📋 *Comandos*\n\n/start - Menú principal\n/menu - Menú principal\n/new - Reiniciar sesión\n/help - Ayuda\n/language - Idioma\n/cron - Recordatorios\n/exec - Ejecutar comandos\n/termux - Herramientas Termux",
+        Language::Chinese => "📋 *命令*\n\n/start - 主菜单\n/menu - 主菜单\n/new - 重置会话\n/help - 帮助\n/language - 语言\n/cron - 提醒\n/exec - 执行命令\n/termux - Termux工具",
+        Language::Russian => "📋 *Команды*\n\n/start - Главное меню\n/menu - Главное меню\n/new - Сброс сессии\n/help - Помощь\n/language - Язык\n/cron - Напоминания\n/exec - Выполнить команды\n/termux - Инструменты Termux",
+        Language::Italian => "📋 *Comandi*\n\n/start - Menu principale\n/menu - Menu principale\n/new - Reset sessione\n/help - Aiuto\n/language - Lingua\n/cron - Promemoria\n/exec - Esegui comandi\n/termux - Strumenti Termux",
+    }.to_string()
+}
+
 pub fn session_reset_text(lang: Language) -> String {
     match lang {
         Language::English => "🔄 *Session Reset*\n\nConversation history cleared. Starting fresh!",
