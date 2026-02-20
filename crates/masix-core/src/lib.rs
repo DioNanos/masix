@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use builtin_tools::{execute_builtin_tool, get_builtin_tool_definitions, is_builtin_tool};
 use masix_config::{Config, RetryPolicyConfig};
 use masix_exec::{manage_termux_boot, run_command, BootAction, ExecMode, ExecPolicy};
-use masix_ipc::{Envelope, EventBus, InlineButton, MessageKind, OutboundMessage};
+use masix_ipc::{Envelope, EventBus, MessageKind, OutboundMessage};
 use masix_mcp::McpClient;
 use masix_policy::PolicyEngine;
 use masix_providers::{
@@ -55,6 +55,8 @@ pub struct MasixRuntime {
     event_bus: EventBus,
     system_prompt: String,
     user_languages: Arc<Mutex<HashMap<i64, Language>>>,
+    user_providers: Arc<Mutex<HashMap<i64, String>>>,
+    user_models: Arc<Mutex<HashMap<i64, String>>>,
 }
 
 impl MasixRuntime {
@@ -96,6 +98,8 @@ impl MasixRuntime {
             event_bus: EventBus::new(),
             system_prompt,
             user_languages: Arc::new(Mutex::new(HashMap::new())),
+            user_providers: Arc::new(Mutex::new(HashMap::new())),
+            user_models: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -138,6 +142,9 @@ impl MasixRuntime {
         let bot_contexts_for_processor = Arc::clone(&bot_contexts);
         let default_cron_account_tag = self.default_telegram_account_tag();
         let user_languages_for_processor = Arc::clone(&self.user_languages);
+        let user_providers_for_processor = Arc::clone(&self.user_providers);
+        let user_models_for_processor = Arc::clone(&self.user_models);
+        let config_for_processor = self.config.clone();
 
         tokio::spawn(async move {
             let mut cron_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
@@ -158,6 +165,9 @@ impl MasixRuntime {
                                     &rate_state,
                                     &bot_contexts_for_processor,
                                     &user_languages_for_processor,
+                                    &user_providers_for_processor,
+                                    &user_models_for_processor,
+                                    &config_for_processor,
                                 ).await {
                                     error!("Error processing inbound message: {}", e);
                                 }
@@ -572,6 +582,9 @@ impl MasixRuntime {
         rate_state: &Arc<Mutex<HashMap<String, (i64, u32)>>>,
         bot_contexts: &Arc<HashMap<String, BotContext>>,
         user_languages: &Arc<Mutex<HashMap<i64, masix_telegram::menu::Language>>>,
+        user_providers: &Arc<Mutex<HashMap<i64, String>>>,
+        user_models: &Arc<Mutex<HashMap<i64, String>>>,
+        config: &Config,
     ) -> Result<()> {
         let account_tag = envelope
             .payload
@@ -741,6 +754,76 @@ impl MasixRuntime {
                             reply_to: None,
                             edit_message_id: None,
                             inline_keyboard: Some(keyboard),
+                            chat_action: None,
+                        };
+                        let _ = outbound_sender.send(msg);
+                    }
+                    return Ok(());
+                }
+
+                if text.starts_with("/provider") {
+                    info!("Processing /provider");
+                    if let Some(chat_id) = envelope.chat_id {
+                        let response = Self::handle_provider_chat_command(
+                            text,
+                            chat_id,
+                            config,
+                            user_providers,
+                        )
+                        .await;
+                        let msg = OutboundMessage {
+                            channel: envelope.channel.clone(),
+                            account_tag: account_tag.clone(),
+                            chat_id,
+                            text: response,
+                            reply_to: None,
+                            edit_message_id: None,
+                            inline_keyboard: None,
+                            chat_action: None,
+                        };
+                        let _ = outbound_sender.send(msg);
+                    }
+                    return Ok(());
+                }
+
+                if text.starts_with("/model") {
+                    info!("Processing /model");
+                    if let Some(chat_id) = envelope.chat_id {
+                        let response = Self::handle_model_chat_command(
+                            text,
+                            chat_id,
+                            config,
+                            user_providers,
+                            user_models,
+                        )
+                        .await;
+                        let msg = OutboundMessage {
+                            channel: envelope.channel.clone(),
+                            account_tag: account_tag.clone(),
+                            chat_id,
+                            text: response,
+                            reply_to: None,
+                            edit_message_id: None,
+                            inline_keyboard: None,
+                            chat_action: None,
+                        };
+                        let _ = outbound_sender.send(msg);
+                    }
+                    return Ok(());
+                }
+
+                if text.starts_with("/mcp") {
+                    info!("Processing /mcp");
+                    if let Some(chat_id) = envelope.chat_id {
+                        let response = Self::handle_mcp_chat_command(text, config).await;
+                        let msg = OutboundMessage {
+                            channel: envelope.channel.clone(),
+                            account_tag: account_tag.clone(),
+                            chat_id,
+                            text: response,
+                            reply_to: None,
+                            edit_message_id: None,
+                            inline_keyboard: None,
                             chat_action: None,
                         };
                         let _ = outbound_sender.send(msg);
@@ -951,7 +1034,7 @@ impl MasixRuntime {
                         let lang_code = data.strip_prefix("lang:").unwrap_or("en");
                         if let Ok(new_lang) = lang_code.parse::<Language>() {
                             user_languages.lock().await.insert(chat_id, new_lang);
-                            let (text, keyboard) = masix_telegram::menu::settings_menu(new_lang);
+                            let (_text, keyboard) = masix_telegram::menu::settings_menu(new_lang);
                             let msg = OutboundMessage {
                                 channel: envelope.channel.clone(),
                                 account_tag: account_tag.clone(),
@@ -1335,7 +1418,7 @@ impl MasixRuntime {
         // Multi-provider fallback mode: rotate after 3 failures
         let mut current_idx = 0;
         let mut attempts_on_current = 0;
-        let mut last_error: Option<anyhow::Error> = None;
+        let mut last_error: Option<anyhow::Error>;
         let mut tried_all = false;
 
         loop {
@@ -1607,5 +1690,157 @@ impl MasixRuntime {
     pub async fn chat(&self, messages: Vec<ChatMessage>, provider: Option<&str>) -> Result<String> {
         let response = self.provider_router.chat(messages, provider, None).await?;
         Ok(response.content.unwrap_or_default())
+    }
+
+    async fn handle_provider_chat_command(
+        text: &str,
+        chat_id: i64,
+        config: &Config,
+        user_providers: &Arc<Mutex<HashMap<i64, String>>>,
+    ) -> String {
+        let rest = text.strip_prefix("/provider").unwrap_or("").trim();
+        
+        if rest.is_empty() || rest.eq_ignore_ascii_case("help") {
+            let mut lines = vec![
+                "🤖 *Provider Commands*".to_string(),
+                String::new(),
+                "/provider - Show current provider".to_string(),
+                "/provider list - List all providers".to_string(),
+                "/provider set <name> - Set provider for this chat".to_string(),
+                String::new(),
+                "Available providers:".to_string(),
+            ];
+            for p in &config.providers.providers {
+                let marker = if p.name == config.providers.default_provider { " (default)" } else { "" };
+                lines.push(format!("  • {}{}", p.name, marker));
+            }
+            lines.join("\n")
+        } else if rest.eq_ignore_ascii_case("list") {
+            let mut lines = vec!["📋 *Configured Providers*".to_string(), String::new()];
+            let current_provider = user_providers.lock().await.get(&chat_id).cloned();
+            for p in &config.providers.providers {
+                let is_default = p.name == config.providers.default_provider;
+                let is_current = current_provider.as_deref() == Some(&p.name);
+                
+                let mut markers = Vec::new();
+                if is_default { markers.push("default"); }
+                if is_current { markers.push("current"); }
+                
+                let marker_str = if markers.is_empty() { String::new() } else { format!(" ({})", markers.join(", ")) };
+                lines.push(format!("• {}{}", p.name, marker_str));
+                if let Some(model) = &p.model {
+                    lines.push(format!("  Model: {}", model));
+                }
+            }
+            lines.join("\n")
+        } else if let Some(name) = rest.strip_prefix("set ") {
+            let name = name.trim();
+            let exists = config.providers.providers.iter().any(|p| p.name == name);
+            if !exists {
+                format!("❌ Provider '{}' not found.\nUse /provider list to see available providers.", name)
+            } else {
+                user_providers.lock().await.insert(chat_id, name.to_string());
+                format!("✅ Provider set to '{}' for this chat.", name)
+            }
+        } else {
+            let current = user_providers
+                .lock()
+                .await
+                .get(&chat_id)
+                .cloned()
+                .unwrap_or_else(|| config.providers.default_provider.clone());
+            format!("📍 Current provider: {}", current)
+        }
+    }
+
+    async fn handle_model_chat_command(
+        text: &str,
+        chat_id: i64,
+        config: &Config,
+        user_providers: &Arc<Mutex<HashMap<i64, String>>>,
+        user_models: &Arc<Mutex<HashMap<i64, String>>>,
+    ) -> String {
+        let rest = text.strip_prefix("/model").unwrap_or("").trim();
+        
+        if rest.is_empty() || rest.eq_ignore_ascii_case("help") {
+            let current_provider = user_providers
+                .lock()
+                .await
+                .get(&chat_id)
+                .cloned()
+                .unwrap_or_else(|| config.providers.default_provider.clone());
+            let current_model = user_models.lock().await.get(&chat_id).cloned();
+            
+            let provider_config = config.providers.providers.iter()
+                .find(|p| p.name == current_provider);
+            
+            let default_model = provider_config.and_then(|p| p.model.as_deref()).unwrap_or("unknown");
+            
+            let lines = vec![
+                "🎯 *Model Commands*".to_string(),
+                String::new(),
+                format!("Current provider: {}", current_provider),
+                format!("Current model: {}", current_model.as_deref().unwrap_or(default_model)),
+                String::new(),
+                "/model <name> - Set model for this chat".to_string(),
+                "/model reset - Reset to default model".to_string(),
+            ];
+            lines.join("\n")
+        } else if rest.eq_ignore_ascii_case("reset") {
+            user_models.lock().await.remove(&chat_id);
+            "✅ Model reset to default for this chat.".to_string()
+        } else {
+            let model = rest.trim();
+            user_models.lock().await.insert(chat_id, model.to_string());
+            format!("✅ Model set to '{}' for this chat.", model)
+        }
+    }
+
+    async fn handle_mcp_chat_command(text: &str, config: &Config) -> String {
+        let rest = text.strip_prefix("/mcp").unwrap_or("").trim();
+        
+        let mcp = config.mcp.as_ref();
+        let is_enabled = mcp.map(|m| m.enabled).unwrap_or(false);
+        let servers = mcp.map(|m| m.servers.as_slice()).unwrap_or(&[]);
+        
+        if rest.is_empty() || rest.eq_ignore_ascii_case("help") {
+            let mut lines = vec![
+                "🔧 *MCP Status*".to_string(),
+                String::new(),
+                format!("Enabled: {}", if is_enabled { "✅" } else { "❌" }),
+                format!("Servers: {}", servers.len()),
+            ];
+            
+            if !servers.is_empty() {
+                lines.push(String::new());
+                lines.push("Configured servers:".to_string());
+                for s in servers {
+                    lines.push(format!("  • {} ({} {:?})", s.name, s.command, s.args));
+                }
+            }
+            
+            lines.push(String::new());
+            lines.push("Use CLI to manage MCP:".to_string());
+            lines.push("  masix config mcp list".to_string());
+            lines.push("  masix config mcp add <name> <cmd> [args]".to_string());
+            lines.push("  masix config mcp remove <name>".to_string());
+            
+            lines.join("\n")
+        } else if rest.eq_ignore_ascii_case("list") {
+            if !is_enabled {
+                "❌ MCP is disabled.".to_string()
+            } else if servers.is_empty() {
+                "📋 No MCP servers configured.".to_string()
+            } else {
+                let mut lines = vec!["📋 *MCP Servers*".to_string(), String::new()];
+                for s in servers {
+                    lines.push(format!("• {}", s.name));
+                    lines.push(format!("  Command: {} {:?}", s.command, s.args));
+                }
+                lines.join("\n")
+            }
+        } else {
+            "Unknown command. Use /mcp for status.".to_string()
+        }
     }
 }

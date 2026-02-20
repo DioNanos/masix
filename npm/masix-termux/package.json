@@ -1,18 +1,21 @@
 {
   "name": "@mmmbuto/masix",
-  "version": "0.1.0-beta.8",
+  "version": "0.1.0-beta.9",
   "description": "MIT Messaging Agent for Termux - Telegram, WhatsApp, SMS with MCP + Cron",
-  "main": "index.js",
+  "main": "check-update.js",
   "files": [
     "README.md",
     "install.js",
+    "check-update.js",
     "prebuilt/"
   ],
   "bin": {
-    "masix": "prebuilt/masix"
+    "masix": "prebuilt/masix",
+    "masix-check-update": "check-update.js"
   },
   "scripts": {
     "postinstall": "node install.js",
+    "check-update": "node check-update.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

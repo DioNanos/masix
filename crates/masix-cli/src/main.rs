@@ -16,8 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{info, warn};
-use tracing_subscriber::{self, EnvFilter};
+use tracing::info;
 
 const PID_FILE: &str = "masix.pid";
 
@@ -108,6 +107,16 @@ enum Commands {
     Logs {
         #[command(subcommand)]
         action: LogCommands,
+    },
+
+    /// Check for updates
+    CheckUpdate {
+        /// Output as JSON
+        #[arg(short, long)]
+        json: bool,
+        /// Force check (ignore cache)
+        #[arg(short, long)]
+        force: bool,
     },
 }
 
@@ -241,10 +250,84 @@ enum ConfigCommands {
     Telegram,
     /// Configure LLM provider interactively
     Provider {
-        /// Provider name (openai, openrouter, zai, chutes, ollama)
+        /// Provider name (openai, openrouter, zai, chutes, llama.cpp, xai, groq, etc.)
         #[arg(short, long)]
         name: Option<String>,
     },
+    /// Manage LLM providers
+    Providers {
+        #[command(subcommand)]
+        action: ProviderCommands,
+    },
+    /// Manage MCP servers
+    Mcp {
+        #[command(subcommand)]
+        action: McpCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProviderCommands {
+    /// List all configured providers
+    List,
+    /// Add a new provider
+    Add {
+        /// Provider name (e.g., openai, xai, groq)
+        name: String,
+        /// API key
+        #[arg(short, long)]
+        key: String,
+        /// Base URL (optional, uses default for known providers)
+        #[arg(short, long)]
+        url: Option<String>,
+        /// Model name
+        #[arg(short = 'm', long)]
+        model: Option<String>,
+        /// Set as default provider
+        #[arg(short, long)]
+        default: bool,
+    },
+    /// Set default provider
+    SetDefault {
+        /// Provider name
+        name: String,
+    },
+    /// Change model for a provider
+    Model {
+        /// Provider name
+        name: String,
+        /// New model name
+        model: String,
+    },
+    /// Remove a provider
+    Remove {
+        /// Provider name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCommands {
+    /// List MCP servers
+    List,
+    /// Add MCP server
+    Add {
+        /// Server name
+        name: String,
+        /// Command to run
+        command: String,
+        /// Command arguments
+        args: Vec<String>,
+    },
+    /// Remove MCP server
+    Remove {
+        /// Server name
+        name: String,
+    },
+    /// Enable MCP
+    Enable,
+    /// Disable MCP
+    Disable,
 }
 
 #[tokio::main]
@@ -608,6 +691,12 @@ async fn main() -> Result<()> {
             ConfigCommands::Provider { name } => {
                 run_provider_wizard(cli.config.clone(), name)?;
             }
+            ConfigCommands::Providers { action } => {
+                handle_provider_command(action, cli.config.clone())?;
+            }
+            ConfigCommands::Mcp { action } => {
+                handle_mcp_command(action, cli.config.clone())?;
+            }
         },
 
         Commands::Stats => {
@@ -750,6 +839,10 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+
+        Commands::CheckUpdate { json, force } => {
+            check_for_update(json, force).await?;
         }
     }
 
@@ -1218,44 +1311,18 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
 
     // Provider
     println!("\n── LLM Provider Setup ──");
-    let providers = vec![
-        (
-            "openai",
-            "OpenAI",
-            "https://api.openai.com/v1",
-            "gpt-4o-mini",
-        ),
-        (
-            "openrouter",
-            "OpenRouter",
-            "https://openrouter.ai/api/v1",
-            "openai/gpt-4o-mini",
-        ),
-        ("zai", "z.ai", "https://api.z.ai/api/paas/v4", "glm-4.5"),
-        (
-            "chutes",
-            "Chutes.ai",
-            "https://llm.chutes.ai/v1",
-            "zai-org/GLM-5-TEE",
-        ),
-        (
-            "ollama",
-            "Ollama (local)",
-            "http://localhost:11434/v1",
-            "llama3",
-        ),
-    ];
+    let providers = get_known_providers();
 
     println!("Available providers:");
     for (i, (_, name, _, _)) in providers.iter().enumerate() {
-        println!("  {}. {}", i + 1, name);
+        println!("  {:2}. {}", i + 1, name);
     }
 
-    let choice = prompt_input("Select provider (1-5) or press Enter to skip", "")?;
+    let choice = prompt_input(&format!("Select provider (1-{}) or press Enter to skip", providers.len()), "")?;
     if let Ok(idx) = choice.parse::<usize>() {
         if idx >= 1 && idx <= providers.len() {
             let (key, name, base_url, default_model) = &providers[idx - 1];
-            let api_key = if *key == "ollama" {
+            let api_key = if *key == "llama.cpp" {
                 "not-needed".to_string()
             } else {
                 prompt_input(&format!("{} API key", name), "")?
@@ -1365,43 +1432,17 @@ fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Res
     println!("╚════════════════════════════════════════════╝");
     println!();
 
-    let providers = vec![
-        (
-            "openai",
-            "OpenAI",
-            "https://api.openai.com/v1",
-            "gpt-4o-mini",
-        ),
-        (
-            "openrouter",
-            "OpenRouter",
-            "https://openrouter.ai/api/v1",
-            "openai/gpt-4o-mini",
-        ),
-        ("zai", "z.ai", "https://api.z.ai/api/paas/v4", "glm-4.5"),
-        (
-            "chutes",
-            "Chutes.ai",
-            "https://llm.chutes.ai/v1",
-            "zai-org/GLM-5-TEE",
-        ),
-        (
-            "ollama",
-            "Ollama (local)",
-            "http://localhost:11434/v1",
-            "llama3",
-        ),
-    ];
+    let providers = get_known_providers();
 
     let selected = if let Some(n) = name {
         providers.iter().find(|(key, _, _, _)| *key == n.as_str())
     } else {
         println!("Available providers:");
         for (i, (_, name, _, _)) in providers.iter().enumerate() {
-            println!("  {}. {}", i + 1, name);
+            println!("  {:2}. {}", i + 1, name);
         }
 
-        let choice = prompt_input("Select provider (1-5)", "")?;
+        let choice = prompt_input(&format!("Select provider (1-{})", providers.len()), "")?;
         let idx = choice.parse::<usize>().unwrap_or(0);
         if idx >= 1 && idx <= providers.len() {
             Some(&providers[idx - 1])
@@ -1417,8 +1458,8 @@ fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Res
 
     println!("\nConfiguring {}...", name);
 
-    let api_key = if *key == "ollama" {
-        println!("Ollama runs locally, no API key needed.");
+    let api_key = if *key == "llama.cpp" {
+        println!("llama.cpp runs locally, no API key needed.");
         "not-needed".to_string()
     } else {
         prompt_input(&format!("{} API key", name), "")?
@@ -1427,7 +1468,6 @@ fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Res
     let model = prompt_input("Model name", *default_model)?;
     let set_default = prompt_confirm("Set as default provider?", true)?;
 
-    // Load or create config
     let config_path = get_config_path(config_path)?;
     let mut config = if config_path.exists() {
         Config::load(&config_path)?
@@ -1455,6 +1495,210 @@ fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Res
         println!("Set as default provider");
     }
     println!("Config saved to: {}", config_path.display());
+
+    Ok(())
+}
+
+fn get_known_providers() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+    vec![
+        ("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
+        ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
+        ("zai", "z.ai (GLM)", "https://api.z.ai/api/paas/v4", "glm-4.5"),
+        ("chutes", "Chutes.ai", "https://llm.chutes.ai/v1", "zai-org/GLM-5-TEE"),
+        ("xai", "xAI (Grok)", "https://api.x.ai/v1", "grok-2-latest"),
+        ("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+        ("anthropic", "Anthropic (Claude)", "https://api.anthropic.com/v1", "claude-3-5-sonnet-latest"),
+        ("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash"),
+        ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
+        ("mistral", "Mistral AI", "https://api.mistral.ai/v1", "mistral-large-latest"),
+        ("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3-70b-chat-hf"),
+        ("fireworks", "Fireworks AI", "https://api.fireworks.ai/inference/v1", "accounts/fireworks/models/llama-v3-70b-instruct"),
+        ("cohere", "Cohere", "https://api.cohere.ai/v1", "command-r"),
+        ("llama.cpp", "llama.cpp (local)", "http://localhost:8080/v1", "local-model"),
+    ]
+}
+
+fn handle_provider_command(action: ProviderCommands, config_path: Option<String>) -> Result<()> {
+    let config_path = get_config_path(config_path)?;
+    let mut config = if config_path.exists() {
+        Config::load(&config_path)?
+    } else {
+        Config::default()
+    };
+
+    match action {
+        ProviderCommands::List => {
+            println!("Configured providers:\n");
+            if config.providers.providers.is_empty() {
+                println!("  No providers configured.");
+                println!("\n  Add one with: masix config providers add <name> --key <api-key>");
+            } else {
+                for provider in &config.providers.providers {
+                    let is_default = provider.name == config.providers.default_provider;
+                    let default_marker = if is_default { " (default)" } else { "" };
+                    println!("  {}{}", provider.name, default_marker);
+                    if let Some(model) = &provider.model {
+                        println!("    Model: {}", model);
+                    }
+                    if let Some(url) = &provider.base_url {
+                        println!("    URL: {}", url);
+                    }
+                    let key_preview = if provider.api_key.len() > 8 {
+                        format!("{}...", &provider.api_key[..8])
+                    } else {
+                        "***".to_string()
+                    };
+                    println!("    Key: {}", key_preview);
+                    println!();
+                }
+            }
+        }
+        ProviderCommands::Add { name, key, url, model, default } => {
+            let base_url = url.or_else(|| {
+                get_known_providers()
+                    .iter()
+                    .find(|(k, _, _, _)| *k == name)
+                    .map(|(_, _, url, _)| url.to_string())
+            });
+
+            let provider = masix_config::ProviderConfig {
+                name: name.clone(),
+                api_key: key,
+                base_url,
+                model,
+            };
+
+            config.providers.providers.push(provider);
+            if default || config.providers.default_provider.is_empty() {
+                config.providers.default_provider = name.clone();
+            }
+
+            config.validate()?;
+            let config_toml = toml::to_string_pretty(&config)?;
+            fs::write(&config_path, config_toml)?;
+
+            println!("✅ Provider '{}' added", name);
+            if default {
+                println!("Set as default provider");
+            }
+        }
+        ProviderCommands::SetDefault { name } => {
+            let exists = config.providers.providers.iter().any(|p| p.name == name);
+            if !exists {
+                anyhow::bail!("Provider '{}' not found", name);
+            }
+            config.providers.default_provider = name.clone();
+            config.validate()?;
+            let config_toml = toml::to_string_pretty(&config)?;
+            fs::write(&config_path, config_toml)?;
+            println!("✅ Default provider set to '{}'", name);
+        }
+        ProviderCommands::Model { name, model } => {
+            let provider = config
+                .providers
+                .providers
+                .iter_mut()
+                .find(|p| p.name == name)
+                .ok_or_else(|| anyhow!("Provider '{}' not found", name))?;
+            provider.model = Some(model.clone());
+            let config_toml = toml::to_string_pretty(&config)?;
+            fs::write(&config_path, config_toml)?;
+            println!("✅ Model for '{}' set to '{}'", name, model);
+        }
+        ProviderCommands::Remove { name } => {
+            let len_before = config.providers.providers.len();
+            config.providers.providers.retain(|p| p.name != name);
+            if config.providers.providers.len() == len_before {
+                anyhow::bail!("Provider '{}' not found", name);
+            }
+            if config.providers.default_provider == name {
+                config.providers.default_provider = config
+                    .providers
+                    .providers
+                    .first()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                if !config.providers.default_provider.is_empty() {
+                    println!("Default provider changed to '{}'", config.providers.default_provider);
+                }
+            }
+            let config_toml = toml::to_string_pretty(&config)?;
+            fs::write(&config_path, config_toml)?;
+            println!("✅ Provider '{}' removed", name);
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_mcp_command(action: McpCommands, config_path: Option<String>) -> Result<()> {
+    let config_path = get_config_path(config_path)?;
+    let mut config = if config_path.exists() {
+        Config::load(&config_path)?
+    } else {
+        Config::default()
+    };
+
+    match action {
+        McpCommands::List => {
+            let mcp = config.mcp.as_ref();
+            if mcp.is_none() || !mcp.unwrap().enabled {
+                println!("MCP is disabled.");
+                println!("\nEnable with: masix config mcp enable");
+                return Ok(());
+            }
+            let mcp = mcp.unwrap();
+            println!("MCP Status: enabled\n");
+            if mcp.servers.is_empty() {
+                println!("  No MCP servers configured.");
+                println!("\n  Add one with: masix config mcp add <name> <command> [args...]");
+            } else {
+                println!("Configured MCP servers:\n");
+                for server in &mcp.servers {
+                    println!("  {}", server.name);
+                    println!("    Command: {} {:?}", server.command, server.args);
+                }
+            }
+        }
+        McpCommands::Add { name, command, args } => {
+            let mcp = config.mcp.get_or_insert_with(Default::default);
+            mcp.enabled = true;
+            mcp.servers.push(masix_config::McpServer {
+                name: name.clone(),
+                command,
+                args,
+            });
+            let config_toml = toml::to_string_pretty(&config)?;
+            fs::write(&config_path, config_toml)?;
+            println!("✅ MCP server '{}' added", name);
+        }
+        McpCommands::Remove { name } => {
+            let mcp = config.mcp.as_mut().ok_or_else(|| anyhow!("MCP not configured"))?;
+            let len_before = mcp.servers.len();
+            mcp.servers.retain(|s| s.name != name);
+            if mcp.servers.len() == len_before {
+                anyhow::bail!("MCP server '{}' not found", name);
+            }
+            let config_toml = toml::to_string_pretty(&config)?;
+            fs::write(&config_path, config_toml)?;
+            println!("✅ MCP server '{}' removed", name);
+        }
+        McpCommands::Enable => {
+            let mcp = config.mcp.get_or_insert_with(Default::default);
+            mcp.enabled = true;
+            let config_toml = toml::to_string_pretty(&config)?;
+            fs::write(&config_path, config_toml)?;
+            println!("✅ MCP enabled");
+        }
+        McpCommands::Disable => {
+            if let Some(mcp) = &mut config.mcp {
+                mcp.enabled = false;
+            }
+            let config_toml = toml::to_string_pretty(&config)?;
+            fs::write(&config_path, config_toml)?;
+            println!("✅ MCP disabled");
+        }
+    }
 
     Ok(())
 }
@@ -1506,6 +1750,132 @@ fn prompt_confirm(prompt: &str, default: bool) -> Result<bool> {
     } else {
         Ok(input.to_lowercase() == "y" || input.to_lowercase() == "yes")
     }
+}
+
+async fn check_for_update(json: bool, force: bool) -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const NPM_REGISTRY_URL: &str = "https://registry.npmjs.org/@mmmbuto/masix/latest";
+    const CACHE_FILE: &str = ".masix/.update-check";
+    const CACHE_DURATION_SECS: u64 = 24 * 60 * 60; // 24 hours
+
+    let current_version = env!("CARGO_PKG_VERSION");
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("Cannot determine home directory"))?;
+    let cache_path = home.join(CACHE_FILE);
+
+    // Check cache
+    if !force && cache_path.exists() {
+        if let Ok(content) = fs::read_to_string(&cache_path) {
+            if let Ok(cached) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let (Some(ts), Some(latest)) = (cached["timestamp"].as_u64(), cached["latest"].as_str()) {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    if now - ts < CACHE_DURATION_SECS {
+                        let has_update = compare_versions(current_version, latest);
+                        if json {
+                            println!(
+                                "{{\"current\":\"{}\",\"latest\":\"{}\",\"has_update\":{}}}",
+                                current_version, latest, has_update
+                            );
+                        } else if has_update {
+                            print_update_message(current_version, latest);
+                        } else {
+                            println!("✅ masix is up to date (v{})", current_version);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    // Fetch from npm registry
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let response = match client.get(NPM_REGISTRY_URL).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            if json {
+                println!(
+                    "{{\"current\":\"{}\",\"latest\":\"{}\",\"has_update\":false,\"error\":\"{}\"}}",
+                    current_version, current_version, e
+                );
+            } else {
+                println!("Unable to check for updates: {}", e);
+            }
+            return Ok(());
+        }
+    };
+
+    let body = response.text().await?;
+    let pkg: serde_json::Value = serde_json::from_str(&body)?;
+    let latest = pkg["version"].as_str().unwrap_or(current_version);
+
+    // Update cache
+    if let Some(parent) = cache_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let _ = fs::write(
+        &cache_path,
+        format!("{{\"timestamp\":{},\"latest\":\"{}\"}}", now, latest),
+    );
+
+    let has_update = compare_versions(current_version, latest);
+
+    if json {
+        println!(
+            "{{\"current\":\"{}\",\"latest\":\"{}\",\"has_update\":{}}}",
+            current_version, latest, has_update
+        );
+    } else if has_update {
+        print_update_message(current_version, latest);
+    } else {
+        println!("✅ masix is up to date (v{})", current_version);
+    }
+
+    Ok(())
+}
+
+fn compare_versions(current: &str, latest: &str) -> bool {
+    let parse = |v: &str| {
+        v.trim_start_matches('v')
+            .split('.')
+            .filter_map(|s| s.parse::<u32>().ok())
+            .collect::<Vec<_>>()
+    };
+    let current_parts = parse(current);
+    let latest_parts = parse(latest);
+
+    for i in 0..std::cmp::max(current_parts.len(), latest_parts.len()) {
+        let c = current_parts.get(i).unwrap_or(&0);
+        let l = latest_parts.get(i).unwrap_or(&0);
+        if c < l {
+            return true;
+        }
+        if c > l {
+            return false;
+        }
+    }
+    false
+}
+
+fn print_update_message(current: &str, latest: &str) {
+    println!();
+    println!("┌─────────────────────────────────────────────┐");
+    println!("│  📦 Update Available!                        │");
+    println!("├─────────────────────────────────────────────┤");
+    println!("│  Current: v{:<28} │", current);
+    println!("│  Latest:  v{:<28} │", latest);
+    println!("├─────────────────────────────────────────────┤");
+    println!("│  Run to update:                              │");
+    println!("│  npm install -g @mmmbuto/masix@latest       │");
+    println!("└─────────────────────────────────────────────┘");
+    println!();
 }
 
 #[cfg(test)]

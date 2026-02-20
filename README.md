@@ -19,7 +19,7 @@ MasiX is a Rust-first automation runtime focused on Termux/Linux mobile workflow
 
 - Telegram long polling with persisted offsets and inline-menu callbacks
 - Tool-calling pipeline: LLM -> MCP execution -> final LLM response
-- OpenAI-compatible provider layer
+- OpenAI-compatible provider layer with 14+ providers (OpenAI, xAI/Grok, Groq, Anthropic, Gemini, DeepSeek, Mistral, etc.)
 - Per-bot profiles (workdir, memory, primary model + fallback chain)
 - SQLite persistence for reminders/cron and offsets
 - Cron reminders scoped by Telegram bot/account to avoid cross-bot overlap
@@ -27,6 +27,8 @@ MasiX is a Rust-first automation runtime focused on Termux/Linux mobile workflow
 - Termux boot management (`masix termux boot enable|disable|status`)
 - SOUL.md startup context support
 - NPM package: `@mmmbuto/masix`
+- Runtime provider/model switching via chat commands
+- MCP server management via CLI
 
 ## Quick Install
 
@@ -44,6 +46,76 @@ masix config validate
 masix cron add 'domani alle 9 "Daily check"' --account-tag 123456789
 masix termux boot status
 ```
+
+## Provider Management (CLI)
+
+```bash
+# List configured providers
+masix config providers list
+
+# Add a new provider
+masix config providers add xai --key sk-xxx --default
+masix config providers add groq --key gsk-xxx --model llama-3.3-70b-versatile
+
+# Change default provider or model
+masix config providers set-default openai
+masix config providers model openai gpt-4o
+
+# Remove a provider
+masix config providers remove ollama
+```
+
+## MCP Management (CLI)
+
+```bash
+# List MCP servers
+masix config mcp list
+
+# Add/remove MCP servers
+masix config mcp add brave npx -y @modelcontextprotocol/server-brave-search
+masix config mcp remove memory
+
+# Enable/disable MCP
+masix config mcp enable
+masix config mcp disable
+```
+
+## Chat Commands
+
+| Command | Description |
+|---------|-------------|
+| `/start` `/menu` | Show main menu |
+| `/new` | Reset conversation session |
+| `/help` | Show help |
+| `/language` | Change language (EN/ES/ZH/RU/IT) |
+| `/provider` | Show current provider |
+| `/provider list` | List all providers |
+| `/provider set <name>` | Switch provider for this chat |
+| `/model` | Show current model |
+| `/model <name>` | Change model for this chat |
+| `/mcp` | Show MCP status |
+| `/cron` | Manage reminders |
+| `/exec` | Run shell commands |
+| `/termux` | Termux-specific tools |
+
+## Supported Providers
+
+| Provider | Default Model | Notes |
+|----------|---------------|-------|
+| OpenAI | gpt-4o-mini | Official API |
+| OpenRouter | openai/gpt-4o-mini | Multi-provider gateway |
+| z.ai (GLM) | glm-4.5 | Chinese LLM |
+| Chutes | zai-org/GLM-5-TEE | Decentralized |
+| xAI (Grok) | grok-2-latest | Elon Musk's AI |
+| Groq | llama-3.3-70b-versatile | Fast inference |
+| Anthropic | claude-3-5-sonnet-latest | Claude |
+| Gemini | gemini-2.0-flash | Google |
+| DeepSeek | deepseek-chat | Chinese reasoning |
+| Mistral | mistral-large-latest | European |
+| Together AI | meta-llama/Llama-3-70b | Multi-model |
+| Fireworks | llama-v3-70b-instruct | Fast inference |
+| Cohere | command-r | Enterprise |
+| llama.cpp | local-model | Local inference |
 
 ## Build From Source
 

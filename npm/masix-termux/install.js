@@ -51,6 +51,14 @@ if (fs.existsSync(prebuiltPath)) {
   }
 }
 
+// Run update check in background (don't block install)
 console.log('\n🎉 masix installed successfully!');
 console.log('   Run "masix --help" to get started.');
-console.log('   Run "masix config init" to create default config.\n');
+console.log('   Run "masix config init" to create default config.');
+console.log('   Run "masix check-update" to check for updates.\n');
+
+// Create .masix directory if needed
+const masixDir = path.join(require('os').homedir(), '.masix');
+if (!fs.existsSync(masixDir)) {
+  fs.mkdirSync(masixDir, { recursive: true });
+}

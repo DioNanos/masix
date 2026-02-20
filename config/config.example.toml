@@ -1,42 +1,23 @@
 # Masix Configuration Example
+#
+# Run 'masix config init' for interactive setup wizard
+# The wizard will help you configure providers and models
 
 [core]
 data_dir = "~/.masix"
 log_level = "info"
-soul_file = "~/.masix/SOUL.md"
 
 [telegram]
 poll_timeout_secs = 60
-client_recreate_interval_secs = 60
-default_policy = "mention_only"
 
 [[telegram.accounts]]
 bot_token = "YOUR_BOT_TOKEN_HERE"
-# allowed_chats = [123456789, -987654321]
-# bot_profile = "ops_bot"
 
 [whatsapp]
 enabled = false
-transport_path = "whatsapp-transport.js"
-
-[[whatsapp.accounts]]
-# session_file = "~/.masix/whatsapp/session.json"
 
 [sms]
 enabled = true
-watch_interval_secs = 30
-
-# [[sms.rules]]
-# event_type = "termux_sms"
-# pattern_type = "number_contains"
-# pattern_value = "+3906"
-# action_type = "telegram_notify"
-# action_config = '''
-# {
-#   "chat_id": 123456789,
-#   "template": "📨 SMS da {number}: {body}"
-# }
-# '''
 
 [mcp]
 enabled = true
@@ -51,69 +32,23 @@ name = "memory"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-memory"]
 
+# Providers will be configured by 'masix config init' wizard
 [providers]
-default_provider = "openai"
+default_provider = ""
 
-[[providers.providers]]
-name = "openai"
-api_key = "YOUR_OPENAI_API_KEY"
-base_url = "https://api.openai.com/v1"
-model = "gpt-4o-mini"
-
-[[providers.providers]]
-name = "ollama"
-api_key = "not-needed"
-base_url = "http://localhost:11434/v1"
-model = "deepseek-r1:7b"
-
-# [[providers.providers]]
-# name = "openrouter"
-# api_key = "YOUR_OPENROUTER_API_KEY"
-# base_url = "https://openrouter.ai/api/v1"
-# model = "openai/gpt-4o-mini"
-
-# [[providers.providers]]
-# name = "zai"
-# api_key = "YOUR_ZAI_API_KEY"
-# base_url = "https://api.z.ai/api/paas/v4"
-# model = "glm-4.5"
-
-# [[providers.providers]]
-# name = "chutes"
-# api_key = "YOUR_CHUTES_API_KEY"
-# base_url = "https://llm.chutes.ai/v1"
-# model = "zai-org/GLM-5-TEE"
-
-# Optional per-bot isolation and model fallback chains
-#
+# Bot profiles (optional)
 # [bots]
-# strict_account_profile_mapping = false
-#
 # [[bots.profiles]]
-# name = "ops_bot"
-# workdir = "~/.masix/bots/ops_bot"
-# memory_file = "~/.masix/bots/ops_bot/MEMORY.md"
-# provider_primary = "openrouter"
-# provider_fallback = ["zai", "openai", "ollama"]
-#
-# [bots.profiles.retry]
-# window_secs = 600
-# initial_delay_secs = 2
-# backoff_factor = 2
-# max_delay_secs = 30
+# name = "default"
+# workdir = "~/.masix"
+# provider_primary = ""
+# provider_fallback = []
 
-# Optional guarded command execution
-#
-# [exec]
-# enabled = true
-# allow_base = true
-# allow_termux = true
-# timeout_secs = 15
-# max_output_chars = 3500
-# base_allowlist = ["pwd", "ls", "date", "uname", "df", "free"]
-# termux_allowlist = ["termux-info", "termux-battery-status", "termux-location"]
+# Command execution
+[exec]
+enabled = true
+allow_base = true
+allow_termux = true
 
 [policy]
-# allowlist = ["123456789"]
-# denylist = ["987654321"]
 rate_limit = { messages_per_minute = 60 }
