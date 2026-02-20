@@ -560,6 +560,14 @@ impl TelegramAdapter {
                         }
                     }
 
+                    // Handle chat action (typing, etc.)
+                    if let Some(action) = &msg.chat_action {
+                        if let Err(e) = self.send_chat_action(msg.chat_id, action).await {
+                            warn!("Failed to send chat action: {}", e);
+                        }
+                        continue;
+                    }
+
                     let send_result = if let Some(message_id) = msg.edit_message_id {
                         self.edit_message_text(
                             msg.chat_id,

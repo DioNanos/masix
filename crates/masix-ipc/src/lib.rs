@@ -44,6 +44,7 @@ pub struct OutboundMessage {
     pub reply_to: Option<i64>,
     pub edit_message_id: Option<i64>,
     pub inline_keyboard: Option<Vec<Vec<InlineButton>>>,
+    pub chat_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -128,6 +128,7 @@ fn action_message(
         reply_to: None,
         edit_message_id: message_id,
         inline_keyboard: keyboard,
+        chat_action: None,
     }
 }
 
@@ -337,6 +338,7 @@ pub fn handle_callback(
         reply_to: None,
         edit_message_id: message_id,
         inline_keyboard: Some(keyboard),
+        chat_action: None,
     })
 }
 

@@ -213,6 +213,7 @@ impl MasixRuntime {
                     reply_to: None,
                     edit_message_id: None,
                     inline_keyboard: None,
+                    chat_action: None,
                 };
 
                 let _ = outbound_sender.send(msg);
@@ -607,6 +608,7 @@ impl MasixRuntime {
                             reply_to: None,
                             edit_message_id: envelope.message_id,
                             inline_keyboard: Some(keyboard),
+                            chat_action: None,
                         };
                         let _ = outbound_sender.send(msg);
                     }
@@ -624,6 +626,7 @@ impl MasixRuntime {
                             reply_to: None,
                             edit_message_id: envelope.message_id,
                             inline_keyboard: Some(keyboard),
+                            chat_action: None,
                         };
                         let _ = outbound_sender.send(msg);
                     }
@@ -656,6 +659,22 @@ impl MasixRuntime {
 
                 let tools = Self::get_mcp_tools(mcp_client).await;
                 let has_tools = !tools.is_empty();
+
+                // Send typing action while processing
+                if let Some(chat_id) = envelope.chat_id {
+                    let typing_msg = OutboundMessage {
+                        channel: envelope.channel.clone(),
+                        account_tag: account_tag.clone(),
+                        chat_id,
+                        text: String::new(),
+                        reply_to: None,
+                        edit_message_id: None,
+                        inline_keyboard: None,
+                        chat_action: Some("typing".to_string()),
+                    };
+                    let _ = outbound_sender.send(typing_msg);
+                }
+
                 let mut system_context = system_prompt.to_string();
                 if let Some(memory) = Self::load_bot_memory_file(&bot_context).await {
                     if !memory.trim().is_empty() {
@@ -792,6 +811,7 @@ impl MasixRuntime {
                         reply_to: envelope.message_id,
                         edit_message_id: None,
                         inline_keyboard: None,
+                        chat_action: None,
                     };
                     let _ = outbound_sender.send(msg);
                 }
@@ -1369,6 +1389,7 @@ impl MasixRuntime {
             reply_to,
             edit_message_id: None,
             inline_keyboard: None,
+            chat_action: None,
         });
     }
 

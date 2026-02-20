@@ -262,6 +262,7 @@ impl CronExecutor {
                                 reply_to: None,
                                 edit_message_id: None,
                                 inline_keyboard: None,
+                                chat_action: None,
                             };
 
                             if let Err(e) = outbound_sender.send(msg).await {
