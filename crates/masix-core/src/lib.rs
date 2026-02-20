@@ -12,7 +12,8 @@ use masix_ipc::{Envelope, EventBus, MessageKind, OutboundMessage};
 use masix_mcp::McpClient;
 use masix_policy::PolicyEngine;
 use masix_providers::{
-    ChatMessage, OpenAICompatibleProvider, ProviderRouter, RetryPolicy, ToolCall, ToolDefinition,
+    AnthropicProvider, ChatMessage, OpenAICompatibleProvider, Provider, ProviderRouter,
+    RetryPolicy, ToolCall, ToolDefinition,
 };
 use masix_storage::Storage;
 use std::collections::HashMap;
@@ -66,13 +67,26 @@ impl MasixRuntime {
         let mut provider_router = ProviderRouter::new(config.providers.default_provider.clone());
 
         for provider_config in &config.providers.providers {
-            let provider = OpenAICompatibleProvider::new(
-                provider_config.name.clone(),
-                provider_config.api_key.clone(),
-                provider_config.base_url.clone(),
-                provider_config.model.clone(),
-            );
-            provider_router.add_provider(Box::new(provider));
+            let provider_type = provider_config
+                .provider_type
+                .as_deref()
+                .unwrap_or("openai");
+
+            let provider: Box<dyn Provider> = match provider_type {
+                "anthropic" => Box::new(AnthropicProvider::new(
+                    provider_config.name.clone(),
+                    provider_config.api_key.clone(),
+                    provider_config.base_url.clone(),
+                    provider_config.model.clone(),
+                )),
+                _ => Box::new(OpenAICompatibleProvider::new(
+                    provider_config.name.clone(),
+                    provider_config.api_key.clone(),
+                    provider_config.base_url.clone(),
+                    provider_config.model.clone(),
+                )),
+            };
+            provider_router.add_provider(provider);
         }
 
         let mcp_client = if let Some(mcp_config) = &config.mcp {

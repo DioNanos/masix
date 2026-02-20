@@ -112,6 +112,8 @@ pub struct ProviderConfig {
     pub api_key: String,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub provider_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

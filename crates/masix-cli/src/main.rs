@@ -1314,14 +1314,14 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
     let providers = get_known_providers();
 
     println!("Available providers:");
-    for (i, (_, name, _, _)) in providers.iter().enumerate() {
+    for (i, (_, name, _, _, _)) in providers.iter().enumerate() {
         println!("  {:2}. {}", i + 1, name);
     }
 
     let choice = prompt_input(&format!("Select provider (1-{}) or press Enter to skip", providers.len()), "")?;
     if let Ok(idx) = choice.parse::<usize>() {
         if idx >= 1 && idx <= providers.len() {
-            let (key, name, base_url, default_model) = &providers[idx - 1];
+            let (key, name, base_url, default_model, provider_type) = &providers[idx - 1];
             let api_key = if *key == "llama.cpp" {
                 "not-needed".to_string()
             } else {
@@ -1334,6 +1334,7 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
                 api_key,
                 base_url: Some(base_url.to_string()),
                 model: Some(model),
+                provider_type: Some(provider_type.to_string()),
             };
             config.providers.providers.push(provider);
             config.providers.default_provider = key.to_string();
@@ -1435,10 +1436,10 @@ fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Res
     let providers = get_known_providers();
 
     let selected = if let Some(n) = name {
-        providers.iter().find(|(key, _, _, _)| *key == n.as_str())
+        providers.iter().find(|(key, _, _, _, _)| *key == n.as_str())
     } else {
         println!("Available providers:");
-        for (i, (_, name, _, _)) in providers.iter().enumerate() {
+        for (i, (_, name, _, _, _)) in providers.iter().enumerate() {
             println!("  {:2}. {}", i + 1, name);
         }
 
@@ -1451,7 +1452,7 @@ fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Res
         }
     };
 
-    let Some((key, name, base_url, default_model)) = selected else {
+    let Some((key, name, base_url, default_model, provider_type)) = selected else {
         println!("Invalid provider selection.");
         return Ok(());
     };
@@ -1480,6 +1481,7 @@ fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Res
         api_key,
         base_url: Some(base_url.to_string()),
         model: Some(model),
+        provider_type: Some(provider_type.to_string()),
     };
 
     config.providers.providers.push(provider);
@@ -1499,22 +1501,22 @@ fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Res
     Ok(())
 }
 
-fn get_known_providers() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+fn get_known_providers() -> Vec<(&'static str, &'static str, &'static str, &'static str, &'static str)> {
     vec![
-        ("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
-        ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
-        ("zai", "z.ai (GLM)", "https://api.z.ai/api/paas/v4", "glm-4.5"),
-        ("chutes", "Chutes.ai", "https://llm.chutes.ai/v1", "zai-org/GLM-5-TEE"),
-        ("xai", "xAI (Grok)", "https://api.x.ai/v1", "grok-2-latest"),
-        ("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
-        ("anthropic", "Anthropic (Claude)", "https://api.anthropic.com/v1", "claude-3-5-sonnet-latest"),
-        ("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash"),
-        ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
-        ("mistral", "Mistral AI", "https://api.mistral.ai/v1", "mistral-large-latest"),
-        ("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3-70b-chat-hf"),
-        ("fireworks", "Fireworks AI", "https://api.fireworks.ai/inference/v1", "accounts/fireworks/models/llama-v3-70b-instruct"),
-        ("cohere", "Cohere", "https://api.cohere.ai/v1", "command-r"),
-        ("llama.cpp", "llama.cpp (local)", "http://localhost:8080/v1", "local-model"),
+        ("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4o-mini", "openai"),
+        ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini", "openai"),
+        ("zai", "z.ai (GLM)", "https://api.z.ai/api/paas/v4", "glm-4.5", "openai"),
+        ("chutes", "Chutes.ai", "https://llm.chutes.ai/v1", "zai-org/GLM-5-TEE", "openai"),
+        ("xai", "xAI (Grok)", "https://api.x.ai/v1", "grok-2-latest", "openai"),
+        ("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", "openai"),
+        ("anthropic", "Anthropic (Claude)", "https://api.anthropic.com", "claude-3-5-sonnet-latest", "anthropic"),
+        ("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash", "openai"),
+        ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", "openai"),
+        ("mistral", "Mistral AI", "https://api.mistral.ai/v1", "mistral-large-latest", "openai"),
+        ("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3-70b-chat-hf", "openai"),
+        ("fireworks", "Fireworks AI", "https://api.fireworks.ai/inference/v1", "accounts/fireworks/models/llama-v3-70b-instruct", "openai"),
+        ("cohere", "Cohere", "https://api.cohere.ai/v1", "command-r", "openai"),
+        ("llama.cpp", "llama.cpp (local)", "http://localhost:8080/v1", "local-model", "openai"),
     ]
 }
 
@@ -1536,6 +1538,7 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
                 for provider in &config.providers.providers {
                     let is_default = provider.name == config.providers.default_provider;
                     let default_marker = if is_default { " (default)" } else { "" };
+                    let ptype = provider.provider_type.as_deref().unwrap_or("openai");
                     println!("  {}{}", provider.name, default_marker);
                     if let Some(model) = &provider.model {
                         println!("    Model: {}", model);
@@ -1543,6 +1546,7 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
                     if let Some(url) = &provider.base_url {
                         println!("    URL: {}", url);
                     }
+                    println!("    Type: {}", ptype);
                     let key_preview = if provider.api_key.len() > 8 {
                         format!("{}...", &provider.api_key[..8])
                     } else {
@@ -1554,18 +1558,18 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
             }
         }
         ProviderCommands::Add { name, key, url, model, default } => {
-            let base_url = url.or_else(|| {
-                get_known_providers()
-                    .iter()
-                    .find(|(k, _, _, _)| *k == name)
-                    .map(|(_, _, url, _)| url.to_string())
-            });
+            let providers = get_known_providers();
+            let known = providers.iter().find(|(k, _, _, _, _)| *k == name);
+            
+            let base_url = url.or_else(|| known.map(|(_, _, url, _, _)| url.to_string()));
+            let provider_type = known.map(|(_, _, _, _, ptype)| ptype.to_string());
 
             let provider = masix_config::ProviderConfig {
                 name: name.clone(),
                 api_key: key,
                 base_url,
                 model,
+                provider_type,
             };
 
             config.providers.providers.push(provider);

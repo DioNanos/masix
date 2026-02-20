@@ -1,6 +1,7 @@
 //! Masix LLM Providers
 //!
 //! OpenAI-compatible API client with tool calling support
+//! Plus native Anthropic/Claude provider
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -648,6 +649,321 @@ impl Provider for OpenAICompatibleProvider {
             Ok(resp) => Ok(resp.status().is_success()),
             Err(_) => Ok(false),
         }
+    }
+}
+
+pub struct AnthropicProvider {
+    client: Client,
+    name: String,
+    api_key: String,
+    base_url: String,
+    model: String,
+}
+
+impl AnthropicProvider {
+    pub fn new(
+        name: String,
+        api_key: String,
+        base_url: Option<String>,
+        model: Option<String>,
+    ) -> Self {
+        Self {
+            client: Client::new(),
+            name,
+            api_key,
+            base_url: base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string()),
+            model: model.unwrap_or_else(|| "claude-3-5-sonnet-latest".to_string()),
+        }
+    }
+
+    fn convert_messages_to_anthropic(messages: &[ChatMessage]) -> (Option<String>, Vec<serde_json::Value>) {
+        let mut system_prompt: Option<String> = None;
+        let mut anthropic_messages: Vec<serde_json::Value> = Vec::new();
+
+        for msg in messages {
+            match msg.role.as_str() {
+                "system" => {
+                    system_prompt = msg.content.clone();
+                }
+                "user" | "assistant" => {
+                    let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+                    
+                    if let Some(text) = &msg.content {
+                        content_blocks.push(serde_json::json!({
+                            "type": "text",
+                            "text": text
+                        }));
+                    }
+
+                    if let Some(tool_calls) = &msg.tool_calls {
+                        for tc in tool_calls {
+                            content_blocks.push(serde_json::json!({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.function.name,
+                                "input": serde_json::from_str::<serde_json::Value>(&tc.function.arguments).unwrap_or(serde_json::json!({}))
+                            }));
+                        }
+                    }
+
+                    if msg.role == "tool" {
+                        if let (Some(tool_id), Some(content)) = (&msg.tool_call_id, &msg.content) {
+                            anthropic_messages.push(serde_json::json!({
+                                "role": "user",
+                                "content": [{
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_id,
+                                    "content": content
+                                }]
+                            }));
+                        }
+                    } else if !content_blocks.is_empty() {
+                        anthropic_messages.push(serde_json::json!({
+                            "role": msg.role,
+                            "content": content_blocks
+                        }));
+                    }
+                }
+                "tool" => {
+                    if let (Some(tool_id), Some(content)) = (&msg.tool_call_id, &msg.content) {
+                        anthropic_messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": tool_id,
+                                "content": content
+                            }]
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        (system_prompt, anthropic_messages)
+    }
+
+    fn convert_tools_to_anthropic(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
+        tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.function.name,
+                    "description": t.function.description,
+                    "input_schema": t.function.parameters
+                })
+            })
+            .collect()
+    }
+
+    async fn request_anthropic(
+        &self,
+        body: serde_json::Value,
+        retry_policy: Option<&RetryPolicy>,
+    ) -> Result<ChatResponse> {
+        let url = format!("{}/v1/messages", self.base_url);
+        let policy = retry_policy.cloned().unwrap_or_default();
+        let start = Instant::now();
+        let mut attempt: u32 = 1;
+
+        loop {
+            let response = self
+                .client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await;
+
+            match response {
+                Ok(response) => {
+                    let status = response.status();
+                    let headers = response.headers().clone();
+                    let raw_body = response.text().await?;
+
+                    if status.is_success() {
+                        let parsed: serde_json::Value =
+                            serde_json::from_str(&raw_body).map_err(|e| {
+                                anyhow!(
+                                    "Anthropic response decode failed: {} | body={}",
+                                    e,
+                                    &raw_body.chars().take(600).collect::<String>()
+                                )
+                            })?;
+                        return self.parse_anthropic_response(parsed);
+                    }
+
+                    let snippet = &raw_body.chars().take(600).collect::<String>();
+                    let error_msg = format!("Anthropic HTTP {} at {}: {}", status, url, snippet);
+                    
+                    if !OpenAICompatibleProvider::is_retryable_status(status.as_u16()) {
+                        return Err(anyhow!(error_msg));
+                    }
+
+                    if let Some(delay) =
+                        OpenAICompatibleProvider::next_retry_delay(&policy, attempt, &headers, start.elapsed())
+                    {
+                        tracing::warn!(
+                            provider = %self.name,
+                            status = %status.as_u16(),
+                            attempt = attempt,
+                            "Retrying Anthropic request"
+                        );
+                        sleep(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+
+                    return Err(anyhow!(error_msg));
+                }
+                Err(err) => {
+                    if !OpenAICompatibleProvider::is_retryable_reqwest(&err) {
+                        return Err(err.into());
+                    }
+
+                    if let Some(delay) =
+                        OpenAICompatibleProvider::next_retry_delay(&policy, attempt, &HeaderMap::new(), start.elapsed())
+                    {
+                        tracing::warn!(
+                            provider = %self.name,
+                            attempt = attempt,
+                            error = %err,
+                            "Retrying Anthropic request after network error"
+                        );
+                        sleep(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+
+                    return Err(err.into());
+                }
+            }
+        }
+    }
+
+    fn parse_anthropic_response(&self, response: serde_json::Value) -> Result<ChatResponse> {
+        if let Some(error) = response.get("error") {
+            return Err(anyhow!("Anthropic API error: {:?}", error));
+        }
+
+        let content_blocks = response
+            .get("content")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("Missing 'content' array in Anthropic response"))?;
+
+        let mut text_content = String::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+
+        for block in content_blocks {
+            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+            match block_type {
+                "text" => {
+                    if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                        if !text_content.is_empty() {
+                            text_content.push('\n');
+                        }
+                        text_content.push_str(text);
+                    }
+                }
+                "tool_use" => {
+                    let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
+                    
+                    tool_calls.push(ToolCall {
+                        id,
+                        tool_type: "function".to_string(),
+                        function: FunctionCall {
+                            name,
+                            arguments: serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string()),
+                        },
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        let stop_reason = response
+            .get("stop_reason")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let usage = response.get("usage").map(|u| Usage {
+            prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            total_tokens: 0,
+        });
+
+        let model = response
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&self.model)
+            .to_string();
+
+        Ok(ChatResponse {
+            content: if text_content.is_empty() { None } else { Some(text_content) },
+            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            model,
+            usage,
+            finish_reason: stop_reason,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for AnthropicProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn chat(
+        &self,
+        messages: Vec<ChatMessage>,
+        retry_policy: Option<&RetryPolicy>,
+    ) -> Result<ChatResponse> {
+        let (system, anthropic_messages) = Self::convert_messages_to_anthropic(&messages);
+        
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": 4096,
+            "messages": anthropic_messages
+        });
+        
+        if let Some(sys) = system {
+            body["system"] = serde_json::json!(sys);
+        }
+
+        self.request_anthropic(body, retry_policy).await
+    }
+
+    async fn chat_with_tools(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+        retry_policy: Option<&RetryPolicy>,
+    ) -> Result<ChatResponse> {
+        let (system, anthropic_messages) = Self::convert_messages_to_anthropic(&messages);
+        let anthropic_tools = Self::convert_tools_to_anthropic(&tools);
+
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": 4096,
+            "messages": anthropic_messages,
+            "tools": anthropic_tools
+        });
+
+        if let Some(sys) = system {
+            body["system"] = serde_json::json!(sys);
+        }
+
+        self.request_anthropic(body, retry_policy).await
+    }
+
+    async fn health_check(&self) -> Result<bool> {
+        Ok(true)
     }
 }
 

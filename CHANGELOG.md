@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.0-beta.10] - 2026-02-20
+
+### Added
+- **Native Anthropic Provider**: Full support for Claude API with native format
+  - Uses `/v1/messages` endpoint with `x-api-key` header
+  - Proper message format conversion (system as separate param, content blocks)
+  - Tool calling support with `tool_use` and `tool_result` blocks
+- **Provider Type System**: Config now supports `provider_type` field
+  - `openai` - OpenAI-compatible APIs (default)
+  - `anthropic` - Native Anthropic/Claude API
+- **Custom Provider Support**: Add any OpenAI-compatible or Anthropic API endpoint
+
+### Changed
+- Provider config now includes optional `provider_type` field
+- `masix config providers list` shows provider type
+- Anthropic provider correctly uses `claude-3-5-sonnet-latest` as default model
+
 ## [0.1.0-beta.9] - 2026-02-20
 
 ### Added
