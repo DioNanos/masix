@@ -251,11 +251,6 @@ enum ConfigCommands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .init();
-
     match cli.command {
         Commands::Start { foreground } => {
             let config = load_config(cli.config.clone())?;
@@ -270,8 +265,10 @@ async fn main() -> Result<()> {
             }
 
             if foreground {
-                // Foreground mode (for debugging)
                 acquire_termux_wake_lock();
+                let log_dir = data_dir.join("logs");
+                std::fs::create_dir_all(&log_dir)?;
+                let _logging_guard = logging::init_logging(&log_dir, &cli.log_level)?;
                 let db_path = data_dir.join("masix.db");
                 let storage = Storage::new(&db_path)?;
                 let runtime = MasixRuntime::new(config, storage)?;
@@ -728,8 +725,8 @@ async fn main() -> Result<()> {
                         );
                     }
                 }
-                LogCommands::Clean { days } => {
-                    let mut manager = logging::LogManager::new(log_dir);
+                LogCommands::Clean { days: _ } => {
+                    let manager = logging::LogManager::new(log_dir);
                     let files_before = manager.get_log_files()?.len();
                     manager.cleanup_old_logs()?;
                     let files_after = manager.get_log_files()?.len();

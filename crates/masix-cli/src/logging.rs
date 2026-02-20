@@ -3,9 +3,10 @@
 //! Provides daily log rotation with automatic cleanup of logs older than 7 days
 
 use anyhow::Result;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
     fmt::{self, format::FmtSpan},
     layer::SubscriberExt,
@@ -18,48 +19,11 @@ const LOG_PREFIX: &str = "masix";
 
 pub struct LogManager {
     log_dir: PathBuf,
-    current_log_file: Option<PathBuf>,
 }
 
 impl LogManager {
     pub fn new(log_dir: PathBuf) -> Self {
-        Self {
-            log_dir,
-            current_log_file: None,
-        }
-    }
-
-    pub fn init(&mut self, log_level: &str) -> Result<()> {
-        fs::create_dir_all(&self.log_dir)?;
-        self.cleanup_old_logs()?;
-        let log_path = self.get_current_log_path();
-        self.current_log_file = Some(log_path.clone());
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)?;
-        let file_layer = fmt::layer()
-            .with_writer(file)
-            .with_ansi(false)
-            .with_target(true)
-            .with_thread_ids(false)
-            .with_line_number(true)
-            .with_span_events(FmtSpan::CLOSE)
-            .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"))
-            }));
-        let stdout_layer = fmt::layer()
-            .with_writer(std::io::stderr)
-            .with_ansi(true)
-            .with_target(true)
-            .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"))
-            }));
-        tracing_subscriber::registry()
-            .with(file_layer)
-            .with(stdout_layer)
-            .try_init()?;
-        Ok(())
+        Self { log_dir }
     }
 
     pub fn get_current_log_path(&self) -> PathBuf {
@@ -146,7 +110,46 @@ impl LogManager {
     }
 }
 
-pub fn init_logging(log_dir: &Path, log_level: &str) -> Result<()> {
-    let mut manager = LogManager::new(log_dir.to_path_buf());
-    manager.init(log_level)
+pub struct LoggingGuard {
+    _guard: WorkerGuard,
+}
+
+pub fn init_logging(log_dir: &Path, log_level: &str) -> Result<LoggingGuard> {
+    fs::create_dir_all(log_dir)?;
+    let manager = LogManager::new(log_dir.to_path_buf());
+    manager.cleanup_old_logs()?;
+    let log_path = manager.get_current_log_path();
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+
+    let (non_blocking, guard) = tracing_appender::non_blocking(file);
+
+    let file_layer = fmt::layer()
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .with_target(true)
+        .with_thread_ids(false)
+        .with_line_number(true)
+        .with_span_events(FmtSpan::CLOSE)
+        .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"))
+        }));
+
+    let stderr_layer = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(true)
+        .with_target(true)
+        .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"))
+        }));
+
+    tracing_subscriber::registry()
+        .with(file_layer)
+        .with(stderr_layer)
+        .try_init()?;
+
+    Ok(LoggingGuard { _guard: guard })
 }
