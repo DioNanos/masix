@@ -34,10 +34,49 @@ pub struct TelegramMessage {
     pub message_thread_id: Option<i64>,
     pub text: Option<String>,
     pub caption: Option<String>,
+    #[serde(default)]
+    pub photo: Option<Vec<TelegramPhotoSize>>,
+    #[serde(default)]
+    pub document: Option<TelegramDocument>,
+    #[serde(default)]
+    pub video: Option<TelegramVideo>,
     pub chat: TelegramChat,
     pub from: Option<TelegramUser>,
     #[serde(default)]
     pub reply_to_message: Option<Box<TelegramReplyToMessage>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramPhotoSize {
+    pub file_id: String,
+    pub width: i64,
+    pub height: i64,
+    #[serde(default)]
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramDocument {
+    pub file_id: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramVideo {
+    pub file_id: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub width: Option<i64>,
+    #[serde(default)]
+    pub height: Option<i64>,
+    #[serde(default)]
+    pub file_size: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -466,7 +505,28 @@ impl TelegramAdapter {
             return;
         }
 
-        if let Some(text) = &message.text {
+        let inbound_text = message
+            .text
+            .clone()
+            .or_else(|| message.caption.clone())
+            .or_else(|| {
+                if message.photo.as_ref().is_some_and(|items| !items.is_empty()) {
+                    Some("[Media: photo]".to_string())
+                } else if message
+                    .document
+                    .as_ref()
+                    .and_then(|doc| doc.mime_type.as_deref())
+                    .is_some_and(|mime| mime.starts_with("image/"))
+                {
+                    Some("[Media: image_document]".to_string())
+                } else if message.video.is_some() {
+                    Some("[Media: video]".to_string())
+                } else {
+                    None
+                }
+            });
+
+        if let Some(text) = inbound_text {
             let from_username = message
                 .from
                 .as_ref()
@@ -482,18 +542,25 @@ impl TelegramAdapter {
             info!("Received message from {}: {}", from_username, text);
 
             if let Some(event_bus) = &self.event_bus {
+                let mut payload = serde_json::json!({
+                    "account_tag": self.account_tag.clone(),
+                });
+                if let Some(media) = Self::extract_media_payload(message) {
+                    if let Some(obj) = payload.as_object_mut() {
+                        obj.insert("media".to_string(), media);
+                    }
+                }
+
                 let envelope = Envelope::new(
                     "telegram",
                     MessageKind::Message {
                         from: from_id,
-                        text: text.clone(),
+                        text,
                     },
                 )
                 .with_chat_id(chat_id)
                 .with_message_id(message_id)
-                .with_payload(serde_json::json!({
-                    "account_tag": self.account_tag.clone(),
-                }));
+                .with_payload(payload);
 
                 if let Err(e) = event_bus.publish(envelope) {
                     warn!("Failed to publish message to event bus: {}", e);
@@ -502,6 +569,62 @@ impl TelegramAdapter {
                 info!("No event bus configured, message not forwarded");
             }
         }
+    }
+
+    fn extract_media_payload(message: &TelegramMessage) -> Option<serde_json::Value> {
+        let caption = message
+            .caption
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+
+        if let Some(sizes) = &message.photo {
+            if let Some(best) = sizes
+                .iter()
+                .max_by_key(|item| item.width.saturating_mul(item.height))
+            {
+                return Some(serde_json::json!({
+                    "kind": "photo",
+                    "file_id": best.file_id,
+                    "width": best.width,
+                    "height": best.height,
+                    "file_size": best.file_size,
+                    "caption": caption,
+                }));
+            }
+        }
+
+        if let Some(document) = &message.document {
+            if document
+                .mime_type
+                .as_deref()
+                .is_some_and(|mime| mime.starts_with("image/"))
+            {
+                return Some(serde_json::json!({
+                    "kind": "image_document",
+                    "file_id": document.file_id,
+                    "mime_type": document.mime_type,
+                    "file_name": document.file_name,
+                    "file_size": document.file_size,
+                    "caption": caption,
+                }));
+            }
+        }
+
+        if let Some(video) = &message.video {
+            return Some(serde_json::json!({
+                "kind": "video",
+                "file_id": video.file_id,
+                "mime_type": video.mime_type,
+                "width": video.width,
+                "height": video.height,
+                "file_size": video.file_size,
+                "caption": caption,
+            }));
+        }
+
+        None
     }
 
     async fn handle_callback(&self, callback: &TelegramCallbackQuery) {

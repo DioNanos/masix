@@ -268,6 +268,13 @@ impl CronExecutor {
                             if let Err(e) = outbound_sender.send(msg).await {
                                 tracing::error!("Failed to send cron job {}: {}", job.id, e);
                             }
+                        } else {
+                            tracing::warn!(
+                                "Skipping cron job {}: non-numeric recipient '{}' for channel '{}'",
+                                job.id,
+                                recipient,
+                                channel
+                            );
                         }
 
                         if job.recurring {

@@ -387,6 +387,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -646,6 +647,15 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "html5ever"
@@ -1044,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "masix-cli"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1071,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "masix-config"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1081,15 +1091,17 @@ dependencies = [
 
 [[package]]
 name = "masix-core"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "dirs",
  "masix-config",
  "masix-cron",
  "masix-exec",
+ "masix-intent",
  "masix-ipc",
  "masix-mcp",
  "masix-policy",
@@ -1111,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "masix-cron"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1126,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "masix-exec"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1136,8 +1148,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "masix-intent"
+version = "0.1.1-rc"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "masix-ipc"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "serde",
@@ -1149,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "masix-mcp"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "serde",
@@ -1161,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "masix-policy"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1171,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "masix-providers"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1185,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "masix-sms"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1198,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "masix-storage"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -1213,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "masix-telegram"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1230,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "masix-wasm-tools"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "serde",
@@ -1242,15 +1264,17 @@ dependencies = [
 
 [[package]]
 name = "masix-whatsapp"
-version = "0.1.0-beta.11"
+version = "0.1.1-rc"
 dependencies = [
  "anyhow",
  "base64",
+ "hmac",
  "masix-config",
  "masix-ipc",
  "masix-storage",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
 ]

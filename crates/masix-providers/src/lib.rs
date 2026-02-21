@@ -676,7 +676,9 @@ impl AnthropicProvider {
         }
     }
 
-    fn convert_messages_to_anthropic(messages: &[ChatMessage]) -> (Option<String>, Vec<serde_json::Value>) {
+    fn convert_messages_to_anthropic(
+        messages: &[ChatMessage],
+    ) -> (Option<String>, Vec<serde_json::Value>) {
         let mut system_prompt: Option<String> = None;
         let mut anthropic_messages: Vec<serde_json::Value> = Vec::new();
 
@@ -687,7 +689,7 @@ impl AnthropicProvider {
                 }
                 "user" | "assistant" => {
                     let mut content_blocks: Vec<serde_json::Value> = Vec::new();
-                    
+
                     if let Some(text) = &msg.content {
                         content_blocks.push(serde_json::json!({
                             "type": "text",
@@ -706,18 +708,7 @@ impl AnthropicProvider {
                         }
                     }
 
-                    if msg.role == "tool" {
-                        if let (Some(tool_id), Some(content)) = (&msg.tool_call_id, &msg.content) {
-                            anthropic_messages.push(serde_json::json!({
-                                "role": "user",
-                                "content": [{
-                                    "type": "tool_result",
-                                    "tool_use_id": tool_id,
-                                    "content": content
-                                }]
-                            }));
-                        }
-                    } else if !content_blocks.is_empty() {
+                    if !content_blocks.is_empty() {
                         anthropic_messages.push(serde_json::json!({
                             "role": msg.role,
                             "content": content_blocks
@@ -797,14 +788,17 @@ impl AnthropicProvider {
 
                     let snippet = &raw_body.chars().take(600).collect::<String>();
                     let error_msg = format!("Anthropic HTTP {} at {}: {}", status, url, snippet);
-                    
+
                     if !OpenAICompatibleProvider::is_retryable_status(status.as_u16()) {
                         return Err(anyhow!(error_msg));
                     }
 
-                    if let Some(delay) =
-                        OpenAICompatibleProvider::next_retry_delay(&policy, attempt, &headers, start.elapsed())
-                    {
+                    if let Some(delay) = OpenAICompatibleProvider::next_retry_delay(
+                        &policy,
+                        attempt,
+                        &headers,
+                        start.elapsed(),
+                    ) {
                         tracing::warn!(
                             provider = %self.name,
                             status = %status.as_u16(),
@@ -823,9 +817,12 @@ impl AnthropicProvider {
                         return Err(err.into());
                     }
 
-                    if let Some(delay) =
-                        OpenAICompatibleProvider::next_retry_delay(&policy, attempt, &HeaderMap::new(), start.elapsed())
-                    {
+                    if let Some(delay) = OpenAICompatibleProvider::next_retry_delay(
+                        &policy,
+                        attempt,
+                        &HeaderMap::new(),
+                        start.elapsed(),
+                    ) {
                         tracing::warn!(
                             provider = %self.name,
                             attempt = attempt,
@@ -869,16 +866,25 @@ impl AnthropicProvider {
                     }
                 }
                 "tool_use" => {
-                    let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let id = block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = block
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
-                    
+
                     tool_calls.push(ToolCall {
                         id,
                         tool_type: "function".to_string(),
                         function: FunctionCall {
                             name,
-                            arguments: serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string()),
+                            arguments: serde_json::to_string(&input)
+                                .unwrap_or_else(|_| "{}".to_string()),
                         },
                     });
                 }
@@ -904,8 +910,16 @@ impl AnthropicProvider {
             .to_string();
 
         Ok(ChatResponse {
-            content: if text_content.is_empty() { None } else { Some(text_content) },
-            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            content: if text_content.is_empty() {
+                None
+            } else {
+                Some(text_content)
+            },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
             model,
             usage,
             finish_reason: stop_reason,
@@ -925,13 +939,13 @@ impl Provider for AnthropicProvider {
         retry_policy: Option<&RetryPolicy>,
     ) -> Result<ChatResponse> {
         let (system, anthropic_messages) = Self::convert_messages_to_anthropic(&messages);
-        
+
         let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": 4096,
             "messages": anthropic_messages
         });
-        
+
         if let Some(sys) = system {
             body["system"] = serde_json::json!(sys);
         }
@@ -963,7 +977,18 @@ impl Provider for AnthropicProvider {
     }
 
     async fn health_check(&self) -> Result<bool> {
-        Ok(true)
+        let url = format!("{}/v1/models", self.base_url.trim_end_matches('/'));
+        match self
+            .client
+            .get(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+        {
+            Ok(resp) => Ok(resp.status().is_success()),
+            Err(_) => Ok(false),
+        }
     }
 }
 

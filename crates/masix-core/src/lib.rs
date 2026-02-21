@@ -5,6 +5,7 @@
 mod builtin_tools;
 
 use anyhow::{anyhow, Result};
+use base64::Engine;
 use builtin_tools::{execute_builtin_tool, get_builtin_tool_definitions, is_builtin_tool};
 use masix_config::{Config, RetryPolicyConfig};
 use masix_exec::{manage_termux_boot, run_command, BootAction, ExecMode, ExecPolicy};
@@ -17,6 +18,7 @@ use masix_providers::{
 };
 use masix_storage::Storage;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, OpenOptions};
@@ -36,6 +38,7 @@ struct BotContext {
     memory_dir: PathBuf,
     memory_file: PathBuf,
     provider_chain: Vec<String>,
+    vision_provider: Option<String>,
     retry_policy: RetryPolicy,
     exec_policy: ExecPolicy,
 }
@@ -45,6 +48,25 @@ struct ChatMemoryEntry {
     role: String,
     content: String,
     ts: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramGetFileResponse {
+    ok: bool,
+    result: Option<TelegramGetFileResult>,
+    description: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramGetFileResult {
+    file_path: String,
+}
+
+#[derive(Debug, Clone)]
+struct MediaFileReference {
+    file_id: String,
+    mime_type: String,
+    caption: Option<String>,
 }
 
 pub struct MasixRuntime {
@@ -67,10 +89,7 @@ impl MasixRuntime {
         let mut provider_router = ProviderRouter::new(config.providers.default_provider.clone());
 
         for provider_config in &config.providers.providers {
-            let provider_type = provider_config
-                .provider_type
-                .as_deref()
-                .unwrap_or("openai");
+            let provider_type = provider_config.provider_type.as_deref().unwrap_or("openai");
 
             let provider: Box<dyn Provider> = match provider_type {
                 "anthropic" => Box::new(AnthropicProvider::new(
@@ -143,6 +162,8 @@ impl MasixRuntime {
 
         self.start_telegram_adapters(Arc::clone(&bot_contexts))
             .await?;
+        self.start_whatsapp_adapter().await?;
+        self.start_sms_adapter().await?;
 
         let mut inbound_rx = self.event_bus.subscribe();
         let outbound_for_processor = outbound_sender.clone();
@@ -250,6 +271,11 @@ impl MasixRuntime {
                 };
 
                 let _ = outbound_sender.send(msg);
+            } else {
+                warn!(
+                    "Skipping cron job {}: non-numeric recipient '{}' for channel '{}'",
+                    job.id, recipient, channel
+                );
             }
 
             let storage_guard = storage.lock().await;
@@ -336,6 +362,78 @@ impl MasixRuntime {
         Ok(())
     }
 
+    async fn start_whatsapp_adapter(&self) -> Result<()> {
+        if let Some(whatsapp_config) = &self.config.whatsapp {
+            if whatsapp_config.enabled {
+                info!("WhatsApp adapter enabled (read-only)");
+                let adapter = masix_whatsapp::WhatsAppAdapter::from_config(whatsapp_config)
+                    .with_event_bus(self.event_bus.clone());
+                tokio::spawn(async move {
+                    if let Err(err) = adapter.start().await {
+                        error!("WhatsApp adapter failed: {}", err);
+                    }
+                });
+            }
+        }
+        Ok(())
+    }
+
+    async fn start_sms_adapter(&self) -> Result<()> {
+        if let Some(sms_config) = &self.config.sms {
+            if sms_config.enabled {
+                let watch_interval = sms_config.watch_interval_secs.unwrap_or(30).max(1);
+                let event_bus = self.event_bus.clone();
+                info!("SMS adapter enabled (watch interval: {}s)", watch_interval);
+
+                tokio::spawn(async move {
+                    let adapter = masix_sms::SmsAdapter::new(Some(watch_interval));
+                    let mut last_seen_ts: i64 = 0;
+
+                    loop {
+                        match adapter.list_sms(20).await {
+                            Ok(mut messages) => {
+                                messages.sort_by_key(|msg| msg.date);
+                                for msg in messages {
+                                    if msg.date <= last_seen_ts {
+                                        continue;
+                                    }
+                                    last_seen_ts = msg.date;
+
+                                    let sender = msg.address.trim().to_string();
+                                    if sender.is_empty() {
+                                        continue;
+                                    }
+
+                                    let envelope = Envelope::new(
+                                        "sms",
+                                        MessageKind::Message {
+                                            from: sender.clone(),
+                                            text: msg.body.clone(),
+                                        },
+                                    )
+                                    .with_chat_id(Self::virtual_chat_id_from_sender(&sender))
+                                    .with_payload(serde_json::json!({
+                                        "source": "termux-sms",
+                                        "ts": msg.date,
+                                        "read": msg.read,
+                                    }));
+
+                                    if let Err(err) = event_bus.publish(envelope) {
+                                        warn!("Failed to publish SMS event: {}", err);
+                                    }
+                                }
+                            }
+                            Err(err) => warn!("SMS watcher poll failed: {}", err),
+                        }
+
+                        tokio::time::sleep(tokio::time::Duration::from_secs(watch_interval)).await;
+                    }
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn build_bot_contexts(&self, base_data_dir: &Path) -> Result<HashMap<String, BotContext>> {
         let mut contexts = HashMap::new();
         let default_context = self.default_bot_context(base_data_dir)?;
@@ -366,6 +464,7 @@ impl MasixRuntime {
                             workdir,
                             memory_file,
                             provider_chain,
+                            vision_provider: profile.vision_provider.clone(),
                             retry_policy: Self::retry_policy_from_config(profile.retry.as_ref()),
                             exec_policy: Self::exec_policy_from_config(self.config.exec.as_ref()),
                         }
@@ -397,6 +496,7 @@ impl MasixRuntime {
             memory_dir: workdir.join("memory/default"),
             memory_file,
             provider_chain: vec![self.config.providers.default_provider.clone()],
+            vision_provider: None,
             retry_policy: RetryPolicy::default(),
             exec_policy: Self::exec_policy_from_config(self.config.exec.as_ref()),
         };
@@ -480,6 +580,22 @@ impl MasixRuntime {
         })
     }
 
+    fn default_telegram_account_tag_from_config(config: &Config) -> Option<String> {
+        config.telegram.as_ref().and_then(|telegram| {
+            telegram
+                .accounts
+                .first()
+                .map(|account| Self::account_tag_from_token(&account.bot_token))
+        })
+    }
+
+    fn virtual_chat_id_from_sender(sender: &str) -> i64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        sender.hash(&mut hasher);
+        let raw = hasher.finish() & 0x7FFF_FFFF_FFFF_FFFF;
+        -((raw.max(1)) as i64)
+    }
+
     fn resolve_bot_context(
         bot_contexts: &Arc<HashMap<String, BotContext>>,
         account_tag: Option<&str>,
@@ -498,6 +614,7 @@ impl MasixRuntime {
                 memory_dir: PathBuf::from("./memory/default"),
                 memory_file: PathBuf::from("./MEMORY.md"),
                 provider_chain: vec!["openai".to_string()],
+                vision_provider: None,
                 retry_policy: RetryPolicy::default(),
                 exec_policy: ExecPolicy::default(),
             })
@@ -531,13 +648,24 @@ impl MasixRuntime {
         tool_call: &ToolCall,
         exec_policy: &ExecPolicy,
         workdir: &Path,
+        storage: &Arc<Mutex<Storage>>,
+        envelope: &Envelope,
+        account_tag: Option<&str>,
+        vision_analysis: Option<&str>,
     ) -> Result<String> {
         let tool_name = &tool_call.function.name;
+        let arguments: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
+            .unwrap_or_else(|_| serde_json::json!({}));
+
+        if tool_name == "cron" {
+            return Self::execute_cron_tool(arguments, storage, envelope, account_tag).await;
+        }
+        if tool_name == "vision" {
+            return Self::execute_vision_tool(arguments, envelope, vision_analysis);
+        }
 
         // Check if it's a builtin tool
         if is_builtin_tool(tool_name) {
-            let arguments = serde_json::from_str(&tool_call.function.arguments)
-                .unwrap_or_else(|_| serde_json::json!({}));
             return execute_builtin_tool(tool_name, arguments, exec_policy, workdir).await;
         }
 
@@ -552,9 +680,6 @@ impl MasixRuntime {
 
         let server_name = parts[0];
         let mcp_tool_name = parts[1];
-
-        let arguments: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
-            .unwrap_or_else(|_| serde_json::json!({}));
 
         if let Some(client) = mcp_client {
             let mcp = client.lock().await;
@@ -902,6 +1027,28 @@ impl MasixRuntime {
                     tool_call_id: None,
                     name: None,
                 }];
+                let mut user_message = Self::enrich_user_message_with_media(text, &envelope.payload);
+                let vision_analysis = match Self::analyze_media_with_vision_provider(
+                    config,
+                    &bot_context,
+                    account_tag.as_deref(),
+                    &envelope.payload,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        warn!(
+                            "Vision analysis failed for profile '{}': {}",
+                            bot_context.profile_name, e
+                        );
+                        None
+                    }
+                };
+                if let Some(analysis) = &vision_analysis {
+                    user_message.push_str("\n\n[Vision Analysis]\n");
+                    user_message.push_str(analysis);
+                }
                 if let Some(chat_id) = envelope.chat_id {
                     let history = Self::load_chat_memory_history(
                         &bot_context,
@@ -913,7 +1060,7 @@ impl MasixRuntime {
                 }
                 messages.push(ChatMessage {
                     role: "user".to_string(),
-                    content: Some(text.clone()),
+                    content: Some(user_message.clone()),
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
@@ -983,6 +1130,10 @@ impl MasixRuntime {
                                 tool_call,
                                 &bot_context.exec_policy,
                                 &bot_context.workdir,
+                                storage,
+                                &envelope,
+                                account_tag.as_deref(),
+                                vision_analysis.as_deref(),
                             )
                             .await
                             {
@@ -1009,7 +1160,9 @@ impl MasixRuntime {
                 }
 
                 if let Some(chat_id) = envelope.chat_id {
-                    let _ = Self::append_chat_memory(&bot_context, chat_id, "user", text).await;
+                    let _ =
+                        Self::append_chat_memory(&bot_context, chat_id, "user", &user_message)
+                            .await;
                     let _ = Self::append_chat_memory(
                         &bot_context,
                         chat_id,
@@ -1020,18 +1173,34 @@ impl MasixRuntime {
                     let _ = Self::update_summary_snapshot(&bot_context, chat_id).await;
                 }
 
-                if let Some(chat_id) = envelope.chat_id {
-                    let msg = OutboundMessage {
-                        channel: envelope.channel.clone(),
-                        account_tag: account_tag.clone(),
-                        chat_id,
-                        text: final_response,
-                        reply_to: envelope.message_id,
-                        edit_message_id: None,
-                        inline_keyboard: None,
-                        chat_action: None,
-                    };
-                    let _ = outbound_sender.send(msg);
+                if envelope.channel == "telegram" {
+                    if let Some(chat_id) = envelope.chat_id {
+                        let msg = OutboundMessage {
+                            channel: envelope.channel.clone(),
+                            account_tag: account_tag.clone(),
+                            chat_id,
+                            text: final_response,
+                            reply_to: envelope.message_id,
+                            edit_message_id: None,
+                            inline_keyboard: None,
+                            chat_action: None,
+                        };
+                        let _ = outbound_sender.send(msg);
+                    }
+                } else if envelope.channel == "whatsapp" {
+                    if let Some(msg) = Self::build_whatsapp_forward_message(
+                        config,
+                        &envelope,
+                        &final_response,
+                    ) {
+                        let _ = outbound_sender.send(msg);
+                    }
+                } else if envelope.channel == "sms" {
+                    if let Some(msg) =
+                        Self::build_sms_forward_message(config, &envelope, &final_response)
+                    {
+                        let _ = outbound_sender.send(msg);
+                    }
                 }
             }
             MessageKind::Callback { query_id, data } => {
@@ -1095,6 +1264,559 @@ impl MasixRuntime {
         Ok(())
     }
 
+    fn message_sender_id(envelope: &Envelope) -> &str {
+        match &envelope.kind {
+            MessageKind::Message { from, .. } => from.as_str(),
+            _ => "unknown",
+        }
+    }
+
+    fn build_whatsapp_forward_message(
+        config: &Config,
+        envelope: &Envelope,
+        response: &str,
+    ) -> Option<OutboundMessage> {
+        let whatsapp = config.whatsapp.as_ref()?;
+        let chat_id = whatsapp.forward_to_telegram_chat_id?;
+        let account_tag = whatsapp
+            .forward_to_telegram_account_tag
+            .clone()
+            .or_else(|| Self::default_telegram_account_tag_from_config(config));
+        let prefix = whatsapp
+            .forward_prefix
+            .as_deref()
+            .unwrap_or("WhatsApp listener");
+        let sender = Self::message_sender_id(envelope);
+        let text = format!("{} [{}]\n{}", prefix, sender, response);
+
+        Some(OutboundMessage {
+            channel: "telegram".to_string(),
+            account_tag,
+            chat_id,
+            text,
+            reply_to: None,
+            edit_message_id: None,
+            inline_keyboard: None,
+            chat_action: None,
+        })
+    }
+
+    fn build_sms_forward_message(
+        config: &Config,
+        envelope: &Envelope,
+        response: &str,
+    ) -> Option<OutboundMessage> {
+        let sms = config.sms.as_ref()?;
+        let chat_id = sms.forward_to_telegram_chat_id?;
+        let account_tag = sms
+            .forward_to_telegram_account_tag
+            .clone()
+            .or_else(|| Self::default_telegram_account_tag_from_config(config));
+        let prefix = sms.forward_prefix.as_deref().unwrap_or("SMS listener");
+        let sender = Self::message_sender_id(envelope);
+        let text = format!("{} [{}]\n{}", prefix, sender, response);
+
+        Some(OutboundMessage {
+            channel: "telegram".to_string(),
+            account_tag,
+            chat_id,
+            text,
+            reply_to: None,
+            edit_message_id: None,
+            inline_keyboard: None,
+            chat_action: None,
+        })
+    }
+
+    fn enrich_user_message_with_media(text: &str, payload: &serde_json::Value) -> String {
+        let Some(summary) = Self::media_summary_from_payload(payload) else {
+            return text.to_string();
+        };
+        if text.trim().is_empty() {
+            format!("[Media message]\n{}", summary)
+        } else {
+            format!("{}\n\n[Media Context]\n{}", text, summary)
+        }
+    }
+
+    fn media_summary_from_payload(payload: &serde_json::Value) -> Option<String> {
+        let media = payload.get("media")?;
+        let kind = media
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let file_id = media
+            .get("file_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("n/a");
+        let caption = media
+            .get("caption")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .unwrap_or("(none)");
+        let mime_type = media
+            .get("mime_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("n/a");
+        let width = media
+            .get("width")
+            .and_then(|v| v.as_i64())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".to_string());
+        let height = media
+            .get("height")
+            .and_then(|v| v.as_i64())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".to_string());
+        let file_size = media
+            .get("file_size")
+            .and_then(|v| v.as_i64())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".to_string());
+
+        Some(format!(
+            "kind: {}\nfile_id: {}\nmime_type: {}\nsize: {} bytes\nresolution: {}x{}\ncaption: {}",
+            kind, file_id, mime_type, file_size, width, height, caption
+        ))
+    }
+
+    fn media_file_reference_from_payload(payload: &serde_json::Value) -> Option<MediaFileReference> {
+        let media = payload.get("media")?;
+        let file_id = media
+            .get("file_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())?
+            .to_string();
+        let kind = media
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let mut mime_type = media
+            .get("mime_type")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|| {
+                if kind == "photo" {
+                    "image/jpeg".to_string()
+                } else {
+                    "application/octet-stream".to_string()
+                }
+            });
+
+        if mime_type == "application/octet-stream" && kind == "image_document" {
+            mime_type = "image/jpeg".to_string();
+        }
+
+        if !mime_type.starts_with("image/") {
+            return None;
+        }
+
+        let caption = media
+            .get("caption")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_string());
+
+        Some(MediaFileReference {
+            file_id,
+            mime_type,
+            caption,
+        })
+    }
+
+    fn resolve_telegram_bot_token(config: &Config, account_tag: Option<&str>) -> Option<String> {
+        let telegram = config.telegram.as_ref()?;
+        if let Some(tag) = account_tag {
+            if let Some(account) = telegram
+                .accounts
+                .iter()
+                .find(|account| Self::account_tag_from_token(&account.bot_token) == tag)
+            {
+                return Some(account.bot_token.clone());
+            }
+        }
+        telegram.accounts.first().map(|account| account.bot_token.clone())
+    }
+
+    async fn fetch_telegram_media_bytes(
+        config: &Config,
+        account_tag: Option<&str>,
+        file_id: &str,
+    ) -> Result<(Vec<u8>, Option<String>)> {
+        let bot_token = Self::resolve_telegram_bot_token(config, account_tag)
+            .ok_or_else(|| anyhow!("Telegram bot token not found for media download"))?;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(45))
+            .build()?;
+        let get_file_url = format!("https://api.telegram.org/bot{}/getFile", bot_token);
+        let get_file_resp = client
+            .post(&get_file_url)
+            .json(&serde_json::json!({
+                "file_id": file_id
+            }))
+            .send()
+            .await?;
+        let get_file_status = get_file_resp.status();
+        let get_file_body = get_file_resp.text().await.unwrap_or_default();
+        if !get_file_status.is_success() {
+            anyhow::bail!(
+                "telegram getFile failed with HTTP {}",
+                get_file_status.as_u16()
+            );
+        }
+
+        let parsed: TelegramGetFileResponse = serde_json::from_str(&get_file_body).map_err(|e| {
+            anyhow!(
+                "telegram getFile decode failed: {} | body={}",
+                e,
+                get_file_body.chars().take(400).collect::<String>()
+            )
+        })?;
+        if !parsed.ok {
+            let description = parsed
+                .description
+                .unwrap_or_else(|| "unknown getFile error".to_string());
+            anyhow::bail!("telegram getFile returned ok=false: {}", description);
+        }
+        let file_path = parsed
+            .result
+            .ok_or_else(|| anyhow!("telegram getFile missing result"))?
+            .file_path;
+
+        let download_url = format!("https://api.telegram.org/file/bot{}/{}", bot_token, file_path);
+        let download_resp = client.get(&download_url).send().await?;
+        let download_status = download_resp.status();
+        if !download_status.is_success() {
+            anyhow::bail!(
+                "telegram media download failed with HTTP {}",
+                download_status.as_u16()
+            );
+        }
+        let detected_mime = download_resp
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.split(';').next().unwrap_or(value).trim().to_string());
+        let bytes = download_resp.bytes().await?.to_vec();
+        Ok((bytes, detected_mime))
+    }
+
+    fn parse_openai_compatible_response_text(value: &serde_json::Value) -> Option<String> {
+        let message = value
+            .get("choices")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|choice| choice.get("message"))?;
+
+        if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+
+        if let Some(content_items) = message.get("content").and_then(|v| v.as_array()) {
+            let mut parts = Vec::new();
+            for item in content_items {
+                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        parts.push(trimmed.to_string());
+                    }
+                }
+            }
+            if !parts.is_empty() {
+                return Some(parts.join("\n"));
+            }
+        }
+
+        None
+    }
+
+    async fn call_openai_compatible_vision_provider(
+        provider: &masix_config::ProviderConfig,
+        image_bytes: &[u8],
+        mime_type: &str,
+        caption: Option<&str>,
+    ) -> Result<String> {
+        let base_url = provider
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        let model = provider
+            .model
+            .clone()
+            .unwrap_or_else(|| "gpt-4o-mini".to_string());
+        let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+
+        let mut prompt = "Analizza questa immagine e restituisci solo informazioni utili al modello principale: oggetti, testo leggibile, contesto, eventuali warning."
+            .to_string();
+        if let Some(value) = caption {
+            let caption_trimmed = value.trim();
+            if !caption_trimmed.is_empty() {
+                prompt.push_str("\nCaption utente: ");
+                prompt.push_str(caption_trimmed);
+            }
+        }
+
+        let image_data = format!(
+            "data:{};base64,{}",
+            mime_type,
+            base64::engine::general_purpose::STANDARD.encode(image_bytes)
+        );
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Sei un modulo vision. Rispondi in italiano, sintetico, senza inventare dettagli non osservabili."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_data
+                            }
+                        }
+                    ]
+                }
+            ],
+            "temperature": 0.1
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
+        let response = client
+            .post(&endpoint)
+            .header("Authorization", format!("Bearer {}", provider.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+        let status = response.status();
+        let raw = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!(
+                "Vision provider '{}' returned HTTP {}: {}",
+                provider.name,
+                status.as_u16(),
+                raw.chars().take(400).collect::<String>()
+            );
+        }
+
+        let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+            anyhow!(
+                "Vision provider '{}' decode failed: {} | body={}",
+                provider.name,
+                e,
+                raw.chars().take(400).collect::<String>()
+            )
+        })?;
+        let text = Self::parse_openai_compatible_response_text(&parsed).ok_or_else(|| {
+            anyhow!(
+                "Vision provider '{}' returned response without text content",
+                provider.name
+            )
+        })?;
+        Ok(text)
+    }
+
+    async fn analyze_media_with_vision_provider(
+        config: &Config,
+        bot_context: &BotContext,
+        account_tag: Option<&str>,
+        payload: &serde_json::Value,
+    ) -> Result<Option<String>> {
+        let Some(vision_provider_name) = bot_context.vision_provider.as_deref() else {
+            return Ok(None);
+        };
+        let Some(media_ref) = Self::media_file_reference_from_payload(payload) else {
+            return Ok(None);
+        };
+
+        let provider = config
+            .providers
+            .providers
+            .iter()
+            .find(|candidate| candidate.name == vision_provider_name)
+            .ok_or_else(|| anyhow!("Vision provider '{}' not found", vision_provider_name))?;
+        let provider_type = provider.provider_type.as_deref().unwrap_or("openai");
+        if provider_type != "openai" {
+            anyhow::bail!(
+                "Vision provider '{}' must be openai-compatible, found '{}'",
+                vision_provider_name,
+                provider_type
+            );
+        }
+
+        let (media_bytes, detected_mime) =
+            Self::fetch_telegram_media_bytes(config, account_tag, &media_ref.file_id).await?;
+        if media_bytes.is_empty() {
+            return Ok(None);
+        }
+        if media_bytes.len() > 15 * 1024 * 1024 {
+            anyhow::bail!(
+                "Media too large for vision analysis ({} bytes)",
+                media_bytes.len()
+            );
+        }
+
+        let mime_type = if media_ref.mime_type.starts_with("image/") {
+            media_ref.mime_type
+        } else {
+            detected_mime.unwrap_or_else(|| "image/jpeg".to_string())
+        };
+        if !mime_type.starts_with("image/") {
+            return Ok(None);
+        }
+
+        let mut analysis = Self::call_openai_compatible_vision_provider(
+            provider,
+            &media_bytes,
+            &mime_type,
+            media_ref.caption.as_deref(),
+        )
+        .await?;
+        if analysis.chars().count() > 4000 {
+            analysis = format!("{}...", analysis.chars().take(4000).collect::<String>());
+        }
+        Ok(Some(analysis))
+    }
+
+    async fn execute_cron_tool(
+        arguments: serde_json::Value,
+        storage: &Arc<Mutex<Storage>>,
+        envelope: &Envelope,
+        account_tag: Option<&str>,
+    ) -> Result<String> {
+        let Some(chat_id) = envelope.chat_id else {
+            return Ok("Cron tool unavailable: missing chat context.".to_string());
+        };
+
+        let command = arguments
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .unwrap_or("help");
+        let scoped_account_tag = account_tag
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("__default__");
+        let recipient = chat_id.to_string();
+
+        Self::execute_cron_instruction(
+            command,
+            &envelope.channel,
+            &recipient,
+            scoped_account_tag,
+            storage,
+        )
+        .await
+    }
+
+    fn execute_vision_tool(
+        _arguments: serde_json::Value,
+        envelope: &Envelope,
+        vision_analysis: Option<&str>,
+    ) -> Result<String> {
+        if let Some(analysis) = vision_analysis {
+            return Ok(format!("Vision analysis:\n{}", analysis));
+        }
+
+        if let Some(summary) = Self::media_summary_from_payload(&envelope.payload) {
+            Ok(format!(
+                "Media metadata available:\n{}\n\nNote: OCR/image understanding is not enabled yet; this tool currently exposes media context only.",
+                summary
+            ))
+        } else {
+            Ok("No media metadata available in this message context.".to_string())
+        }
+    }
+
+    async fn execute_cron_instruction(
+        command: &str,
+        channel: &str,
+        recipient: &str,
+        scoped_account_tag: &str,
+        storage: &Arc<Mutex<Storage>>,
+    ) -> Result<String> {
+        let rest = command.trim();
+
+        if rest.is_empty() || rest.eq_ignore_ascii_case("help") {
+            return Ok("Reminder commands:\n- `domani alle 9 \"Meeting\"`\n- `list`\n- `cancel <id>`".to_string());
+        }
+
+        if rest.eq_ignore_ascii_case("list") {
+            let storage_guard = storage.lock().await;
+            let jobs = storage_guard
+                .list_enabled_cron_jobs_for_account_recipient(scoped_account_tag, recipient)?;
+            drop(storage_guard);
+
+            if jobs.is_empty() {
+                return Ok("Nessun reminder attivo per questa chat.".to_string());
+            }
+
+            let mut lines = vec!["Reminder attivi:".to_string()];
+            for job in jobs {
+                lines.push(format!(
+                    "- ID {} | {} | recurring: {}\n  {}",
+                    job.id, job.schedule, job.recurring, job.message
+                ));
+            }
+            return Ok(lines.join("\n"));
+        }
+
+        let lower = rest.to_lowercase();
+        if lower.starts_with("cancel ") || lower.starts_with("delete ") {
+            let id_part = rest.split_whitespace().nth(1).unwrap_or_default();
+            let id = id_part
+                .parse::<i64>()
+                .map_err(|_| anyhow!("Invalid cron id '{}'", id_part))?;
+            let storage_guard = storage.lock().await;
+            let changed = storage_guard.disable_cron_job_for_account(id, scoped_account_tag)?;
+            drop(storage_guard);
+
+            if changed {
+                return Ok(format!("Reminder {} eliminato.", id));
+            }
+            return Ok(format!(
+                "Reminder {} non trovato per questo bot/chat (scope account: {}).",
+                id, scoped_account_tag
+            ));
+        }
+
+        let parser = masix_cron::CronParser::new();
+        let parsed = parser.parse(rest, channel, recipient)?;
+        let storage_guard = storage.lock().await;
+        let id = storage_guard.create_cron_job(
+            channel,
+            &parsed.schedule,
+            &parsed.channel,
+            &parsed.recipient,
+            Some(scoped_account_tag),
+            &parsed.message,
+            &parsed.timezone,
+            parsed.recurring,
+        )?;
+        drop(storage_guard);
+
+        Ok(format!(
+            "Reminder creato.\nID: {}\nSchedule: {}\nRecurring: {}\nMessage: {}",
+            id, parsed.schedule, parsed.recurring, parsed.message
+        ))
+    }
+
     async fn handle_cron_command(
         text: &str,
         envelope: &Envelope,
@@ -1115,115 +1837,23 @@ impl MasixRuntime {
         let scoped_account_tag = account_tag
             .as_deref()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or("__default__")
-            .to_string();
+            .unwrap_or("__default__");
         let recipient = chat_id.to_string();
+        let response = Self::execute_cron_instruction(
+            rest,
+            &envelope.channel,
+            &recipient,
+            scoped_account_tag,
+            storage,
+        )
+        .await?;
 
-        if rest.is_empty() || rest.eq_ignore_ascii_case("help") {
-            let help = "Reminder commands:\n\
-                        - `/cron domani alle 9 \"Meeting\"`\n\
-                        - `/cron list`\n\
-                        - `/cron cancel <id>`";
-            Self::send_outbound_text(
-                outbound_sender,
-                &envelope.channel,
-                account_tag.clone(),
-                chat_id,
-                help,
-                envelope.message_id,
-            );
-            return Ok(true);
-        }
-
-        if rest.eq_ignore_ascii_case("list") {
-            let storage_guard = storage.lock().await;
-            let jobs = storage_guard
-                .list_enabled_cron_jobs_for_account_recipient(&scoped_account_tag, &recipient)?;
-            drop(storage_guard);
-
-            if jobs.is_empty() {
-                Self::send_outbound_text(
-                    outbound_sender,
-                    &envelope.channel,
-                    account_tag.clone(),
-                    chat_id,
-                    "Nessun reminder attivo per questa chat.",
-                    envelope.message_id,
-                );
-            } else {
-                let mut lines = vec!["Reminder attivi:".to_string()];
-                for job in jobs {
-                    lines.push(format!(
-                        "- ID {} | {} | recurring: {}\n  {}",
-                        job.id, job.schedule, job.recurring, job.message
-                    ));
-                }
-                Self::send_outbound_text(
-                    outbound_sender,
-                    &envelope.channel,
-                    account_tag.clone(),
-                    chat_id,
-                    &lines.join("\n"),
-                    envelope.message_id,
-                );
-            }
-            return Ok(true);
-        }
-
-        let lower = rest.to_lowercase();
-        if lower.starts_with("cancel ") || lower.starts_with("delete ") {
-            let id_part = rest.split_whitespace().nth(1).unwrap_or_default();
-            let id = id_part
-                .parse::<i64>()
-                .map_err(|_| anyhow!("Invalid cron id '{}'", id_part))?;
-            let storage_guard = storage.lock().await;
-            let changed = storage_guard.disable_cron_job_for_account(id, &scoped_account_tag)?;
-            drop(storage_guard);
-
-            let out = if changed {
-                format!("Reminder {} eliminato.", id)
-            } else {
-                format!(
-                    "Reminder {} non trovato per questo bot/chat (scope account: {}).",
-                    id, scoped_account_tag
-                )
-            };
-            Self::send_outbound_text(
-                outbound_sender,
-                &envelope.channel,
-                account_tag.clone(),
-                chat_id,
-                &out,
-                envelope.message_id,
-            );
-            return Ok(true);
-        }
-
-        let parser = masix_cron::CronParser::new();
-        let parsed = parser.parse(rest, "telegram", &recipient)?;
-        let storage_guard = storage.lock().await;
-        let id = storage_guard.create_cron_job(
-            "telegram",
-            &parsed.schedule,
-            &parsed.channel,
-            &parsed.recipient,
-            Some(&scoped_account_tag),
-            &parsed.message,
-            &parsed.timezone,
-            parsed.recurring,
-        )?;
-        drop(storage_guard);
-
-        let confirmation = format!(
-            "Reminder creato.\nID: {}\nSchedule: {}\nRecurring: {}\nMessage: {}",
-            id, parsed.schedule, parsed.recurring, parsed.message
-        );
         Self::send_outbound_text(
             outbound_sender,
             &envelope.channel,
             account_tag.clone(),
             chat_id,
-            &confirmation,
+            &response,
             envelope.message_id,
         );
 
@@ -1713,7 +2343,7 @@ impl MasixRuntime {
         user_providers: &Arc<Mutex<HashMap<i64, String>>>,
     ) -> String {
         let rest = text.strip_prefix("/provider").unwrap_or("").trim();
-        
+
         if rest.is_empty() || rest.eq_ignore_ascii_case("help") {
             let mut lines = vec![
                 "🤖 *Provider Commands*".to_string(),
@@ -1725,7 +2355,11 @@ impl MasixRuntime {
                 "Available providers:".to_string(),
             ];
             for p in &config.providers.providers {
-                let marker = if p.name == config.providers.default_provider { " (default)" } else { "" };
+                let marker = if p.name == config.providers.default_provider {
+                    " (default)"
+                } else {
+                    ""
+                };
                 lines.push(format!("  • {}{}", p.name, marker));
             }
             lines.join("\n")
@@ -1735,12 +2369,20 @@ impl MasixRuntime {
             for p in &config.providers.providers {
                 let is_default = p.name == config.providers.default_provider;
                 let is_current = current_provider.as_deref() == Some(&p.name);
-                
+
                 let mut markers = Vec::new();
-                if is_default { markers.push("default"); }
-                if is_current { markers.push("current"); }
-                
-                let marker_str = if markers.is_empty() { String::new() } else { format!(" ({})", markers.join(", ")) };
+                if is_default {
+                    markers.push("default");
+                }
+                if is_current {
+                    markers.push("current");
+                }
+
+                let marker_str = if markers.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", markers.join(", "))
+                };
                 lines.push(format!("• {}{}", p.name, marker_str));
                 if let Some(model) = &p.model {
                     lines.push(format!("  Model: {}", model));
@@ -1751,9 +2393,15 @@ impl MasixRuntime {
             let name = name.trim();
             let exists = config.providers.providers.iter().any(|p| p.name == name);
             if !exists {
-                format!("❌ Provider '{}' not found.\nUse /provider list to see available providers.", name)
+                format!(
+                    "❌ Provider '{}' not found.\nUse /provider list to see available providers.",
+                    name
+                )
             } else {
-                user_providers.lock().await.insert(chat_id, name.to_string());
+                user_providers
+                    .lock()
+                    .await
+                    .insert(chat_id, name.to_string());
                 format!("✅ Provider set to '{}' for this chat.", name)
             }
         } else {
@@ -1775,7 +2423,7 @@ impl MasixRuntime {
         user_models: &Arc<Mutex<HashMap<i64, String>>>,
     ) -> String {
         let rest = text.strip_prefix("/model").unwrap_or("").trim();
-        
+
         if rest.is_empty() || rest.eq_ignore_ascii_case("help") {
             let current_provider = user_providers
                 .lock()
@@ -1784,17 +2432,25 @@ impl MasixRuntime {
                 .cloned()
                 .unwrap_or_else(|| config.providers.default_provider.clone());
             let current_model = user_models.lock().await.get(&chat_id).cloned();
-            
-            let provider_config = config.providers.providers.iter()
+
+            let provider_config = config
+                .providers
+                .providers
+                .iter()
                 .find(|p| p.name == current_provider);
-            
-            let default_model = provider_config.and_then(|p| p.model.as_deref()).unwrap_or("unknown");
-            
+
+            let default_model = provider_config
+                .and_then(|p| p.model.as_deref())
+                .unwrap_or("unknown");
+
             let lines = vec![
                 "🎯 *Model Commands*".to_string(),
                 String::new(),
                 format!("Current provider: {}", current_provider),
-                format!("Current model: {}", current_model.as_deref().unwrap_or(default_model)),
+                format!(
+                    "Current model: {}",
+                    current_model.as_deref().unwrap_or(default_model)
+                ),
                 String::new(),
                 "/model <name> - Set model for this chat".to_string(),
                 "/model reset - Reset to default model".to_string(),
@@ -1812,11 +2468,11 @@ impl MasixRuntime {
 
     async fn handle_mcp_chat_command(text: &str, config: &Config) -> String {
         let rest = text.strip_prefix("/mcp").unwrap_or("").trim();
-        
+
         let mcp = config.mcp.as_ref();
         let is_enabled = mcp.map(|m| m.enabled).unwrap_or(false);
         let servers = mcp.map(|m| m.servers.as_slice()).unwrap_or(&[]);
-        
+
         if rest.is_empty() || rest.eq_ignore_ascii_case("help") {
             let mut lines = vec![
                 "🔧 *MCP Status*".to_string(),
@@ -1824,7 +2480,7 @@ impl MasixRuntime {
                 format!("Enabled: {}", if is_enabled { "✅" } else { "❌" }),
                 format!("Servers: {}", servers.len()),
             ];
-            
+
             if !servers.is_empty() {
                 lines.push(String::new());
                 lines.push("Configured servers:".to_string());
@@ -1832,13 +2488,13 @@ impl MasixRuntime {
                     lines.push(format!("  • {} ({} {:?})", s.name, s.command, s.args));
                 }
             }
-            
+
             lines.push(String::new());
             lines.push("Use CLI to manage MCP:".to_string());
             lines.push("  masix config mcp list".to_string());
             lines.push("  masix config mcp add <name> <cmd> [args]".to_string());
             lines.push("  masix config mcp remove <name>".to_string());
-            
+
             lines.join("\n")
         } else if rest.eq_ignore_ascii_case("list") {
             if !is_enabled {

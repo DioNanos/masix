@@ -6,6 +6,7 @@ members = [
     "crates/masix-storage",
     "crates/masix-policy",
     "crates/masix-exec",
+    "crates/masix-intent",
     "crates/masix-ipc",
     "crates/masix-providers",
     "crates/masix-mcp",
@@ -51,6 +52,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chacha20poly1305 = "0.10"
 rand = "0.8"
 sha2 = "0.10"
+hmac = "0.12"
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }

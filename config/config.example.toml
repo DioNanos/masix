@@ -15,9 +15,21 @@ bot_token = "YOUR_BOT_TOKEN_HERE"
 
 [whatsapp]
 enabled = false
+read_only = true
+# transport_path = "crates/masix-whatsapp/whatsapp-transport.js"
+# ingress_shared_secret = "CHANGE_ME"
+# allowed_senders = ["393471443005@c.us"]
+# max_message_chars = 4000
+# forward_to_telegram_chat_id = 111111111
+# forward_to_telegram_account_tag = "123456789"
+# forward_prefix = "WhatsApp Alert"
 
 [sms]
 enabled = true
+# watch_interval_secs = 30
+# forward_to_telegram_chat_id = 111111111
+# forward_to_telegram_account_tag = "123456789"
+# forward_prefix = "SMS Alert"
 
 [mcp]
 enabled = true
@@ -41,7 +53,9 @@ default_provider = ""
 # [[bots.profiles]]
 # name = "default"
 # workdir = "~/.masix"
+# memory_file = "~/.masix/MEMORY.md"
 # provider_primary = ""
+# vision_provider = "" # optional dedicated provider for media analysis
 # provider_fallback = []
 
 # Command execution

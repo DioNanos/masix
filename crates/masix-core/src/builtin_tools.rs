@@ -4,6 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use masix_exec::{run_command, ExecMode, ExecPolicy};
+use masix_intent::{execute_intent, IntentRequest};
 use masix_providers::ToolDefinition;
 use scraper::{Html, Selector};
 use serde_json::Value;
@@ -148,6 +149,102 @@ pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {},
+                    "required": []
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: masix_providers::FunctionDefinition {
+                name: "cron".to_string(),
+                description: "Manage reminders for the current chat/account. Commands: 'list', 'cancel <id>', or natural language schedule like 'domani alle 9 \"Meeting\"'.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Cron command body (without /cron prefix). Examples: 'list', 'cancel 12', 'domani alle 9 \"Meeting\"'"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: masix_providers::FunctionDefinition {
+                name: "vision".to_string(),
+                description: "Return media metadata attached to the current inbound message (file id, mime type, caption). This does not perform OCR or image understanding.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: masix_providers::FunctionDefinition {
+                name: "intent".to_string(),
+                description: "Dispatch Android intents via `am` (start/broadcast/service). Use for opening apps, deep links, or sending broadcast intents from Termux.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "description": "Intent mode: start (default), broadcast, or service"
+                        },
+                        "action": {
+                            "type": "string",
+                            "description": "Intent action (e.g. android.intent.action.VIEW)"
+                        },
+                        "data": {
+                            "type": "string",
+                            "description": "Intent data URI (e.g. https://example.com)"
+                        },
+                        "package": {
+                            "type": "string",
+                            "description": "Package for explicit component target"
+                        },
+                        "class": {
+                            "type": "string",
+                            "description": "Class for explicit component target"
+                        },
+                        "extras_string": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "key": {"type": "string"},
+                                    "value": {"type": "string"}
+                                },
+                                "required": ["key", "value"]
+                            }
+                        },
+                        "extras_bool": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "key": {"type": "string"},
+                                    "value": {"type": "boolean"}
+                                },
+                                "required": ["key", "value"]
+                            }
+                        },
+                        "categories": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "flags": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "If true, return command without executing it"
+                        }
+                    },
                     "required": []
                 }),
             },
@@ -307,6 +404,26 @@ pub async fn execute_builtin_tool(
             }
         }
         "device_info" => get_device_info().await,
+        "cron" => Ok(
+            "Cron tool requires chat context and is executed by the runtime coordinator."
+                .to_string(),
+        ),
+        "vision" => Ok(
+            "Vision tool requires message media context and is executed by the runtime coordinator."
+                .to_string(),
+        ),
+        "intent" => {
+            if !exec_policy.enabled || !exec_policy.allow_termux {
+                return Ok("Intent tool is disabled. Enable in config with exec.enabled=true and exec.allow_termux=true".to_string());
+            }
+
+            let request: IntentRequest = serde_json::from_value(arguments)
+                .map_err(|e| anyhow!("Invalid intent arguments: {}", e))?;
+            match execute_intent(&request).await {
+                Ok(result) => Ok(result),
+                Err(e) => Ok(format!("Intent error: {}", e)),
+            }
+        }
         _ => Err(anyhow!("Unknown builtin tool: {}", tool_name)),
     }
 }
@@ -322,6 +439,9 @@ pub fn is_builtin_tool(tool_name: &str) -> bool {
             | "web_search"
             | "web_fetch"
             | "device_info"
+            | "cron"
+            | "vision"
+            | "intent"
     )
 }
 

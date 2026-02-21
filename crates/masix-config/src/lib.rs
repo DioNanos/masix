@@ -3,7 +3,7 @@
 //! TOML configuration loading with environment variable support
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -47,7 +47,16 @@ pub struct TelegramAccount {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WhatsappConfig {
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub read_only: bool,
     pub transport_path: Option<String>,
+    pub ingress_shared_secret: Option<String>,
+    pub max_message_chars: Option<usize>,
+    #[serde(default)]
+    pub allowed_senders: Vec<String>,
+    pub forward_to_telegram_chat_id: Option<i64>,
+    pub forward_to_telegram_account_tag: Option<String>,
+    pub forward_prefix: Option<String>,
     #[serde(default)]
     pub accounts: Vec<WhatsappAccount>,
 }
@@ -61,6 +70,9 @@ pub struct WhatsappAccount {
 pub struct SmsConfig {
     pub enabled: bool,
     pub watch_interval_secs: Option<u64>,
+    pub forward_to_telegram_chat_id: Option<i64>,
+    pub forward_to_telegram_account_tag: Option<String>,
+    pub forward_prefix: Option<String>,
     #[serde(default)]
     pub rules: Vec<SmsRule>,
 }
@@ -131,6 +143,8 @@ pub struct BotProfileConfig {
     pub memory_file: String,
     pub provider_primary: String,
     #[serde(default)]
+    pub vision_provider: Option<String>,
+    #[serde(default)]
     pub provider_fallback: Vec<String>,
     pub retry: Option<RetryPolicyConfig>,
 }
@@ -168,6 +182,10 @@ pub struct RateLimitConfig {
     pub messages_per_minute: u32,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())?;
@@ -182,6 +200,7 @@ impl Config {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         let mut provider_names = HashSet::new();
+        let mut provider_targets: HashMap<String, String> = HashMap::new();
         for provider in &self.providers.providers {
             let name = provider.name.trim();
             if name.is_empty() {
@@ -189,6 +208,46 @@ impl Config {
             }
             if !provider_names.insert(name.to_string()) {
                 anyhow::bail!("Duplicate provider name '{}'", name);
+            }
+
+            let target_key = provider
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .and_then(|base_url| {
+                    provider
+                        .model
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(|model| {
+                            let provider_type = provider
+                                .provider_type
+                                .as_deref()
+                                .unwrap_or("openai")
+                                .trim()
+                                .to_lowercase();
+                            format!(
+                                "{}|{}|{}",
+                                provider_type,
+                                base_url.to_lowercase(),
+                                model.to_lowercase()
+                            )
+                        })
+                });
+
+            if let Some(target_key) = target_key {
+                if let Some(existing_name) =
+                    provider_targets.insert(target_key.clone(), name.to_string())
+                {
+                    anyhow::bail!(
+                        "Duplicate provider target endpoint+model between '{}' and '{}': {}",
+                        existing_name,
+                        name,
+                        target_key
+                    );
+                }
             }
         }
 
@@ -229,6 +288,23 @@ impl Config {
                         profile_name,
                         profile.provider_primary
                     );
+                }
+
+                if let Some(vision_provider) = &profile.vision_provider {
+                    let vision_name = vision_provider.trim();
+                    if vision_name.is_empty() {
+                        anyhow::bail!(
+                            "Bot profile '{}' has empty vision_provider",
+                            profile_name
+                        );
+                    }
+                    if !provider_names.contains(vision_name) {
+                        anyhow::bail!(
+                            "Bot profile '{}' vision provider '{}' is not defined",
+                            profile_name,
+                            vision_name
+                        );
+                    }
                 }
 
                 let mut seen_fallbacks = HashSet::new();
@@ -339,6 +415,58 @@ impl Config {
             }
         }
 
+        if let Some(whatsapp) = &self.whatsapp {
+            if whatsapp.enabled {
+                if !whatsapp.read_only {
+                    anyhow::bail!("whatsapp.read_only=false is not supported");
+                }
+                if let Some(max_chars) = whatsapp.max_message_chars {
+                    if max_chars == 0 || max_chars > 20000 {
+                        anyhow::bail!("whatsapp.max_message_chars must be in range 1..=20000");
+                    }
+                }
+                for sender in &whatsapp.allowed_senders {
+                    if sender.trim().is_empty() {
+                        anyhow::bail!("whatsapp.allowed_senders contains an empty entry");
+                    }
+                }
+                if whatsapp.forward_to_telegram_chat_id.is_some() {
+                    let has_telegram = self
+                        .telegram
+                        .as_ref()
+                        .map(|tg| !tg.accounts.is_empty())
+                        .unwrap_or(false);
+                    if !has_telegram {
+                        anyhow::bail!(
+                            "whatsapp.forward_to_telegram_chat_id requires at least one telegram account"
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(sms) = &self.sms {
+            if sms.enabled {
+                if let Some(interval) = sms.watch_interval_secs {
+                    if interval == 0 || interval > 3600 {
+                        anyhow::bail!("sms.watch_interval_secs must be in range 1..=3600");
+                    }
+                }
+                if sms.forward_to_telegram_chat_id.is_some() {
+                    let has_telegram = self
+                        .telegram
+                        .as_ref()
+                        .map(|tg| !tg.accounts.is_empty())
+                        .unwrap_or(false);
+                    if !has_telegram {
+                        anyhow::bail!(
+                            "sms.forward_to_telegram_chat_id requires at least one telegram account"
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -444,12 +572,117 @@ name = "ops"
 workdir = "~/.masix/bots/ops"
 memory_file = "~/.masix/bots/ops/MEMORY.md"
 provider_primary = "openai"
+vision_provider = "openai"
 provider_fallback = ["openrouter"]
 [bots.profiles.retry]
 window_secs = 600
 initial_delay_secs = 2
 backoff_factor = 2
 max_delay_secs = 30
+"#,
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_provider_target_endpoint_and_model() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[providers]
+default_provider = "zai_main"
+
+[[providers.providers]]
+name = "zai_main"
+api_key = "k1"
+base_url = "https://api.z.ai/api/paas/v4"
+model = "glm-4.5"
+provider_type = "openai"
+
+[[providers.providers]]
+name = "zai_alias"
+api_key = "k2"
+base_url = "https://api.z.ai/api/paas/v4"
+model = "glm-4.5"
+provider_type = "openai"
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_unknown_vision_provider_in_profile() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[telegram]
+[[telegram.accounts]]
+bot_token = "123:abc"
+bot_profile = "ops"
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+
+[bots]
+[[bots.profiles]]
+name = "ops"
+workdir = "~/.masix/bots/ops"
+memory_file = "~/.masix/bots/ops/MEMORY.md"
+provider_primary = "openai"
+vision_provider = "missing"
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_whatsapp_non_read_only_mode() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+
+[whatsapp]
+enabled = true
+read_only = false
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_whatsapp_read_only_with_telegram_forward() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[telegram]
+[[telegram.accounts]]
+bot_token = "123:abc"
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+
+[whatsapp]
+enabled = true
+read_only = true
+forward_to_telegram_chat_id = 111111111
 "#,
         );
         assert!(cfg.validate().is_ok());

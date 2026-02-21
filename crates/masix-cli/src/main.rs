@@ -9,9 +9,10 @@ use clap::{Parser, Subcommand};
 use masix_config::Config;
 use masix_core::MasixRuntime;
 use masix_exec::{manage_termux_boot, BootAction};
-use masix_providers::{OpenAICompatibleProvider, Provider};
+use masix_providers::{AnthropicProvider, OpenAICompatibleProvider, Provider};
 use masix_storage::Storage;
 use serde_json::json;
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -19,6 +20,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
 
 const PID_FILE: &str = "masix.pid";
+const ZAI_STANDARD_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
+const ZAI_CODING_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
 
 #[derive(Parser)]
 #[command(name = "masix")]
@@ -468,8 +471,8 @@ async fn main() -> Result<()> {
                     let config = load_config(cli.config)?;
                     if let Some(whatsapp_config) = &config.whatsapp {
                         if whatsapp_config.enabled {
-                            let adapter = masix_whatsapp::WhatsAppAdapter::new(
-                                whatsapp_config.transport_path.clone(),
+                            let adapter = masix_whatsapp::WhatsAppAdapter::from_config(
+                                whatsapp_config,
                             );
                             if let Err(e) = adapter.start().await {
                                 eprintln!("WhatsApp adapter error: {}", e);
@@ -480,9 +483,11 @@ async fn main() -> Result<()> {
                     }
                 }
                 WhatsappCommands::Login => {
-                    println!("WhatsApp login flow (QR code)...");
-                    println!("Starting whatsapp-transport.js...");
-                    // QR code will be displayed by transport
+                    println!("WhatsApp login flow is handled by the transport bridge.");
+                    println!(
+                        "Run `masix whatsapp start` and scan the QR when bridge prints it."
+                    );
+                    println!("Mode is read-only: outbound send is disabled by design.");
                 }
             }
         }
@@ -918,6 +923,13 @@ fn print_redacted_config(config: &Config) -> Result<()> {
         }
     }
 
+    if let Some(secret) = value
+        .get_mut("whatsapp")
+        .and_then(|w| w.get_mut("ingress_shared_secret"))
+    {
+        *secret = json!("***REDACTED***");
+    }
+
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
@@ -1025,12 +1037,21 @@ async fn test_providers(config: &Config, name: Option<&str>) -> Result<()> {
         };
         println!("  API Key: {}", key_preview);
 
-        let provider = OpenAICompatibleProvider::new(
-            provider_config.name.clone(),
-            provider_config.api_key.clone(),
-            provider_config.base_url.clone(),
-            provider_config.model.clone(),
-        );
+        let provider_type = provider_config.provider_type.as_deref().unwrap_or("openai");
+        let provider: Box<dyn Provider> = match provider_type {
+            "anthropic" => Box::new(AnthropicProvider::new(
+                provider_config.name.clone(),
+                provider_config.api_key.clone(),
+                provider_config.base_url.clone(),
+                provider_config.model.clone(),
+            )),
+            _ => Box::new(OpenAICompatibleProvider::new(
+                provider_config.name.clone(),
+                provider_config.api_key.clone(),
+                provider_config.base_url.clone(),
+                provider_config.model.clone(),
+            )),
+        };
 
         match provider.health_check().await {
             Ok(true) => {
@@ -1318,10 +1339,33 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
         println!("  {:2}. {}", i + 1, name);
     }
 
-    let choice = prompt_input(&format!("Select provider (1-{}) or press Enter to skip", providers.len()), "")?;
+    let mut selected_primary_provider: Option<String> = None;
+    let choice = prompt_input(
+        &format!(
+            "Select provider (1-{}) or press Enter to skip",
+            providers.len()
+        ),
+        "",
+    )?;
     if let Ok(idx) = choice.parse::<usize>() {
         if idx >= 1 && idx <= providers.len() {
             let (key, name, base_url, default_model, provider_type) = &providers[idx - 1];
+            let resolved_base_url = if *key == "zai" {
+                let current_is_coding = config
+                    .providers
+                    .providers
+                    .iter()
+                    .find(|p| p.name == "zai")
+                    .and_then(|p| p.base_url.as_deref())
+                    .is_some_and(|url| url.contains("/coding/"));
+                if prompt_confirm("Use z.ai coding endpoint?", current_is_coding)? {
+                    ZAI_CODING_BASE_URL.to_string()
+                } else {
+                    ZAI_STANDARD_BASE_URL.to_string()
+                }
+            } else {
+                base_url.to_string()
+            };
             let api_key = if *key == "llama.cpp" {
                 "not-needed".to_string()
             } else {
@@ -1332,13 +1376,27 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
             let provider = masix_config::ProviderConfig {
                 name: key.to_string(),
                 api_key,
-                base_url: Some(base_url.to_string()),
+                base_url: Some(resolved_base_url),
                 model: Some(model),
                 provider_type: Some(provider_type.to_string()),
             };
-            config.providers.providers.push(provider);
-            config.providers.default_provider = key.to_string();
-            println!("✓ {} provider configured", name);
+            let (replaced, stored_name) = upsert_provider(&mut config, provider);
+            config.providers.default_provider = stored_name.clone();
+            selected_primary_provider = Some(stored_name);
+            if replaced {
+                println!("✓ {} provider updated", name);
+            } else {
+                println!("✓ {} provider configured", name);
+            }
+        }
+    }
+
+    if let Some(primary) = selected_primary_provider.as_deref() {
+        if prompt_confirm(
+            "Configure fallback provider chain for bot profile 'default'?",
+            false,
+        )? {
+            configure_default_profile_provider_chain(&mut config, primary)?;
         }
     }
 
@@ -1348,6 +1406,8 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
         config.mcp.get_or_insert_with(Default::default).enabled = true;
         println!("✓ MCP enabled (filesystem + memory servers)");
     }
+
+    config.validate()?;
 
     // Write config
     let config_toml = toml::to_string_pretty(&config)?;
@@ -1436,7 +1496,9 @@ fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Res
     let providers = get_known_providers();
 
     let selected = if let Some(n) = name {
-        providers.iter().find(|(key, _, _, _, _)| *key == n.as_str())
+        providers
+            .iter()
+            .find(|(key, _, _, _, _)| *key == n.as_str())
     } else {
         println!("Available providers:");
         for (i, (_, name, _, _, _)) in providers.iter().enumerate() {
@@ -1476,23 +1538,51 @@ fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Res
         Config::default()
     };
 
+    let resolved_base_url = if *key == "zai" {
+        let current_is_coding = config
+            .providers
+            .providers
+            .iter()
+            .find(|p| p.name == "zai")
+            .and_then(|p| p.base_url.as_deref())
+            .is_some_and(|url| url.contains("/coding/"));
+        if prompt_confirm("Use z.ai coding endpoint?", current_is_coding)? {
+            ZAI_CODING_BASE_URL.to_string()
+        } else {
+            ZAI_STANDARD_BASE_URL.to_string()
+        }
+    } else {
+        base_url.to_string()
+    };
+
     let provider = masix_config::ProviderConfig {
         name: key.to_string(),
         api_key,
-        base_url: Some(base_url.to_string()),
+        base_url: Some(resolved_base_url),
         model: Some(model),
         provider_type: Some(provider_type.to_string()),
     };
 
-    config.providers.providers.push(provider);
+    let (replaced, stored_name) = upsert_provider(&mut config, provider);
     if set_default {
-        config.providers.default_provider = key.to_string();
+        config.providers.default_provider = stored_name.clone();
+        if prompt_confirm(
+            "Configure fallback provider chain for bot profile 'default'?",
+            false,
+        )? {
+            configure_default_profile_provider_chain(&mut config, &stored_name)?;
+        }
     }
 
+    config.validate()?;
     let config_toml = toml::to_string_pretty(&config)?;
     fs::write(&config_path, config_toml)?;
 
-    println!("\n✅ {} provider configured", name);
+    if replaced {
+        println!("\n✅ {} provider updated", name);
+    } else {
+        println!("\n✅ {} provider configured", name);
+    }
     if set_default {
         println!("Set as default provider");
     }
@@ -1501,22 +1591,112 @@ fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Res
     Ok(())
 }
 
-fn get_known_providers() -> Vec<(&'static str, &'static str, &'static str, &'static str, &'static str)> {
+fn get_known_providers() -> Vec<(
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+)> {
     vec![
-        ("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4o-mini", "openai"),
-        ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini", "openai"),
-        ("zai", "z.ai (GLM)", "https://api.z.ai/api/paas/v4", "glm-4.5", "openai"),
-        ("chutes", "Chutes.ai", "https://llm.chutes.ai/v1", "zai-org/GLM-5-TEE", "openai"),
-        ("xai", "xAI (Grok)", "https://api.x.ai/v1", "grok-2-latest", "openai"),
-        ("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", "openai"),
-        ("anthropic", "Anthropic (Claude)", "https://api.anthropic.com", "claude-3-5-sonnet-latest", "anthropic"),
-        ("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash", "openai"),
-        ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", "openai"),
-        ("mistral", "Mistral AI", "https://api.mistral.ai/v1", "mistral-large-latest", "openai"),
-        ("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3-70b-chat-hf", "openai"),
-        ("fireworks", "Fireworks AI", "https://api.fireworks.ai/inference/v1", "accounts/fireworks/models/llama-v3-70b-instruct", "openai"),
-        ("cohere", "Cohere", "https://api.cohere.ai/v1", "command-r", "openai"),
-        ("llama.cpp", "llama.cpp (local)", "http://localhost:8080/v1", "local-model", "openai"),
+        (
+            "openai",
+            "OpenAI",
+            "https://api.openai.com/v1",
+            "gpt-4o-mini",
+            "openai",
+        ),
+        (
+            "openrouter",
+            "OpenRouter",
+            "https://openrouter.ai/api/v1",
+            "openai/gpt-4o-mini",
+            "openai",
+        ),
+        (
+            "zai",
+            "z.ai (GLM)",
+            "https://api.z.ai/api/paas/v4",
+            "glm-4.5",
+            "openai",
+        ),
+        (
+            "chutes",
+            "Chutes.ai",
+            "https://llm.chutes.ai/v1",
+            "zai-org/GLM-5-TEE",
+            "openai",
+        ),
+        (
+            "xai",
+            "xAI (Grok)",
+            "https://api.x.ai/v1",
+            "grok-2-latest",
+            "openai",
+        ),
+        (
+            "groq",
+            "Groq",
+            "https://api.groq.com/openai/v1",
+            "llama-3.3-70b-versatile",
+            "openai",
+        ),
+        (
+            "anthropic",
+            "Anthropic (Claude)",
+            "https://api.anthropic.com",
+            "claude-3-5-sonnet-latest",
+            "anthropic",
+        ),
+        (
+            "gemini",
+            "Google Gemini",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "gemini-2.0-flash",
+            "openai",
+        ),
+        (
+            "deepseek",
+            "DeepSeek",
+            "https://api.deepseek.com/v1",
+            "deepseek-chat",
+            "openai",
+        ),
+        (
+            "mistral",
+            "Mistral AI",
+            "https://api.mistral.ai/v1",
+            "mistral-large-latest",
+            "openai",
+        ),
+        (
+            "together",
+            "Together AI",
+            "https://api.together.xyz/v1",
+            "meta-llama/Llama-3-70b-chat-hf",
+            "openai",
+        ),
+        (
+            "fireworks",
+            "Fireworks AI",
+            "https://api.fireworks.ai/inference/v1",
+            "accounts/fireworks/models/llama-v3-70b-instruct",
+            "openai",
+        ),
+        (
+            "cohere",
+            "Cohere",
+            "https://api.cohere.ai/v1",
+            "command-r",
+            "openai",
+        ),
+        (
+            "llama.cpp",
+            "llama.cpp (local)",
+            "http://localhost:8080/v1",
+            "local-model",
+            "openai",
+        ),
     ]
 }
 
@@ -1557,10 +1737,16 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
                 }
             }
         }
-        ProviderCommands::Add { name, key, url, model, default } => {
+        ProviderCommands::Add {
+            name,
+            key,
+            url,
+            model,
+            default,
+        } => {
             let providers = get_known_providers();
             let known = providers.iter().find(|(k, _, _, _, _)| *k == name);
-            
+
             let base_url = url.or_else(|| known.map(|(_, _, url, _, _)| url.to_string()));
             let provider_type = known.map(|(_, _, _, _, ptype)| ptype.to_string());
 
@@ -1572,16 +1758,20 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
                 provider_type,
             };
 
-            config.providers.providers.push(provider);
+            let (replaced, stored_name) = upsert_provider(&mut config, provider);
             if default || config.providers.default_provider.is_empty() {
-                config.providers.default_provider = name.clone();
+                config.providers.default_provider = stored_name.clone();
             }
 
             config.validate()?;
             let config_toml = toml::to_string_pretty(&config)?;
             fs::write(&config_path, config_toml)?;
 
-            println!("✅ Provider '{}' added", name);
+            if replaced {
+                println!("✅ Provider '{}' updated", stored_name);
+            } else {
+                println!("✅ Provider '{}' added", stored_name);
+            }
             if default {
                 println!("Set as default provider");
             }
@@ -1623,7 +1813,10 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
                     .map(|p| p.name.clone())
                     .unwrap_or_default();
                 if !config.providers.default_provider.is_empty() {
-                    println!("Default provider changed to '{}'", config.providers.default_provider);
+                    println!(
+                        "Default provider changed to '{}'",
+                        config.providers.default_provider
+                    );
                 }
             }
             let config_toml = toml::to_string_pretty(&config)?;
@@ -1633,6 +1826,220 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
     }
 
     Ok(())
+}
+
+fn upsert_provider(config: &mut Config, provider: masix_config::ProviderConfig) -> (bool, String) {
+    if let Some(existing) = config
+        .providers
+        .providers
+        .iter_mut()
+        .find(|p| p.name == provider.name)
+    {
+        *existing = provider;
+        return (true, existing.name.clone());
+    }
+
+    let target_key = provider_target_key(&provider);
+    if let Some(target_key) = target_key {
+        if let Some(existing) = config
+            .providers
+            .providers
+            .iter_mut()
+            .find(|p| provider_target_key(p).as_deref() == Some(target_key.as_str()))
+        {
+            let existing_name = existing.name.clone();
+            existing.api_key = provider.api_key;
+            existing.base_url = provider.base_url;
+            existing.model = provider.model;
+            existing.provider_type = provider.provider_type;
+            return (true, existing_name);
+        }
+    }
+
+    let stored_name = provider.name.clone();
+    config.providers.providers.push(provider);
+    (false, stored_name)
+}
+
+fn provider_target_key(provider: &masix_config::ProviderConfig) -> Option<String> {
+    let base_url = provider.base_url.as_deref()?.trim().to_lowercase();
+    let model = provider.model.as_deref()?.trim().to_lowercase();
+    let provider_type = provider
+        .provider_type
+        .as_deref()
+        .unwrap_or("openai")
+        .trim()
+        .to_lowercase();
+
+    Some(format!("{}|{}|{}", provider_type, base_url, model))
+}
+
+fn configure_default_profile_provider_chain(
+    config: &mut Config,
+    primary_provider: &str,
+) -> Result<()> {
+    let mut provider_names = config
+        .providers
+        .providers
+        .iter()
+        .map(|p| p.name.clone())
+        .collect::<Vec<_>>();
+    provider_names.sort();
+    provider_names.dedup();
+
+    if !provider_names.iter().any(|name| name == primary_provider) {
+        anyhow::bail!("Primary provider '{}' is not configured", primary_provider);
+    }
+
+    let available_fallbacks = provider_names
+        .iter()
+        .filter(|name| name.as_str() != primary_provider)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let existing_fallback = config
+        .bots
+        .as_ref()
+        .and_then(|bots| bots.profiles.iter().find(|p| p.name == "default"))
+        .map(|profile| profile.provider_fallback.join(","))
+        .unwrap_or_default();
+    let existing_vision = config
+        .bots
+        .as_ref()
+        .and_then(|bots| bots.profiles.iter().find(|p| p.name == "default"))
+        .and_then(|profile| profile.vision_provider.clone())
+        .unwrap_or_default();
+
+    println!("\nAvailable fallback providers:");
+    if available_fallbacks.is_empty() {
+        println!("  (none)");
+    } else {
+        for name in &available_fallbacks {
+            println!("  - {}", name);
+        }
+    }
+
+    let fallback_input = prompt_input(
+        "Fallback providers (comma-separated, empty for none)",
+        &existing_fallback,
+    )?;
+    let fallback = parse_provider_list(&fallback_input);
+    let vision_input = prompt_input(
+        "Vision provider for media (provider name, empty for none)",
+        &existing_vision,
+    )?;
+    let vision_provider = if vision_input.trim().is_empty() {
+        None
+    } else {
+        Some(vision_input.trim().to_string())
+    };
+
+    for name in &fallback {
+        if name == primary_provider {
+            anyhow::bail!(
+                "Fallback chain cannot include the primary provider '{}'",
+                primary_provider
+            );
+        }
+        if !provider_names.iter().any(|provider| provider == name) {
+            anyhow::bail!("Fallback provider '{}' is not configured", name);
+        }
+    }
+    if let Some(name) = &vision_provider {
+        if !provider_names.iter().any(|provider| provider == name) {
+            anyhow::bail!("Vision provider '{}' is not configured", name);
+        }
+    }
+
+    let (default_workdir, default_memory_file) = default_profile_paths(config);
+    let bots = config.bots.get_or_insert_with(|| masix_config::BotsConfig {
+        strict_account_profile_mapping: None,
+        profiles: Vec::new(),
+    });
+
+    if let Some(profile) = bots.profiles.iter_mut().find(|p| p.name == "default") {
+        profile.provider_primary = primary_provider.to_string();
+        profile.provider_fallback = fallback.clone();
+        profile.vision_provider = vision_provider.clone();
+        if profile.workdir.trim().is_empty() {
+            profile.workdir = default_workdir.clone();
+        }
+        if profile.memory_file.trim().is_empty() {
+            profile.memory_file = default_memory_file.clone();
+        }
+    } else {
+        bots.profiles.push(masix_config::BotProfileConfig {
+            name: "default".to_string(),
+            workdir: default_workdir,
+            memory_file: default_memory_file,
+            provider_primary: primary_provider.to_string(),
+            vision_provider: vision_provider.clone(),
+            provider_fallback: fallback.clone(),
+            retry: None,
+        });
+    }
+
+    let unbound_accounts = config
+        .telegram
+        .as_ref()
+        .map(|tg| {
+            tg.accounts
+                .iter()
+                .filter(|account| account.bot_profile.is_none())
+                .count()
+        })
+        .unwrap_or(0);
+
+    if unbound_accounts > 0
+        && prompt_confirm(
+            "Map Telegram accounts without bot_profile to profile 'default'?",
+            true,
+        )?
+    {
+        if let Some(telegram) = config.telegram.as_mut() {
+            for account in &mut telegram.accounts {
+                if account.bot_profile.is_none() {
+                    account.bot_profile = Some("default".to_string());
+                }
+            }
+        }
+    }
+
+    println!(
+        "✓ Bot profile 'default' chain: primary='{}' fallback=[{}] vision={}",
+        primary_provider,
+        fallback.join(", "),
+        vision_provider.as_deref().unwrap_or("(none)")
+    );
+    Ok(())
+}
+
+fn parse_provider_list(input: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    for token in input.split(',') {
+        let name = token.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if seen.insert(name.to_string()) {
+            items.push(name.to_string());
+        }
+    }
+    items
+}
+
+fn default_profile_paths(config: &Config) -> (String, String) {
+    let mut data_dir = config
+        .core
+        .data_dir
+        .clone()
+        .unwrap_or_else(|| "~/.masix".to_string());
+    while data_dir.ends_with('/') && data_dir.len() > 1 {
+        data_dir.pop();
+    }
+    let memory_file = format!("{}/memory/default/MEMORY.md", data_dir);
+    (data_dir, memory_file)
 }
 
 fn handle_mcp_command(action: McpCommands, config_path: Option<String>) -> Result<()> {
@@ -1664,7 +2071,11 @@ fn handle_mcp_command(action: McpCommands, config_path: Option<String>) -> Resul
                 }
             }
         }
-        McpCommands::Add { name, command, args } => {
+        McpCommands::Add {
+            name,
+            command,
+            args,
+        } => {
             let mcp = config.mcp.get_or_insert_with(Default::default);
             mcp.enabled = true;
             mcp.servers.push(masix_config::McpServer {
@@ -1677,7 +2088,10 @@ fn handle_mcp_command(action: McpCommands, config_path: Option<String>) -> Resul
             println!("✅ MCP server '{}' added", name);
         }
         McpCommands::Remove { name } => {
-            let mcp = config.mcp.as_mut().ok_or_else(|| anyhow!("MCP not configured"))?;
+            let mcp = config
+                .mcp
+                .as_mut()
+                .ok_or_else(|| anyhow!("MCP not configured"))?;
             let len_before = mcp.servers.len();
             mcp.servers.retain(|s| s.name != name);
             if mcp.servers.len() == len_before {
@@ -1771,7 +2185,9 @@ async fn check_for_update(json: bool, force: bool) -> Result<()> {
     if !force && cache_path.exists() {
         if let Ok(content) = fs::read_to_string(&cache_path) {
             if let Ok(cached) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let (Some(ts), Some(latest)) = (cached["timestamp"].as_u64(), cached["latest"].as_str()) {
+                if let (Some(ts), Some(latest)) =
+                    (cached["timestamp"].as_u64(), cached["latest"].as_str())
+                {
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
@@ -1823,7 +2239,10 @@ async fn check_for_update(json: bool, force: bool) -> Result<()> {
     if let Some(parent) = cache_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let _ = fs::write(
         &cache_path,
         format!("{{\"timestamp\":{},\"latest\":\"{}\"}}", now, latest),
@@ -1884,7 +2303,23 @@ fn print_update_message(current: &str, latest: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::build_daemon_args;
+    use super::*;
+
+    fn make_provider(
+        name: &str,
+        base_url: &str,
+        model: &str,
+        provider_type: &str,
+        api_key: &str,
+    ) -> masix_config::ProviderConfig {
+        masix_config::ProviderConfig {
+            name: name.to_string(),
+            api_key: api_key.to_string(),
+            base_url: Some(base_url.to_string()),
+            model: Some(model.to_string()),
+            provider_type: Some(provider_type.to_string()),
+        }
+    }
 
     #[test]
     fn daemon_args_put_global_options_before_subcommand() {
@@ -1906,5 +2341,124 @@ mod tests {
     fn daemon_args_without_config_are_valid() {
         let args = build_daemon_args(None, "info");
         assert_eq!(args, vec!["--log-level", "info", "start", "--foreground"]);
+    }
+
+    #[test]
+    fn upsert_provider_updates_same_name_in_place() {
+        let mut config = Config::default();
+        config.providers.providers.push(make_provider(
+            "zai",
+            "https://api.z.ai/api/paas/v4",
+            "glm-4.5",
+            "openai",
+            "old",
+        ));
+
+        let (replaced, stored_name) = upsert_provider(
+            &mut config,
+            make_provider(
+                "zai",
+                "https://api.z.ai/api/coding/paas/v4",
+                "glm-4.5",
+                "openai",
+                "new",
+            ),
+        );
+
+        assert!(replaced);
+        assert_eq!(stored_name, "zai");
+        assert_eq!(config.providers.providers.len(), 1);
+        let provider = &config.providers.providers[0];
+        assert_eq!(provider.name, "zai");
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://api.z.ai/api/coding/paas/v4")
+        );
+        assert_eq!(provider.api_key, "new");
+    }
+
+    #[test]
+    fn upsert_provider_reuses_existing_name_for_same_endpoint_and_model() {
+        let mut config = Config::default();
+        config.providers.providers.push(make_provider(
+            "zai-primary",
+            "https://api.z.ai/api/paas/v4",
+            "glm-4.5",
+            "openai",
+            "old",
+        ));
+
+        let (replaced, stored_name) = upsert_provider(
+            &mut config,
+            make_provider(
+                "zai-alias",
+                "https://api.z.ai/api/paas/v4",
+                "glm-4.5",
+                "openai",
+                "new",
+            ),
+        );
+
+        assert!(replaced);
+        assert_eq!(stored_name, "zai-primary");
+        assert_eq!(config.providers.providers.len(), 1);
+        assert_eq!(config.providers.providers[0].name, "zai-primary");
+        assert_eq!(config.providers.providers[0].api_key, "new");
+    }
+
+    #[test]
+    fn upsert_provider_adds_new_entry_for_different_target() {
+        let mut config = Config::default();
+        config.providers.providers.push(make_provider(
+            "openai",
+            "https://api.openai.com/v1",
+            "gpt-4o-mini",
+            "openai",
+            "k1",
+        ));
+
+        let (replaced, stored_name) = upsert_provider(
+            &mut config,
+            make_provider(
+                "anthropic",
+                "https://api.anthropic.com",
+                "claude-3-5-sonnet-latest",
+                "anthropic",
+                "k2",
+            ),
+        );
+
+        assert!(!replaced);
+        assert_eq!(stored_name, "anthropic");
+        assert_eq!(config.providers.providers.len(), 2);
+    }
+
+    #[test]
+    fn upsert_provider_keeps_default_provider_valid_when_target_matches() {
+        let mut config = Config::default();
+        config.providers.default_provider = "zai-primary".to_string();
+        config.providers.providers.push(make_provider(
+            "zai-primary",
+            "https://api.z.ai/api/paas/v4",
+            "glm-4.5",
+            "openai",
+            "k1",
+        ));
+
+        let (_replaced, stored_name) = upsert_provider(
+            &mut config,
+            make_provider(
+                "zai-secondary",
+                "https://api.z.ai/api/paas/v4",
+                "glm-4.5",
+                "openai",
+                "k2",
+            ),
+        );
+        config.providers.default_provider = stored_name;
+
+        assert_eq!(config.providers.providers.len(), 1);
+        assert_eq!(config.providers.default_provider, "zai-primary");
+        assert!(config.validate().is_ok());
     }
 }
