@@ -762,9 +762,6 @@ async fn main() -> Result<()> {
         }
 
         Commands::Termux { action } => match action {
-            _ if !is_termux_environment() => {
-                eprintln!("Termux commands are available only on Android Termux.");
-            }
             TermuxCommands::Boot { action } => {
                 let boot_action = match action {
                     TermuxBootCommands::Enable => BootAction::Enable,
@@ -777,8 +774,9 @@ async fn main() -> Result<()> {
                 {
                     Ok(status) => {
                         println!("Script: {}", status.script_path.display());
+                        println!("Method: {}", status.method);
                         println!("Enabled: {}", status.enabled);
-                        if matches!(boot_action, BootAction::Enable) {
+                        if matches!(boot_action, BootAction::Enable) && is_termux_environment() {
                             println!(
                                 "Make sure Termux:Boot app is installed and permission granted."
                             );
@@ -788,6 +786,11 @@ async fn main() -> Result<()> {
                 }
             }
             TermuxCommands::Wake { action } => {
+                if !is_termux_environment() {
+                    eprintln!("Termux wake commands are available only on Android Termux.");
+                    return Ok(());
+                }
+
                 let wake_action = match action {
                     TermuxWakeCommands::On => WakeLockAction::Enable,
                     TermuxWakeCommands::Off => WakeLockAction::Disable,

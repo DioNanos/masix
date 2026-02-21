@@ -2151,34 +2151,40 @@ impl MasixRuntime {
         }
 
         if trimmed == "/termux" || trimmed.starts_with("/termux ") {
-            if !is_termux_environment() {
-                Self::send_outbound_text(
-                    outbound_sender,
-                    &envelope.channel,
-                    account_tag.clone(),
-                    chat_id,
-                    "Comandi /termux non disponibili su questa piattaforma (richiede Android Termux).",
-                    envelope.message_id,
-                );
-                return Ok(true);
-            }
-
             let rest = trimmed.strip_prefix("/termux").unwrap_or("");
             let command = rest.trim();
+            let is_termux = is_termux_environment();
 
             if command.is_empty() || command.eq_ignore_ascii_case("help") {
+                let help_text = if is_termux {
+                    "Uso:\n- `/termux info`\n- `/termux battery`\n- `/termux cmd <termux-command>`\n- `/termux boot on|off|status`\n- `/termux wake on|off|status`"
+                } else {
+                    "Uso desktop:\n- `/termux boot on|off|status`\n\nNote:\n- i comandi `info/battery/cmd` e `wake` richiedono Android Termux."
+                };
                 Self::send_outbound_text(
                     outbound_sender,
                     &envelope.channel,
                     account_tag.clone(),
                     chat_id,
-                    "Uso:\n- `/termux info`\n- `/termux battery`\n- `/termux cmd <termux-command>`\n- `/termux boot on|off|status`\n- `/termux wake on|off|status`",
+                    help_text,
                     envelope.message_id,
                 );
                 return Ok(true);
             }
 
             if let Some(wake_value) = command.strip_prefix("wake ").map(str::trim) {
+                if !is_termux {
+                    Self::send_outbound_text(
+                        outbound_sender,
+                        &envelope.channel,
+                        account_tag.clone(),
+                        chat_id,
+                        "Wake lock disponibile solo su Android Termux.",
+                        envelope.message_id,
+                    );
+                    return Ok(true);
+                }
+
                 let action = match wake_value.to_lowercase().as_str() {
                     "on" | "enable" => WakeLockAction::Enable,
                     "off" | "disable" => WakeLockAction::Disable,
@@ -2251,14 +2257,16 @@ impl MasixRuntime {
                     Ok(status) => {
                         if action == BootAction::Status {
                             format!(
-                                "Termux boot script: `{}`\nEnabled: {}",
+                                "Termux boot script: `{}`\nMethod: `{}`\nEnabled: {}",
                                 status.script_path.display(),
+                                status.method,
                                 status.enabled
                             )
                         } else {
                             format!(
-                                "Termux boot aggiornato.\nScript: `{}`\nEnabled: {}",
+                                "Termux boot aggiornato.\nScript: `{}`\nMethod: `{}`\nEnabled: {}",
                                 status.script_path.display(),
+                                status.method,
                                 status.enabled
                             )
                         }
@@ -2271,6 +2279,18 @@ impl MasixRuntime {
                     account_tag.clone(),
                     chat_id,
                     &out,
+                    envelope.message_id,
+                );
+                return Ok(true);
+            }
+
+            if !is_termux {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag.clone(),
+                    chat_id,
+                    "Comando non disponibile su questa piattaforma. Usa `/termux boot on|off|status`.",
                     envelope.message_id,
                 );
                 return Ok(true);

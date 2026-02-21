@@ -59,7 +59,9 @@ masix config init
 ## Platform Behavior
 
 - Termux/Android: full feature set (Termux boot/wake, SMS watcher, intent tool).
-- Linux/macOS: mobile-only features are automatically disabled.
+- Linux/macOS: mobile-only features are automatically disabled. `masix termux boot enable|disable|status` auto-detects the platform and applies the best boot strategy:
+  - Linux: systemd system service (no login) -> systemd user service + linger -> `~/.config/autostart` fallback
+  - macOS: LaunchDaemon (no login) -> LaunchAgent fallback
 - Update hint is platform-aware:
   - Termux: `npm install -g @mmmbuto/masix@latest`
   - Homebrew: `brew upgrade masix`
