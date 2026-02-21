@@ -6,6 +6,7 @@ use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
@@ -13,6 +14,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 15;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 3500;
 const DEFAULT_BOOT_SCRIPT_NAME: &str = "masix";
 const DEFAULT_BOOT_START_DELAY_SECS: u64 = 8;
+const DEFAULT_WAKELOCK_STATE_NAME: &str = "wakelock.state.json";
 const TERMUX_SHELL: &str = "/data/data/com.termux/files/usr/bin/sh";
 const TERMUX_PREFIX: &str = "/data/data/com.termux/files/usr";
 
@@ -201,6 +203,26 @@ pub struct BootStatus {
     pub script_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeLockAction {
+    Enable,
+    Disable,
+    Status,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeLockStatus {
+    pub supported: bool,
+    pub enabled: bool,
+    pub state_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WakeLockState {
+    pid: u32,
+    acquired_at_unix: u64,
+}
+
 pub async fn manage_termux_boot(
     action: BootAction,
     masix_bin: &Path,
@@ -251,6 +273,107 @@ pub async fn manage_termux_boot_with_home(
         enabled: script_path.exists(),
         script_path,
     })
+}
+
+pub async fn manage_termux_wake_lock(
+    action: WakeLockAction,
+    data_dir: Option<&Path>,
+) -> Result<WakeLockStatus> {
+    let state_path = wake_lock_state_path(data_dir)?;
+    let supported = is_termux_environment();
+
+    match action {
+        WakeLockAction::Enable => {
+            if supported {
+                run_wake_command("termux-wake-lock").await?;
+                let state = WakeLockState {
+                    pid: std::process::id(),
+                    acquired_at_unix: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+                write_wake_lock_state(&state_path, &state).await?;
+            }
+            Ok(WakeLockStatus {
+                supported,
+                enabled: supported && wake_lock_enabled(&state_path).await,
+                state_path,
+            })
+        }
+        WakeLockAction::Disable => {
+            if supported {
+                run_wake_command("termux-wake-unlock").await?;
+            }
+            remove_wake_lock_state(&state_path).await;
+            Ok(WakeLockStatus {
+                supported,
+                enabled: false,
+                state_path,
+            })
+        }
+        WakeLockAction::Status => {
+            let enabled = wake_lock_enabled(&state_path).await;
+            Ok(WakeLockStatus {
+                supported,
+                enabled,
+                state_path,
+            })
+        }
+    }
+}
+
+fn wake_lock_state_path(data_dir: Option<&Path>) -> Result<PathBuf> {
+    let base = match data_dir {
+        Some(path) => path.to_path_buf(),
+        None => dirs::home_dir()
+            .ok_or_else(|| anyhow!("Home directory not found"))?
+            .join(".masix"),
+    };
+    Ok(base.join("runtime").join(DEFAULT_WAKELOCK_STATE_NAME))
+}
+
+async fn write_wake_lock_state(path: &Path, state: &WakeLockState) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let body = serde_json::to_string(state)?;
+    tokio::fs::write(path, body).await?;
+    Ok(())
+}
+
+async fn wake_lock_enabled(path: &Path) -> bool {
+    let Ok(content) = tokio::fs::read_to_string(path).await else {
+        return false;
+    };
+    let Ok(_state) = serde_json::from_str::<WakeLockState>(&content) else {
+        return false;
+    };
+    true
+}
+
+async fn run_wake_command(binary: &str) -> Result<()> {
+    let output = Command::new(binary)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| anyhow!("Failed to run '{}': {}", binary, e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            bail!("'{}' failed with status {}", binary, output.status);
+        }
+        bail!("'{}' failed: {}", binary, stderr);
+    }
+    Ok(())
+}
+
+async fn remove_wake_lock_state(path: &Path) {
+    if tokio::fs::try_exists(path).await.unwrap_or(false) {
+        let _ = tokio::fs::remove_file(path).await;
+    }
 }
 
 fn render_boot_script(masix_bin: &Path, config_path: Option<&Path>) -> String {

@@ -8,7 +8,10 @@ use anyhow::{anyhow, Result};
 use base64::Engine;
 use builtin_tools::{execute_builtin_tool, get_builtin_tool_definitions, is_builtin_tool};
 use masix_config::{Config, RetryPolicyConfig};
-use masix_exec::{manage_termux_boot, run_command, BootAction, ExecMode, ExecPolicy};
+use masix_exec::{
+    manage_termux_boot, manage_termux_wake_lock, run_command, BootAction, ExecMode, ExecPolicy,
+    WakeLockAction,
+};
 use masix_ipc::{Envelope, EventBus, MessageKind, OutboundMessage};
 use masix_mcp::McpClient;
 use masix_policy::PolicyEngine;
@@ -2110,7 +2113,57 @@ impl MasixRuntime {
                     &envelope.channel,
                     account_tag.clone(),
                     chat_id,
-                    "Uso:\n- `/termux info`\n- `/termux battery`\n- `/termux cmd <termux-command>`\n- `/termux boot on|off|status`",
+                    "Uso:\n- `/termux info`\n- `/termux battery`\n- `/termux cmd <termux-command>`\n- `/termux boot on|off|status`\n- `/termux wake on|off|status`",
+                    envelope.message_id,
+                );
+                return Ok(true);
+            }
+
+            if let Some(wake_value) = command.strip_prefix("wake ").map(str::trim) {
+                let action = match wake_value.to_lowercase().as_str() {
+                    "on" | "enable" => WakeLockAction::Enable,
+                    "off" | "disable" => WakeLockAction::Disable,
+                    "status" => WakeLockAction::Status,
+                    _ => {
+                        Self::send_outbound_text(
+                            outbound_sender,
+                            &envelope.channel,
+                            account_tag.clone(),
+                            chat_id,
+                            "Valore non valido. Usa `/termux wake on|off|status`.",
+                            envelope.message_id,
+                        );
+                        return Ok(true);
+                    }
+                };
+
+                let out = match manage_termux_wake_lock(action, None).await {
+                    Ok(status) => {
+                        if action == WakeLockAction::Status {
+                            format!(
+                                "Termux wake lock:\nSupported: {}\nEnabled: {}\nState: `{}`",
+                                status.supported,
+                                status.enabled,
+                                status.state_path.display()
+                            )
+                        } else {
+                            format!(
+                                "Termux wake lock aggiornato.\nSupported: {}\nEnabled: {}\nState: `{}`",
+                                status.supported,
+                                status.enabled,
+                                status.state_path.display()
+                            )
+                        }
+                    }
+                    Err(e) => format!("Termux wake lock error: {}", e),
+                };
+
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag.clone(),
+                    chat_id,
+                    &out,
                     envelope.message_id,
                 );
                 return Ok(true);

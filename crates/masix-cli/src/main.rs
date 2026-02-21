@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use masix_config::Config;
 use masix_core::MasixRuntime;
-use masix_exec::{manage_termux_boot, BootAction};
+use masix_exec::{manage_termux_boot, manage_termux_wake_lock, BootAction, WakeLockAction};
 use masix_providers::{AnthropicProvider, OpenAICompatibleProvider, Provider};
 use masix_storage::Storage;
 use serde_json::json;
@@ -228,12 +228,24 @@ enum TermuxCommands {
         #[command(subcommand)]
         action: TermuxBootCommands,
     },
+    /// Manage MasiX runtime wake lock (keeps CPU active while running)
+    Wake {
+        #[command(subcommand)]
+        action: TermuxWakeCommands,
+    },
 }
 
 #[derive(Subcommand)]
 enum TermuxBootCommands {
     Enable,
     Disable,
+    Status,
+}
+
+#[derive(Subcommand)]
+enum TermuxWakeCommands {
+    On,
+    Off,
     Status,
 }
 
@@ -351,7 +363,11 @@ async fn main() -> Result<()> {
             }
 
             if foreground {
-                acquire_termux_wake_lock();
+                if let Err(e) =
+                    manage_termux_wake_lock(WakeLockAction::Enable, Some(&data_dir)).await
+                {
+                    eprintln!("Warning: failed to acquire Termux wake lock: {}", e);
+                }
                 let log_dir = data_dir.join("logs");
                 std::fs::create_dir_all(&log_dir)?;
                 let _logging_guard = logging::init_logging(&log_dir, &cli.log_level)?;
@@ -359,7 +375,13 @@ async fn main() -> Result<()> {
                 let storage = Storage::new(&db_path)?;
                 let runtime = MasixRuntime::new(config, storage)?;
                 info!("Starting Masix runtime in foreground...");
-                runtime.run().await?;
+                let run_result = runtime.run().await;
+                if let Err(e) =
+                    manage_termux_wake_lock(WakeLockAction::Disable, Some(&data_dir)).await
+                {
+                    eprintln!("Warning: failed to release Termux wake lock: {}", e);
+                }
+                run_result?;
             } else {
                 // Daemon mode - fork and detach
                 start_daemon(&data_dir, cli.config, cli.log_level)?;
@@ -372,7 +394,14 @@ async fn main() -> Result<()> {
             let pid_path = data_dir.join(PID_FILE);
 
             match stop_daemon(&pid_path) {
-                Ok(pid) => println!("Masix stopped (was PID: {})", pid),
+                Ok(pid) => {
+                    println!("Masix stopped (was PID: {})", pid);
+                    if let Err(e) =
+                        manage_termux_wake_lock(WakeLockAction::Disable, Some(&data_dir)).await
+                    {
+                        eprintln!("Warning: failed to release Termux wake lock: {}", e);
+                    }
+                }
                 Err(e) => eprintln!("Error: {}", e),
             }
         }
@@ -410,6 +439,11 @@ async fn main() -> Result<()> {
             if let Some(running_pid) = check_daemon_running(&pid_path)? {
                 println!("Stopping Masix (PID: {})...", running_pid);
                 stop_daemon(&pid_path)?;
+                if let Err(e) =
+                    manage_termux_wake_lock(WakeLockAction::Disable, Some(&data_dir)).await
+                {
+                    eprintln!("Warning: failed to release Termux wake lock: {}", e);
+                }
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
 
@@ -661,6 +695,28 @@ async fn main() -> Result<()> {
                         }
                     }
                     Err(e) => eprintln!("Termux boot error: {}", e),
+                }
+            }
+            TermuxCommands::Wake { action } => {
+                let wake_action = match action {
+                    TermuxWakeCommands::On => WakeLockAction::Enable,
+                    TermuxWakeCommands::Off => WakeLockAction::Disable,
+                    TermuxWakeCommands::Status => WakeLockAction::Status,
+                };
+
+                let data_dir = load_config(cli.config.clone())
+                    .ok()
+                    .map(|cfg| get_data_dir(&cfg));
+                match manage_termux_wake_lock(wake_action, data_dir.as_deref()).await {
+                    Ok(status) => {
+                        println!("Wake lock supported: {}", status.supported);
+                        println!("Wake lock enabled: {}", status.enabled);
+                        println!("State: {}", status.state_path.display());
+                        if !status.supported {
+                            println!("Termux environment not detected.");
+                        }
+                    }
+                    Err(e) => eprintln!("Termux wake lock error: {}", e),
                 }
             }
         },
@@ -1184,7 +1240,6 @@ fn stop_daemon(pid_path: &PathBuf) -> Result<u32> {
     }
 
     fs::remove_file(pid_path).ok();
-    release_termux_wake_lock();
 
     Ok(pid)
 }
@@ -1244,23 +1299,6 @@ fn is_process_running(pid: u32) -> bool {
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
             .unwrap_or(false)
-    }
-}
-
-fn acquire_termux_wake_lock() {
-    // Check if running in Termux
-    if std::env::var("TERMUX_VERSION").is_ok()
-        || std::path::Path::new("/data/data/com.termux").exists()
-    {
-        let _ = Command::new("termux-wake-lock").output();
-    }
-}
-
-fn release_termux_wake_lock() {
-    if std::env::var("TERMUX_VERSION").is_ok()
-        || std::path::Path::new("/data/data/com.termux").exists()
-    {
-        let _ = Command::new("termux-wake-unlock").output();
     }
 }
 

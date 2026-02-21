@@ -491,17 +491,19 @@ pub fn handle_callback(
                 },
                 Some("termux") => match lang {
                     Language::English => {
-                        "📱 *Termux*\n\nCommands: `/termux battery`, `/termux info`"
+                        "📱 *Termux*\n\nCommands: `/termux battery`, `/termux info`, `/termux wake status`"
                     }
                     Language::Spanish => {
-                        "📱 *Termux*\n\nComandos: `/termux battery`, `/termux info`"
+                        "📱 *Termux*\n\nComandos: `/termux battery`, `/termux info`, `/termux wake status`"
                     }
-                    Language::Chinese => "📱 *Termux*\n\n命令: `/termux battery`, `/termux info`",
+                    Language::Chinese => {
+                        "📱 *Termux*\n\n命令: `/termux battery`, `/termux info`, `/termux wake status`"
+                    }
                     Language::Russian => {
-                        "📱 *Termux*\n\nКоманды: `/termux battery`, `/termux info`"
+                        "📱 *Termux*\n\nКоманды: `/termux battery`, `/termux info`, `/termux wake status`"
                     }
                     Language::Italian => {
-                        "📱 *Termux*\n\nComandi: `/termux battery`, `/termux info`"
+                        "📱 *Termux*\n\nComandi: `/termux battery`, `/termux info`, `/termux wake status`"
                     }
                 },
                 _ => return None,
