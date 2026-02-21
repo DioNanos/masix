@@ -4,7 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-02-21
+
+### Added
+- **Cross-platform boot strategy status**
+  - Boot status now reports the selected strategy method (`termux-boot-script`, `linux-systemd-*`, `macos-launchd-*`, fallback modes) in CLI and chat output.
+
 ### Changed
+- **Boot enable/disable on desktop**
+  - `masix termux boot enable|disable|status` now auto-detects OS and applies the best available startup method.
+  - Linux strategy order: systemd system service (no login) -> systemd user service + linger -> XDG autostart fallback.
+  - macOS strategy order: LaunchDaemon (no login) -> LaunchAgent fallback.
 - **Torrent tools split and hardened**
   - `torrent_search` now returns link results only and no longer fetches magnets inline.
   - New `torrent_extract_magnet` built-in tool extracts a magnet URI from a selected result URL on demand.

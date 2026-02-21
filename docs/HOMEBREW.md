@@ -21,12 +21,12 @@ homebrew-masix/
 From the main MasiX repo, after a GitHub release tag is available:
 
 ```bash
-./scripts/generate_homebrew_formula.sh 0.1.7 ~/Dev/homebrew-masix
+./scripts/generate_homebrew_formula.sh 0.1.8 ~/Dev/homebrew-masix
 ```
 
 This script:
 
-- downloads `v0.1.7` source tarball from GitHub
+- downloads `v0.1.8` source tarball from GitHub
 - computes sha256
 - writes `Formula/masix.rb`
 
@@ -36,7 +36,7 @@ In `homebrew-masix`:
 
 ```bash
 git add Formula/masix.rb
-git commit -m "masix 0.1.7"
+git commit -m "masix 0.1.8"
 git push
 ```
 
