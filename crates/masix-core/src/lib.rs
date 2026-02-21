@@ -333,12 +333,20 @@ impl MasixRuntime {
             let data_dir = self.get_data_dir()?;
             let poll_timeout = telegram_config.poll_timeout_secs;
             let recreate_interval = telegram_config.client_recreate_interval_secs;
+            let mut seen_account_tags: HashSet<String> = HashSet::new();
 
             for (idx, account) in telegram_config.accounts.iter().enumerate() {
+                let account_tag = Self::account_tag_from_token(&account.bot_token);
+                if !seen_account_tags.insert(account_tag.clone()) {
+                    warn!(
+                        "Skipping duplicate Telegram account entry for account tag '{}'",
+                        account_tag
+                    );
+                    continue;
+                }
                 info!("Telegram adapter enabled for account #{}", idx + 1);
 
                 let account_clone = account.clone();
-                let account_tag = Self::account_tag_from_token(&account.bot_token);
                 let data_dir_clone = bot_contexts
                     .get(&account_tag)
                     .map(|ctx| ctx.workdir.clone())
@@ -462,6 +470,13 @@ impl MasixRuntime {
         if let Some(telegram) = &self.config.telegram {
             for account in &telegram.accounts {
                 let account_tag = Self::account_tag_from_token(&account.bot_token);
+                if contexts.contains_key(&account_tag) {
+                    warn!(
+                        "Duplicate Telegram account tag '{}' detected in config; reusing first context",
+                        account_tag
+                    );
+                    continue;
+                }
                 let context = if let Some(profile_name) = &account.bot_profile {
                     if let Some(profile) = profile_map.get(profile_name) {
                         let profile_root =

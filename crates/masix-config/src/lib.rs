@@ -320,6 +320,13 @@ impl Config {
                             f
                         );
                     }
+                    if f == profile.provider_primary.trim() {
+                        anyhow::bail!(
+                            "Bot profile '{}' fallback provider '{}' cannot match primary provider",
+                            profile_name,
+                            f
+                        );
+                    }
                     if !seen_fallbacks.insert(f.to_string()) {
                         anyhow::bail!(
                             "Bot profile '{}' contains duplicate fallback provider '{}'",
@@ -367,7 +374,23 @@ impl Config {
         }
 
         if let Some(telegram) = &self.telegram {
+            let mut telegram_account_tags = HashSet::new();
             for account in &telegram.accounts {
+                let token = account.bot_token.trim();
+                if token.is_empty() {
+                    anyhow::bail!("Telegram account bot_token cannot be empty");
+                }
+                let account_tag = token.split(':').next().unwrap_or(token).trim();
+                if account_tag.is_empty() {
+                    anyhow::bail!("Telegram account bot_token has invalid account tag");
+                }
+                if !telegram_account_tags.insert(account_tag.to_string()) {
+                    anyhow::bail!(
+                        "Duplicate Telegram account token/account tag '{}'",
+                        account_tag
+                    );
+                }
+
                 if let Some(profile_name) = &account.bot_profile {
                     if !has_profiles {
                         anyhow::bail!(
@@ -683,5 +706,62 @@ forward_to_telegram_chat_id = 111111111
 "#,
         );
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_telegram_account_tags() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[telegram]
+[[telegram.accounts]]
+bot_token = "123:abc"
+[[telegram.accounts]]
+bot_token = "123:def"
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_primary_provider_in_fallback_chain() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[telegram]
+[[telegram.accounts]]
+bot_token = "123:abc"
+bot_profile = "ops"
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+
+[[providers.providers]]
+name = "openrouter"
+api_key = "k"
+
+[bots]
+[[bots.profiles]]
+name = "ops"
+workdir = "~/.masix/bots/ops"
+memory_file = "~/.masix/bots/ops/MEMORY.md"
+provider_primary = "openai"
+provider_fallback = ["openai", "openrouter"]
+"#,
+        );
+        assert!(cfg.validate().is_err());
     }
 }

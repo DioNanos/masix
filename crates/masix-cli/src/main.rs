@@ -363,10 +363,24 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(&data_dir)?;
 
             let pid_path = data_dir.join(PID_FILE);
+            let current_pid = std::process::id();
 
             // Check if already running
             if let Some(running_pid) = check_daemon_running(&pid_path)? {
-                return Err(anyhow!("Masix is already running (PID: {})", running_pid));
+                if running_pid != current_pid {
+                    return Err(anyhow!("Masix is already running (PID: {})", running_pid));
+                }
+            }
+            let existing_foreground = find_other_masix_foreground_pids(current_pid);
+            if !existing_foreground.is_empty() {
+                anyhow::bail!(
+                    "Masix foreground instance already running (PID(s): {})",
+                    existing_foreground
+                        .iter()
+                        .map(|pid| pid.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
 
             if foreground {
@@ -381,6 +395,7 @@ async fn main() -> Result<()> {
                 let db_path = data_dir.join("masix.db");
                 let storage = Storage::new(&db_path)?;
                 let runtime = MasixRuntime::new(config, storage)?;
+                write_pid_file(&pid_path, current_pid)?;
                 info!("Starting Masix runtime in foreground...");
                 let run_result = runtime.run().await;
                 if let Err(e) =
@@ -388,6 +403,7 @@ async fn main() -> Result<()> {
                 {
                     eprintln!("Warning: failed to release Termux wake lock: {}", e);
                 }
+                clear_pid_file_if_owned(&pid_path, current_pid);
                 run_result?;
             } else {
                 // Daemon mode - fork and detach
@@ -408,8 +424,41 @@ async fn main() -> Result<()> {
                     {
                         eprintln!("Warning: failed to release Termux wake lock: {}", e);
                     }
+                    let current_pid = std::process::id();
+                    let unmanaged = find_other_masix_foreground_pids(current_pid);
+                    if !unmanaged.is_empty() {
+                        for extra_pid in &unmanaged {
+                            terminate_process(*extra_pid);
+                        }
+                        println!(
+                            "Stopped additional foreground instance(s): {}",
+                            unmanaged
+                                .iter()
+                                .map(|extra_pid| extra_pid.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
                 }
-                Err(e) => eprintln!("Error: {}", e),
+                Err(e) => {
+                    let current_pid = std::process::id();
+                    let unmanaged = find_other_masix_foreground_pids(current_pid);
+                    if unmanaged.is_empty() {
+                        eprintln!("Error: {}", e);
+                    } else {
+                        for pid in &unmanaged {
+                            terminate_process(*pid);
+                        }
+                        println!(
+                            "Stopped unmanaged foreground instance(s): {}",
+                            unmanaged
+                                .iter()
+                                .map(|pid| pid.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                }
             }
         }
 
@@ -432,6 +481,18 @@ async fn main() -> Result<()> {
                     if pid_path.exists() {
                         println!("(stale PID file found, cleaning up)");
                         let _ = fs::remove_file(&pid_path);
+                    }
+                    let current_pid = std::process::id();
+                    let unmanaged = find_other_masix_foreground_pids(current_pid);
+                    if !unmanaged.is_empty() {
+                        println!(
+                            "Foreground instance detected without PID file: {}",
+                            unmanaged
+                                .iter()
+                                .map(|pid| pid.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
                     }
                 }
             }
@@ -1182,11 +1243,7 @@ fn start_daemon(data_dir: &PathBuf, config_path: Option<String>, log_level: Stri
     let pid = child.id();
 
     // Write PID file with timestamp
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    fs::write(&pid_path, format!("{}\n{}", pid, timestamp))?;
+    write_pid_file(&pid_path, pid)?;
 
     println!("Masix started (PID: {})", pid);
     println!("Log: {}", log_path.display());
@@ -1205,6 +1262,28 @@ fn build_daemon_args(config_path: Option<&str>, log_level: &str) -> Vec<String> 
     args.push("start".to_string());
     args.push("--foreground".to_string());
     args
+}
+
+fn write_pid_file(pid_path: &PathBuf, pid: u32) -> Result<()> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    fs::write(pid_path, format!("{}\n{}", pid, timestamp))?;
+    Ok(())
+}
+
+fn clear_pid_file_if_owned(pid_path: &PathBuf, pid: u32) {
+    let Ok(content) = fs::read_to_string(pid_path) else {
+        return;
+    };
+    let owner_pid = content
+        .lines()
+        .next()
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    if owner_pid == Some(pid) {
+        let _ = fs::remove_file(pid_path);
+    }
 }
 
 fn stop_daemon(pid_path: &PathBuf) -> Result<u32> {
@@ -1306,6 +1385,68 @@ fn is_process_running(pid: u32) -> bool {
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
             .unwrap_or(false)
+    }
+}
+
+fn terminate_process(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill").arg(pid.to_string()).output();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if is_process_running(pid) {
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output();
+    }
+}
+
+fn find_other_masix_foreground_pids(current_pid: u32) -> Vec<u32> {
+    #[cfg(unix)]
+    {
+        let output = match Command::new("ps").args(["-eo", "pid=,args="]).output() {
+            Ok(output) => output,
+            Err(_) => return Vec::new(),
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut found: HashSet<u32> = HashSet::new();
+        for line in stdout.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let mut split = trimmed.split_whitespace();
+            let Some(pid_str) = split.next() else {
+                continue;
+            };
+            let Ok(pid) = pid_str.parse::<u32>() else {
+                continue;
+            };
+            if pid == current_pid {
+                continue;
+            }
+            let args = trimmed[pid_str.len()..].trim_start();
+            let lower = args.to_ascii_lowercase();
+            if lower.contains("masix") && lower.contains("start") && lower.contains("--foreground")
+            {
+                found.insert(pid);
+            }
+        }
+        let mut pids: Vec<u32> = found.into_iter().collect();
+        pids.sort_unstable();
+        pids
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = current_pid;
+        Vec::new()
     }
 }
 
