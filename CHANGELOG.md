@@ -19,6 +19,25 @@ All notable changes to this project will be documented in this file.
   - Config validation now rejects fallback chains that include the primary provider.
   - Config validation now rejects duplicate Telegram account tokens/account tags.
 
+## [0.1.7] - 2026-02-21
+
+### Added
+- **Desktop packaging track**
+  - Added Homebrew distribution guide (`docs/HOMEBREW.md`).
+  - Added formula generator script (`scripts/generate_homebrew_formula.sh`) for tap publishing.
+- **Configurable startup updater**
+  - New `[updates]` config section (`enabled`, `check_on_start`, `auto_apply`, `restart_after_update`, `channel`).
+  - Config wizard now includes update behavior setup.
+
+### Changed
+- **Platform compatibility (Linux/macOS vs Termux)**
+  - Mobile-only runtime features are now automatically gated outside Termux.
+  - Built-in tools `termux` and `intent` are no longer exposed on non-Termux platforms.
+  - SMS watcher startup is skipped outside Termux even if enabled in config.
+  - CLI `masix sms ...` and `masix termux ...` now return explicit “Termux-only” messages on unsupported platforms.
+- **Update UX**
+  - Update hint command is now platform-aware (`npm` on Termux, `brew upgrade masix` on desktop).
+
 ## [0.1.6-rc] - 2026-02-21
 
 ### Fixed

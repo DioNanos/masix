@@ -1,17 +1,17 @@
 # MasiX
 
-[![Status: RC](https://img.shields.io/badge/Status-0.1.6--rc-blue.svg)](#project-status)
+[![Status](https://img.shields.io/badge/Status-0.1.7-blue.svg)](#project-status)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
-[![Target](https://img.shields.io/badge/Target-Termux%20%2F%20Linux-green.svg)](https://termux.dev)
+[![Target](https://img.shields.io/badge/Target-Termux%20%2F%20Linux%20%2F%20macOS-green.svg)](https://termux.dev)
 [![npm](https://img.shields.io/npm/v/@mmmbuto/masix?style=flat-square&logo=npm)](https://www.npmjs.com/package/@mmmbuto/masix)
 [![ko-fi](https://img.shields.io/badge/☕_Support-Ko--fi-FF5E5B?style=flat-square&logo=ko-fi)](https://ko-fi.com/dionanos)
 
-MasiX is a Rust-first automation runtime focused on Termux/Linux mobile workflows, inspired by OpenClaw.
+MasiX is a Rust-first automation runtime for Termux, Linux, and macOS workflows, inspired by OpenClaw.
 
 ## Project Status
 
-- 0.1.6 release candidate
+- 0.1.7 stable release
 - Extracted from a commercial product and simplified into a public testable core
 - Primary focus: Telegram, MCP tool-calling, reminders, and stable Termux runtime
 
@@ -40,14 +40,29 @@ MasiX is a Rust-first automation runtime focused on Termux/Linux mobile workflow
 - Account-scoped bot workdir isolation (`.../accounts/<account_tag>/...`)
 - User-scoped memory isolation and catalog (`memory/accounts/<account>/users/<user>/meta.json`)
 - Per-user runtime provider/model selection state (scoped by bot account)
+- Startup auto-update check/apply with automatic process restart (configurable)
 
 ## Quick Install
 
 ```bash
+# Termux (npm package)
 npm install -g @mmmbuto/masix@latest
+
+# Linux/macOS (Homebrew tap)
+brew tap DioNanos/masix
+brew install masix
+
 masix --help
 masix config init
 ```
+
+## Platform Behavior
+
+- Termux/Android: full feature set (Termux boot/wake, SMS watcher, intent tool).
+- Linux/macOS: mobile-only features are automatically disabled.
+- Update hint is platform-aware:
+  - Termux: `npm install -g @mmmbuto/masix@latest`
+  - Homebrew: `brew upgrade masix`
 
 ## Quick Ops
 
@@ -56,6 +71,28 @@ masix start
 masix config validate
 masix cron add 'domani alle 9 "Daily check"' --account-tag 123456789
 masix termux boot status
+```
+
+## Startup Auto-Update
+
+By default, `masix start` checks npm updates at startup, applies the update, and restarts the process.
+
+Disable it in config:
+
+```toml
+[updates]
+enabled = false
+```
+
+Fine-grained controls:
+
+```toml
+[updates]
+enabled = true
+check_on_start = true
+auto_apply = true
+restart_after_update = true
+channel = "latest"
 ```
 
 ## Wizard Coverage
@@ -165,6 +202,7 @@ For local endpoint setup:
 
 - [Main usage guide](docs/USER_GUIDE.md)
 - [NPM package docs](npm/masix-termux/README.md)
+- [Homebrew distribution](docs/HOMEBREW.md)
 - [Example config](config/config.example.toml)
 - [Termux llama.cpp local endpoint guide](docs/TERMUX_LLAMA_CPP_LOCAL_ENDPOINT.md)
 

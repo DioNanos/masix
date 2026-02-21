@@ -17,6 +17,7 @@ MasiX is a Rust-first messaging automation runtime inspired by OpenClaw, focused
 - Termux boot automation (`masix termux boot enable|disable|status`)
 - Optional WhatsApp and SMS integrations
 - SOUL.md startup memory context
+- Startup auto-update check/apply with configurable toggle in `config.toml` (`[updates]`)
 
 ## Install (Termux)
 
