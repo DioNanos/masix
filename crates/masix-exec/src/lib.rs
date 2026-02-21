@@ -17,6 +17,7 @@ const DEFAULT_BOOT_START_DELAY_SECS: u64 = 8;
 const DEFAULT_WAKELOCK_STATE_NAME: &str = "wakelock.state.json";
 const TERMUX_SHELL: &str = "/data/data/com.termux/files/usr/bin/sh";
 const TERMUX_PREFIX: &str = "/data/data/com.termux/files/usr";
+const TERMUX_STABLE_MASIX_BIN: &str = "/data/data/com.termux/files/usr/bin/masix";
 
 const DEFAULT_BASE_ALLOWLIST: &[&str] = &[
     "pwd", "ls", "whoami", "date", "uname", "uptime", "df", "du", "free", "head", "tail", "wc",
@@ -252,7 +253,8 @@ pub async fn manage_termux_boot_with_home(
     match action {
         BootAction::Enable => {
             tokio::fs::create_dir_all(&boot_dir).await?;
-            let script = render_boot_script(masix_bin, config_path);
+            let stable_bin = resolve_boot_binary_path(masix_bin);
+            let script = render_boot_script(&stable_bin, config_path);
             tokio::fs::write(&script_path, script).await?;
             #[cfg(unix)]
             {
@@ -400,6 +402,23 @@ fn render_boot_script(masix_bin: &Path, config_path: Option<&Path>) -> String {
     )
 }
 
+fn resolve_boot_binary_path(masix_bin: &Path) -> PathBuf {
+    let raw = masix_bin.to_string_lossy();
+
+    // npm/launcher wrappers in some Termux setups expose transient /.l2s paths
+    // that are not valid after reboot.
+    if raw.contains("/.l2s/") {
+        return PathBuf::from(TERMUX_STABLE_MASIX_BIN);
+    }
+
+    let stable_termux_bin = PathBuf::from(TERMUX_STABLE_MASIX_BIN);
+    if is_termux_environment() && stable_termux_bin.exists() {
+        return stable_termux_bin;
+    }
+
+    std::fs::canonicalize(masix_bin).unwrap_or_else(|_| masix_bin.to_path_buf())
+}
+
 fn escape_single_quotes(input: &str) -> String {
     input.replace('\'', "'\"'\"'")
 }
@@ -468,5 +487,11 @@ mod tests {
             render_boot_script(Path::new("/data/data/com.termux/files/usr/bin/masix"), None);
         assert!(script.contains("nohup"));
         assert!(script.contains("start"));
+    }
+
+    #[test]
+    fn resolve_boot_binary_path_rewrites_transient_l2s_path() {
+        let resolved = resolve_boot_binary_path(Path::new("/.l2s/.l2s.masix-abc123"));
+        assert_eq!(resolved, PathBuf::from(TERMUX_STABLE_MASIX_BIN));
     }
 }
