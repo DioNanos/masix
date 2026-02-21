@@ -510,7 +510,11 @@ impl TelegramAdapter {
             .clone()
             .or_else(|| message.caption.clone())
             .or_else(|| {
-                if message.photo.as_ref().is_some_and(|items| !items.is_empty()) {
+                if message
+                    .photo
+                    .as_ref()
+                    .is_some_and(|items| !items.is_empty())
+                {
                     Some("[Media: photo]".to_string())
                 } else if message
                     .document

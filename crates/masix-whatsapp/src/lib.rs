@@ -231,7 +231,8 @@ impl WhatsAppAdapter {
             msg.ts.unwrap_or_default()
         );
         mac.update(payload.as_bytes());
-        let expected = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        let expected =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
 
         if expected != signature {
             anyhow::bail!("invalid signature");

@@ -51,6 +51,15 @@ masix cron add 'domani alle 9 "Daily check"' --account-tag 123456789
 masix termux boot status
 ```
 
+## Wizard Coverage
+
+`masix config init` now configures in one pass:
+- Telegram account basics
+- LLM provider + fallback chain + `vision_provider`
+- MCP enablement
+- WhatsApp read-only listener (secret, allowlist, forwarding)
+- SMS watcher (interval, forwarding)
+
 ## Provider Management (CLI)
 
 ```bash

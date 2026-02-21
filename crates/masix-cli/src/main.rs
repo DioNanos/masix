@@ -464,33 +464,27 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Whatsapp { action } => {
-            match action {
-                WhatsappCommands::Start => {
-                    println!("Starting WhatsApp adapter...");
-                    let config = load_config(cli.config)?;
-                    if let Some(whatsapp_config) = &config.whatsapp {
-                        if whatsapp_config.enabled {
-                            let adapter = masix_whatsapp::WhatsAppAdapter::from_config(
-                                whatsapp_config,
-                            );
-                            if let Err(e) = adapter.start().await {
-                                eprintln!("WhatsApp adapter error: {}", e);
-                            }
-                        } else {
-                            eprintln!("WhatsApp is not enabled in config");
+        Commands::Whatsapp { action } => match action {
+            WhatsappCommands::Start => {
+                println!("Starting WhatsApp adapter...");
+                let config = load_config(cli.config)?;
+                if let Some(whatsapp_config) = &config.whatsapp {
+                    if whatsapp_config.enabled {
+                        let adapter = masix_whatsapp::WhatsAppAdapter::from_config(whatsapp_config);
+                        if let Err(e) = adapter.start().await {
+                            eprintln!("WhatsApp adapter error: {}", e);
                         }
+                    } else {
+                        eprintln!("WhatsApp is not enabled in config");
                     }
                 }
-                WhatsappCommands::Login => {
-                    println!("WhatsApp login flow is handled by the transport bridge.");
-                    println!(
-                        "Run `masix whatsapp start` and scan the QR when bridge prints it."
-                    );
-                    println!("Mode is read-only: outbound send is disabled by design.");
-                }
             }
-        }
+            WhatsappCommands::Login => {
+                println!("WhatsApp login flow is handled by the transport bridge.");
+                println!("Run `masix whatsapp start` and scan the QR when bridge prints it.");
+                println!("Mode is read-only: outbound send is disabled by design.");
+            }
+        },
 
         Commands::Sms { action } => {
             let adapter = masix_sms::SmsAdapter::new(None);
@@ -1407,6 +1401,205 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
         println!("✓ MCP enabled (filesystem + memory servers)");
     }
 
+    // WhatsApp (read-only)
+    println!("\n── WhatsApp Read-Only Setup ──");
+    let existing_whatsapp = config.whatsapp.clone();
+    let whatsapp_enabled_default = existing_whatsapp
+        .as_ref()
+        .map(|w| w.enabled)
+        .unwrap_or(false);
+    if prompt_confirm(
+        "Enable WhatsApp read-only listener?",
+        whatsapp_enabled_default,
+    )? {
+        let existing = existing_whatsapp.unwrap_or(masix_config::WhatsappConfig {
+            enabled: false,
+            read_only: true,
+            transport_path: None,
+            ingress_shared_secret: None,
+            max_message_chars: None,
+            allowed_senders: Vec::new(),
+            forward_to_telegram_chat_id: None,
+            forward_to_telegram_account_tag: None,
+            forward_prefix: None,
+            accounts: Vec::new(),
+        });
+
+        let transport_default = existing
+            .transport_path
+            .as_deref()
+            .unwrap_or("crates/masix-whatsapp/whatsapp-transport.js");
+        let transport_path = prompt_input("WhatsApp transport path", transport_default)?;
+
+        let max_chars_default = existing
+            .max_message_chars
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "4000".to_string());
+        let max_chars_input = prompt_input("Max inbound message chars", &max_chars_default)?;
+        let max_message_chars = max_chars_input
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| anyhow!("Invalid max chars '{}'", max_chars_input))?;
+
+        let allowed_default = existing.allowed_senders.join(",");
+        let allowed_input = prompt_input(
+            "Allowed sender IDs (comma-separated, empty = allow all)",
+            &allowed_default,
+        )?;
+        let allowed_senders = parse_csv_list(&allowed_input);
+
+        let secret_default = existing.ingress_shared_secret.unwrap_or_default();
+        let secret_input = prompt_input(
+            "Ingress shared secret (empty = no signature check)",
+            &secret_default,
+        )?;
+        let ingress_shared_secret = if secret_input.trim().is_empty() {
+            None
+        } else {
+            Some(secret_input.trim().to_string())
+        };
+
+        let forward_default = existing.forward_to_telegram_chat_id.is_some();
+        let (forward_to_telegram_chat_id, forward_to_telegram_account_tag, forward_prefix) =
+            if prompt_confirm("Forward WhatsApp summaries to Telegram?", forward_default)? {
+                let chat_default = existing
+                    .forward_to_telegram_chat_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_default();
+                let chat_id_input = prompt_input("Telegram chat id for forwarding", &chat_default)?;
+                let chat_id = chat_id_input
+                    .trim()
+                    .parse::<i64>()
+                    .map_err(|_| anyhow!("Invalid Telegram chat id '{}'", chat_id_input))?;
+
+                let account_tag_default =
+                    existing.forward_to_telegram_account_tag.unwrap_or_default();
+                let account_tag_input = prompt_input(
+                    "Telegram account tag for forwarding (empty = first account)",
+                    &account_tag_default,
+                )?;
+                let account_tag = if account_tag_input.trim().is_empty() {
+                    None
+                } else {
+                    Some(account_tag_input.trim().to_string())
+                };
+
+                let prefix_default = existing
+                    .forward_prefix
+                    .unwrap_or_else(|| "WhatsApp Alert".to_string());
+                let prefix_input = prompt_input("Forward prefix", &prefix_default)?;
+                let prefix = if prefix_input.trim().is_empty() {
+                    None
+                } else {
+                    Some(prefix_input.trim().to_string())
+                };
+                (Some(chat_id), account_tag, prefix)
+            } else {
+                (None, None, None)
+            };
+
+        config.whatsapp = Some(masix_config::WhatsappConfig {
+            enabled: true,
+            read_only: true,
+            transport_path: if transport_path.trim().is_empty() {
+                None
+            } else {
+                Some(transport_path.trim().to_string())
+            },
+            ingress_shared_secret,
+            max_message_chars: Some(max_message_chars),
+            allowed_senders,
+            forward_to_telegram_chat_id,
+            forward_to_telegram_account_tag,
+            forward_prefix,
+            accounts: existing.accounts,
+        });
+        println!("✓ WhatsApp read-only listener configured");
+    } else if let Some(existing) = existing_whatsapp {
+        config.whatsapp = Some(masix_config::WhatsappConfig {
+            enabled: false,
+            ..existing
+        });
+        println!("✓ WhatsApp listener disabled");
+    }
+
+    // SMS watcher
+    println!("\n── SMS Watcher Setup ──");
+    let existing_sms = config.sms.clone();
+    let sms_enabled_default = existing_sms.as_ref().map(|s| s.enabled).unwrap_or(false);
+    if prompt_confirm("Enable SMS watcher?", sms_enabled_default)? {
+        let existing = existing_sms.unwrap_or(masix_config::SmsConfig {
+            enabled: false,
+            watch_interval_secs: Some(30),
+            forward_to_telegram_chat_id: None,
+            forward_to_telegram_account_tag: None,
+            forward_prefix: None,
+            rules: Vec::new(),
+        });
+
+        let interval_default = existing.watch_interval_secs.unwrap_or(30).to_string();
+        let interval_input = prompt_input("Watch interval seconds", &interval_default)?;
+        let watch_interval_secs = interval_input
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| anyhow!("Invalid watch interval '{}'", interval_input))?;
+
+        let forward_default = existing.forward_to_telegram_chat_id.is_some();
+        let (forward_to_telegram_chat_id, forward_to_telegram_account_tag, forward_prefix) =
+            if prompt_confirm("Forward SMS summaries to Telegram?", forward_default)? {
+                let chat_default = existing
+                    .forward_to_telegram_chat_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_default();
+                let chat_id_input = prompt_input("Telegram chat id for forwarding", &chat_default)?;
+                let chat_id = chat_id_input
+                    .trim()
+                    .parse::<i64>()
+                    .map_err(|_| anyhow!("Invalid Telegram chat id '{}'", chat_id_input))?;
+
+                let account_tag_default =
+                    existing.forward_to_telegram_account_tag.unwrap_or_default();
+                let account_tag_input = prompt_input(
+                    "Telegram account tag for forwarding (empty = first account)",
+                    &account_tag_default,
+                )?;
+                let account_tag = if account_tag_input.trim().is_empty() {
+                    None
+                } else {
+                    Some(account_tag_input.trim().to_string())
+                };
+
+                let prefix_default = existing
+                    .forward_prefix
+                    .unwrap_or_else(|| "SMS Alert".to_string());
+                let prefix_input = prompt_input("Forward prefix", &prefix_default)?;
+                let prefix = if prefix_input.trim().is_empty() {
+                    None
+                } else {
+                    Some(prefix_input.trim().to_string())
+                };
+                (Some(chat_id), account_tag, prefix)
+            } else {
+                (None, None, None)
+            };
+
+        config.sms = Some(masix_config::SmsConfig {
+            enabled: true,
+            watch_interval_secs: Some(watch_interval_secs),
+            forward_to_telegram_chat_id,
+            forward_to_telegram_account_tag,
+            forward_prefix,
+            rules: existing.rules,
+        });
+        println!("✓ SMS watcher configured");
+    } else if let Some(existing) = existing_sms {
+        config.sms = Some(masix_config::SmsConfig {
+            enabled: false,
+            ..existing
+        });
+        println!("✓ SMS watcher disabled");
+    }
+
     config.validate()?;
 
     // Write config
@@ -2015,6 +2208,10 @@ fn configure_default_profile_provider_chain(
 }
 
 fn parse_provider_list(input: &str) -> Vec<String> {
+    parse_csv_list(input)
+}
+
+fn parse_csv_list(input: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut items = Vec::new();
     for token in input.split(',') {

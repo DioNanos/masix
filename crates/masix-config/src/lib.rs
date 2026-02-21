@@ -293,10 +293,7 @@ impl Config {
                 if let Some(vision_provider) = &profile.vision_provider {
                     let vision_name = vision_provider.trim();
                     if vision_name.is_empty() {
-                        anyhow::bail!(
-                            "Bot profile '{}' has empty vision_provider",
-                            profile_name
-                        );
+                        anyhow::bail!("Bot profile '{}' has empty vision_provider", profile_name);
                     }
                     if !provider_names.contains(vision_name) {
                         anyhow::bail!(

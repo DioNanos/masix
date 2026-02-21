@@ -1027,7 +1027,8 @@ impl MasixRuntime {
                     tool_call_id: None,
                     name: None,
                 }];
-                let mut user_message = Self::enrich_user_message_with_media(text, &envelope.payload);
+                let mut user_message =
+                    Self::enrich_user_message_with_media(text, &envelope.payload);
                 let vision_analysis = match Self::analyze_media_with_vision_provider(
                     config,
                     &bot_context,
@@ -1160,9 +1161,8 @@ impl MasixRuntime {
                 }
 
                 if let Some(chat_id) = envelope.chat_id {
-                    let _ =
-                        Self::append_chat_memory(&bot_context, chat_id, "user", &user_message)
-                            .await;
+                    let _ = Self::append_chat_memory(&bot_context, chat_id, "user", &user_message)
+                        .await;
                     let _ = Self::append_chat_memory(
                         &bot_context,
                         chat_id,
@@ -1188,11 +1188,9 @@ impl MasixRuntime {
                         let _ = outbound_sender.send(msg);
                     }
                 } else if envelope.channel == "whatsapp" {
-                    if let Some(msg) = Self::build_whatsapp_forward_message(
-                        config,
-                        &envelope,
-                        &final_response,
-                    ) {
+                    if let Some(msg) =
+                        Self::build_whatsapp_forward_message(config, &envelope, &final_response)
+                    {
                         let _ = outbound_sender.send(msg);
                     }
                 } else if envelope.channel == "sms" {
@@ -1381,7 +1379,9 @@ impl MasixRuntime {
         ))
     }
 
-    fn media_file_reference_from_payload(payload: &serde_json::Value) -> Option<MediaFileReference> {
+    fn media_file_reference_from_payload(
+        payload: &serde_json::Value,
+    ) -> Option<MediaFileReference> {
         let media = payload.get("media")?;
         let file_id = media
             .get("file_id")
@@ -1439,7 +1439,10 @@ impl MasixRuntime {
                 return Some(account.bot_token.clone());
             }
         }
-        telegram.accounts.first().map(|account| account.bot_token.clone())
+        telegram
+            .accounts
+            .first()
+            .map(|account| account.bot_token.clone())
     }
 
     async fn fetch_telegram_media_bytes(
@@ -1470,13 +1473,14 @@ impl MasixRuntime {
             );
         }
 
-        let parsed: TelegramGetFileResponse = serde_json::from_str(&get_file_body).map_err(|e| {
-            anyhow!(
-                "telegram getFile decode failed: {} | body={}",
-                e,
-                get_file_body.chars().take(400).collect::<String>()
-            )
-        })?;
+        let parsed: TelegramGetFileResponse =
+            serde_json::from_str(&get_file_body).map_err(|e| {
+                anyhow!(
+                    "telegram getFile decode failed: {} | body={}",
+                    e,
+                    get_file_body.chars().take(400).collect::<String>()
+                )
+            })?;
         if !parsed.ok {
             let description = parsed
                 .description
@@ -1488,7 +1492,10 @@ impl MasixRuntime {
             .ok_or_else(|| anyhow!("telegram getFile missing result"))?
             .file_path;
 
-        let download_url = format!("https://api.telegram.org/file/bot{}/{}", bot_token, file_path);
+        let download_url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            bot_token, file_path
+        );
         let download_resp = client.get(&download_url).send().await?;
         let download_status = download_resp.status();
         if !download_status.is_success() {
@@ -1754,7 +1761,10 @@ impl MasixRuntime {
         let rest = command.trim();
 
         if rest.is_empty() || rest.eq_ignore_ascii_case("help") {
-            return Ok("Reminder commands:\n- `domani alle 9 \"Meeting\"`\n- `list`\n- `cancel <id>`".to_string());
+            return Ok(
+                "Reminder commands:\n- `domani alle 9 \"Meeting\"`\n- `list`\n- `cancel <id>`"
+                    .to_string(),
+            );
         }
 
         if rest.eq_ignore_ascii_case("list") {
