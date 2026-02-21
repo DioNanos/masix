@@ -1496,17 +1496,32 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
     if prompt_confirm("Configure Telegram bot?", true)? {
         let bot_token = prompt_input("Bot token (from @BotFather)", "")?;
         if !bot_token.is_empty() {
-            let account = masix_config::TelegramAccount {
-                bot_token,
-                allowed_chats: None,
-                bot_profile: None,
-            };
-            config
+            let account_tag = telegram_account_tag(&bot_token);
+            let existing = config
                 .telegram
-                .get_or_insert_with(Default::default)
-                .accounts
-                .push(account);
-            println!("✓ Telegram bot configured");
+                .as_ref()
+                .and_then(|tg| {
+                    tg.accounts
+                        .iter()
+                        .find(|account| telegram_account_tag(&account.bot_token) == account_tag)
+                })
+                .cloned();
+            let account = if let Some(mut current) = existing {
+                current.bot_token = bot_token;
+                current
+            } else {
+                masix_config::TelegramAccount {
+                    bot_token,
+                    allowed_chats: None,
+                    bot_profile: None,
+                }
+            };
+            let (replaced, stored_tag) = upsert_telegram_account(&mut config, account);
+            if replaced {
+                println!("✓ Telegram bot updated (account tag: {})", stored_tag);
+            } else {
+                println!("✓ Telegram bot configured (account tag: {})", stored_tag);
+            }
         }
     }
 
@@ -1811,18 +1826,6 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
     println!("  3. Copy the token you receive");
     println!();
 
-    let bot_token = prompt_input("Bot token", "")?;
-    if bot_token.is_empty() {
-        println!("No token provided, aborting.");
-        return Ok(());
-    }
-
-    let allowed_chats = prompt_input(
-        "Allowed chat IDs (comma-separated, or press Enter for all)",
-        "",
-    )?;
-    let bot_profile = prompt_input("Bot profile name (optional)", "")?;
-
     // Load or create config
     let config_path = get_config_path(config_path)?;
     let mut config = if config_path.exists() {
@@ -1831,19 +1834,61 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
         Config::default()
     };
 
+    let existing_accounts = config
+        .telegram
+        .as_ref()
+        .map(|tg| tg.accounts.clone())
+        .unwrap_or_default();
+
+    if existing_accounts.is_empty() {
+        println!("No Telegram account configured yet.");
+    } else {
+        println!("Existing Telegram accounts:");
+        for (index, account) in existing_accounts.iter().enumerate() {
+            let account_tag = telegram_account_tag(&account.bot_token);
+            let profile = account.bot_profile.as_deref().unwrap_or("(none)");
+            println!("  {:2}. tag={} profile={}", index + 1, account_tag, profile);
+        }
+        println!(
+            "Tip: inserisci un token dello stesso bot (stesso id prima di ':') per aggiornare in-place."
+        );
+    }
+
+    let bot_token = prompt_input("Bot token", "")?;
+    if bot_token.is_empty() {
+        println!("No token provided, aborting.");
+        return Ok(());
+    }
+    let account_tag = telegram_account_tag(&bot_token);
+
+    let existing = existing_accounts
+        .iter()
+        .find(|account| telegram_account_tag(&account.bot_token) == account_tag)
+        .cloned();
+    let allowed_default = existing
+        .as_ref()
+        .and_then(|account| account.allowed_chats.as_ref())
+        .map(|ids| {
+            ids.iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    let profile_default = existing
+        .as_ref()
+        .and_then(|account| account.bot_profile.clone())
+        .unwrap_or_default();
+
+    let allowed_chats = prompt_input(
+        "Allowed chat IDs (comma-separated, or press Enter for all)",
+        &allowed_default,
+    )?;
+    let bot_profile = prompt_input("Bot profile name (optional)", &profile_default)?;
+
     let account = masix_config::TelegramAccount {
         bot_token,
-        allowed_chats: if allowed_chats.is_empty() {
-            None
-        } else {
-            Some(
-                allowed_chats
-                    .split(',')
-                    .map(|s| s.trim().parse::<i64>().unwrap_or(0))
-                    .filter(|&id| id != 0)
-                    .collect(),
-            )
-        },
+        allowed_chats: parse_chat_ids_csv(&allowed_chats),
         bot_profile: if bot_profile.is_empty() {
             None
         } else {
@@ -1851,16 +1896,17 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
         },
     };
 
-    config
-        .telegram
-        .get_or_insert_with(Default::default)
-        .accounts
-        .push(account);
+    let (replaced, stored_tag) = upsert_telegram_account(&mut config, account);
+    config.validate()?;
 
     let config_toml = toml::to_string_pretty(&config)?;
     fs::write(&config_path, config_toml)?;
 
-    println!("\n✅ Telegram bot configured");
+    if replaced {
+        println!("\n✅ Telegram bot updated (account tag: {})", stored_tag);
+    } else {
+        println!("\n✅ Telegram bot configured (account tag: {})", stored_tag);
+    }
     println!("Config saved to: {}", config_path.display());
 
     Ok(())
@@ -2591,6 +2637,52 @@ fn parse_provider_list(input: &str) -> Vec<String> {
     parse_csv_list(input)
 }
 
+fn parse_chat_ids_csv(input: &str) -> Option<Vec<i64>> {
+    let mut values = Vec::new();
+    for token in input.split(',') {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(id) = trimmed.parse::<i64>() {
+            if id != 0 {
+                values.push(id);
+            }
+        }
+    }
+
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+fn telegram_account_tag(bot_token: &str) -> String {
+    let token = bot_token.trim();
+    token.split(':').next().unwrap_or(token).trim().to_string()
+}
+
+fn upsert_telegram_account(
+    config: &mut Config,
+    account: masix_config::TelegramAccount,
+) -> (bool, String) {
+    let account_tag = telegram_account_tag(&account.bot_token);
+    let telegram = config.telegram.get_or_insert_with(Default::default);
+
+    if let Some(existing) = telegram
+        .accounts
+        .iter_mut()
+        .find(|item| telegram_account_tag(&item.bot_token) == account_tag)
+    {
+        *existing = account;
+        return (true, account_tag);
+    }
+
+    telegram.accounts.push(account);
+    (false, account_tag)
+}
+
 fn parse_csv_list(input: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut items = Vec::new();
@@ -2898,6 +2990,18 @@ mod tests {
         }
     }
 
+    fn make_telegram_account(
+        bot_token: &str,
+        allowed_chats: Option<Vec<i64>>,
+        bot_profile: Option<&str>,
+    ) -> masix_config::TelegramAccount {
+        masix_config::TelegramAccount {
+            bot_token: bot_token.to_string(),
+            allowed_chats,
+            bot_profile: bot_profile.map(|value| value.to_string()),
+        }
+    }
+
     #[test]
     fn daemon_args_put_global_options_before_subcommand() {
         let args = build_daemon_args(Some("/tmp/config.toml"), "debug");
@@ -3037,6 +3141,63 @@ mod tests {
         assert_eq!(config.providers.providers.len(), 1);
         assert_eq!(config.providers.default_provider, "zai-primary");
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn parse_chat_ids_csv_skips_invalid_and_zero_values() {
+        assert_eq!(
+            parse_chat_ids_csv("123, abc, 0, -10055, , 42"),
+            Some(vec![123, -10055, 42])
+        );
+        assert_eq!(parse_chat_ids_csv("abc,0, ,"), None);
+    }
+
+    #[test]
+    fn telegram_upsert_updates_existing_account_by_tag() {
+        let mut config = Config::default();
+        config
+            .telegram
+            .get_or_insert_with(Default::default)
+            .accounts
+            .push(make_telegram_account(
+                "12345:old-token",
+                Some(vec![1, 2]),
+                Some("legacy"),
+            ));
+
+        let (replaced, tag) = upsert_telegram_account(
+            &mut config,
+            make_telegram_account("12345:new-token", Some(vec![99]), Some("default")),
+        );
+
+        assert!(replaced);
+        assert_eq!(tag, "12345");
+        let telegram = config.telegram.as_ref().expect("telegram config");
+        assert_eq!(telegram.accounts.len(), 1);
+        let account = &telegram.accounts[0];
+        assert_eq!(account.bot_token, "12345:new-token");
+        assert_eq!(account.allowed_chats, Some(vec![99]));
+        assert_eq!(account.bot_profile.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn telegram_upsert_adds_new_account_for_different_tag() {
+        let mut config = Config::default();
+        config
+            .telegram
+            .get_or_insert_with(Default::default)
+            .accounts
+            .push(make_telegram_account("12345:token-a", None, Some("a")));
+
+        let (replaced, tag) = upsert_telegram_account(
+            &mut config,
+            make_telegram_account("67890:token-b", None, Some("b")),
+        );
+
+        assert!(!replaced);
+        assert_eq!(tag, "67890");
+        let telegram = config.telegram.as_ref().expect("telegram config");
+        assert_eq!(telegram.accounts.len(), 2);
     }
 
     #[test]
