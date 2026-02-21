@@ -1,6 +1,6 @@
 # MasiX
 
-[![Status: RC](https://img.shields.io/badge/Status-0.1.5--rc-blue.svg)](#project-status)
+[![Status: RC](https://img.shields.io/badge/Status-0.1.6--rc-blue.svg)](#project-status)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![Target](https://img.shields.io/badge/Target-Termux%20%2F%20Linux-green.svg)](https://termux.dev)
@@ -11,7 +11,7 @@ MasiX is a Rust-first automation runtime focused on Termux/Linux mobile workflow
 
 ## Project Status
 
-- 0.1.5 release candidate
+- 0.1.6 release candidate
 - Extracted from a commercial product and simplified into a public testable core
 - Primary focus: Telegram, MCP tool-calling, reminders, and stable Termux runtime
 

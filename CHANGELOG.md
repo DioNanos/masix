@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.6-rc] - 2026-02-21
+
+### Fixed
+- **Wizard fallback/vision provider setup flow**
+  - `masix config init` and provider wizard chain setup now show configured providers with numeric index and explicit primary marker.
+  - Fallback/vision inputs now accept configured name, numeric index, provider key, and common aliases (for example `z.ai`, `Google Gemini`).
+  - If fallback or vision provider is known but not configured, wizard now offers inline configuration instead of failing at validation.
+  - Duplicate fallback entries are deduplicated after resolution and guardrails remain enforced (primary provider cannot be in fallback chain).
+- **Wizard regression coverage**
+  - Added unit tests for provider reference resolution (alias parsing, case-insensitive name match, index-based selection).
+
 ## [0.1.5-rc] - 2026-02-21
 
 ### Fixed
