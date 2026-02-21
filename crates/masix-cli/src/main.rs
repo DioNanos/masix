@@ -8,7 +8,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use masix_config::Config;
 use masix_core::MasixRuntime;
-use masix_exec::{manage_termux_boot, manage_termux_wake_lock, BootAction, WakeLockAction};
+use masix_exec::{
+    is_termux_environment, manage_termux_boot, manage_termux_wake_lock, BootAction, WakeLockAction,
+};
 use masix_providers::{AnthropicProvider, OpenAICompatibleProvider, Provider};
 use masix_storage::Storage;
 use serde_json::json;
@@ -22,6 +24,9 @@ use tracing::info;
 const PID_FILE: &str = "masix.pid";
 const ZAI_STANDARD_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
+const NPM_PACKAGE_NAME: &str = "@mmmbuto/masix";
+const UPDATE_CACHE_FILE: &str = ".masix/.update-check";
+const UPDATE_CACHE_DURATION_SECS: u64 = 24 * 60 * 60;
 type KnownProviderDef = (
     &'static str,
     &'static str,
@@ -365,6 +370,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Start { foreground } => {
             let config = load_config(cli.config.clone())?;
+            if maybe_auto_update_on_start(&config).await? {
+                return Ok(());
+            }
             let data_dir = get_data_dir(&config);
             std::fs::create_dir_all(&data_dir)?;
 
@@ -595,6 +603,11 @@ async fn main() -> Result<()> {
         },
 
         Commands::Sms { action } => {
+            if !is_termux_environment() {
+                eprintln!("SMS commands are available only on Android Termux.");
+                return Ok(());
+            }
+
             let adapter = masix_sms::SmsAdapter::new(None);
 
             match action {
@@ -749,6 +762,9 @@ async fn main() -> Result<()> {
         }
 
         Commands::Termux { action } => match action {
+            _ if !is_termux_environment() => {
+                eprintln!("Termux commands are available only on Android Termux.");
+            }
             TermuxCommands::Boot { action } => {
                 let boot_action = match action {
                     TermuxBootCommands::Enable => BootAction::Enable,
@@ -978,7 +994,11 @@ async fn main() -> Result<()> {
         }
 
         Commands::CheckUpdate { json, force } => {
-            check_for_update(json, force).await?;
+            let channel = load_config(cli.config.clone())
+                .ok()
+                .map(|config| config.updates.channel)
+                .unwrap_or_else(|| "latest".to_string());
+            check_for_update(json, force, &channel).await?;
         }
     }
 
@@ -1606,6 +1626,28 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
     println!("\n── Core Settings ──");
     let data_dir = prompt_input("Data directory", "~/.masix")?;
     config.core.data_dir = Some(data_dir);
+
+    println!("\n── Update Settings ──");
+    config.updates.enabled = prompt_confirm(
+        "Enable startup update check/auto-update",
+        config.updates.enabled,
+    )?;
+    if config.updates.enabled {
+        config.updates.check_on_start = prompt_confirm(
+            "Check for updates on every start",
+            config.updates.check_on_start,
+        )?;
+        config.updates.auto_apply = prompt_confirm(
+            "Auto-apply update when available",
+            config.updates.auto_apply,
+        )?;
+        config.updates.restart_after_update = prompt_confirm(
+            "Restart process after successful update",
+            config.updates.restart_after_update,
+        )?;
+        let channel = prompt_input("Update channel (npm dist-tag)", &config.updates.channel)?;
+        config.updates.channel = normalize_update_channel(&channel);
+    }
 
     // Telegram
     println!("\n── Telegram Setup ──");
@@ -3110,72 +3152,82 @@ fn prompt_confirm(prompt: &str, default: bool) -> Result<bool> {
     }
 }
 
-async fn check_for_update(json: bool, force: bool) -> Result<()> {
-    use std::time::{SystemTime, UNIX_EPOCH};
+#[derive(Debug, Clone)]
+struct UpdateStatus {
+    current: String,
+    latest: String,
+    has_update: bool,
+}
 
-    const NPM_REGISTRY_URL: &str = "https://registry.npmjs.org/@mmmbuto/masix/latest";
-    const CACHE_FILE: &str = ".masix/.update-check";
-    const CACHE_DURATION_SECS: u64 = 24 * 60 * 60; // 24 hours
+fn normalize_update_channel(channel: &str) -> String {
+    let trimmed = channel.trim();
+    if trimmed.is_empty() {
+        "latest".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
 
-    let current_version = env!("CARGO_PKG_VERSION");
+fn is_dev_binary_path() -> bool {
+    std::env::current_exe().ok().is_some_and(|path| {
+        let value = path.to_string_lossy();
+        value.contains("/target/debug/") || value.contains("/target/release/")
+    })
+}
+
+fn read_cached_update_status(
+    cache_path: &PathBuf,
+    current_version: &str,
+    channel: &str,
+) -> Option<UpdateStatus> {
+    let content = fs::read_to_string(cache_path).ok()?;
+    let cached = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    let ts = cached["timestamp"].as_u64()?;
+    let latest = cached["latest"].as_str()?;
+    let cached_channel = cached["channel"].as_str().unwrap_or("latest");
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    if now.saturating_sub(ts) >= UPDATE_CACHE_DURATION_SECS || cached_channel != channel {
+        return None;
+    }
+
+    Some(UpdateStatus {
+        current: current_version.to_string(),
+        latest: latest.to_string(),
+        has_update: compare_versions(current_version, latest),
+    })
+}
+
+async fn fetch_update_status(force: bool, channel: &str) -> Result<UpdateStatus> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let channel = normalize_update_channel(channel);
     let home = dirs::home_dir().ok_or_else(|| anyhow!("Cannot determine home directory"))?;
-    let cache_path = home.join(CACHE_FILE);
+    let cache_path = home.join(UPDATE_CACHE_FILE);
 
-    // Check cache
-    if !force && cache_path.exists() {
-        if let Ok(content) = fs::read_to_string(&cache_path) {
-            if let Ok(cached) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let (Some(ts), Some(latest)) =
-                    (cached["timestamp"].as_u64(), cached["latest"].as_str())
-                {
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    if now - ts < CACHE_DURATION_SECS {
-                        let has_update = compare_versions(current_version, latest);
-                        if json {
-                            println!(
-                                "{{\"current\":\"{}\",\"latest\":\"{}\",\"has_update\":{}}}",
-                                current_version, latest, has_update
-                            );
-                        } else if has_update {
-                            print_update_message(current_version, latest);
-                        } else {
-                            println!("✅ masix is up to date (v{})", current_version);
-                        }
-                        return Ok(());
-                    }
-                }
-            }
+    if !force {
+        if let Some(cached) = read_cached_update_status(&cache_path, &current_version, &channel) {
+            return Ok(cached);
         }
     }
 
-    // Fetch from npm registry
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
-
-    let response = match client.get(NPM_REGISTRY_URL).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            if json {
-                println!(
-                    "{{\"current\":\"{}\",\"latest\":\"{}\",\"has_update\":false,\"error\":\"{}\"}}",
-                    current_version, current_version, e
-                );
-            } else {
-                println!("Unable to check for updates: {}", e);
-            }
-            return Ok(());
-        }
-    };
-
+    let url = format!(
+        "https://registry.npmjs.org/{}/{}",
+        NPM_PACKAGE_NAME, channel
+    );
+    let response = client.get(url).send().await?;
+    if !response.status().is_success() {
+        anyhow::bail!("npm registry responded with status {}", response.status());
+    }
     let body = response.text().await?;
     let pkg: serde_json::Value = serde_json::from_str(&body)?;
-    let latest = pkg["version"].as_str().unwrap_or(current_version);
+    let latest = pkg["version"]
+        .as_str()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| current_version.clone());
 
-    // Update cache
     if let Some(parent) = cache_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -3185,20 +3237,146 @@ async fn check_for_update(json: bool, force: bool) -> Result<()> {
         .as_secs();
     let _ = fs::write(
         &cache_path,
-        format!("{{\"timestamp\":{},\"latest\":\"{}\"}}", now, latest),
+        serde_json::json!({
+            "timestamp": now,
+            "latest": latest,
+            "channel": channel,
+        })
+        .to_string(),
     );
 
-    let has_update = compare_versions(current_version, latest);
+    Ok(UpdateStatus {
+        has_update: compare_versions(&current_version, &latest),
+        current: current_version,
+        latest,
+    })
+}
+
+async fn maybe_auto_update_on_start(config: &Config) -> Result<bool> {
+    const UPDATE_ATTEMPT_ENV: &str = "MASIX_AUTO_UPDATE_ATTEMPTED";
+
+    let updates = &config.updates;
+    if !updates.enabled || !updates.check_on_start {
+        return Ok(false);
+    }
+
+    if std::env::var_os(UPDATE_ATTEMPT_ENV).is_some() {
+        return Ok(false);
+    }
+
+    // Startup auto-apply uses npm package update flow and is Termux-oriented.
+    if !is_termux_environment() {
+        return Ok(false);
+    }
+
+    if is_dev_binary_path() {
+        return Ok(false);
+    }
+
+    let channel = normalize_update_channel(&updates.channel);
+    let status = match fetch_update_status(false, &channel).await {
+        Ok(value) => value,
+        Err(e) => {
+            eprintln!("Warning: unable to check for updates at startup: {}", e);
+            return Ok(false);
+        }
+    };
+
+    if !status.has_update {
+        return Ok(false);
+    }
+
+    print_update_message(&status.current, &status.latest);
+    if !updates.auto_apply {
+        println!("Auto-update disabled by config ([updates].auto_apply=false).");
+        return Ok(false);
+    }
+
+    if !command_exists("npm") {
+        eprintln!("Warning: npm not found; cannot auto-update.");
+        return Ok(false);
+    }
+
+    let package_target = format!("{}@{}", NPM_PACKAGE_NAME, channel);
+    println!(
+        "Attempting automatic update: npm install -g {}",
+        package_target
+    );
+
+    match Command::new("npm")
+        .args(["install", "-g", package_target.as_str()])
+        .status()
+    {
+        Ok(exit_status) if exit_status.success() => {
+            println!("Automatic update completed successfully.");
+        }
+        Ok(exit_status) => {
+            eprintln!(
+                "Warning: automatic update failed with status {}.",
+                exit_status
+            );
+            return Ok(false);
+        }
+        Err(e) => {
+            eprintln!("Warning: automatic update failed: {}", e);
+            return Ok(false);
+        }
+    }
+
+    if !updates.restart_after_update {
+        println!("Restart-after-update disabled by config ([updates].restart_after_update=false).");
+        return Ok(false);
+    }
+
+    let exe = std::env::current_exe().context("Failed to resolve current executable")?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut restart = Command::new(&exe);
+    restart
+        .args(&args)
+        .env(UPDATE_ATTEMPT_ENV, "1")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    match restart.spawn() {
+        Ok(child) => {
+            println!("Restarted Masix after update (PID: {}).", child.id());
+            Ok(true)
+        }
+        Err(e) => {
+            eprintln!("Warning: update installed but restart failed: {}", e);
+            Ok(false)
+        }
+    }
+}
+
+async fn check_for_update(json: bool, force: bool, channel: &str) -> Result<()> {
+    let status = match fetch_update_status(force, channel).await {
+        Ok(value) => value,
+        Err(e) => {
+            if json {
+                println!(
+                    "{{\"current\":\"{}\",\"latest\":\"{}\",\"has_update\":false,\"error\":\"{}\"}}",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("CARGO_PKG_VERSION"),
+                    e
+                );
+            } else {
+                println!("Unable to check for updates: {}", e);
+            }
+            return Ok(());
+        }
+    };
 
     if json {
         println!(
             "{{\"current\":\"{}\",\"latest\":\"{}\",\"has_update\":{}}}",
-            current_version, latest, has_update
+            status.current, status.latest, status.has_update
         );
-    } else if has_update {
-        print_update_message(current_version, latest);
+    } else if status.has_update {
+        print_update_message(&status.current, &status.latest);
     } else {
-        println!("✅ masix is up to date (v{})", current_version);
+        println!("✅ masix is up to date (v{})", status.current);
     }
 
     Ok(())
@@ -3228,6 +3406,12 @@ fn compare_versions(current: &str, latest: &str) -> bool {
 }
 
 fn print_update_message(current: &str, latest: &str) {
+    let update_cmd = if is_termux_environment() {
+        "npm install -g @mmmbuto/masix@latest"
+    } else {
+        "brew upgrade masix"
+    };
+
     println!();
     println!("┌─────────────────────────────────────────────┐");
     println!("│  📦 Update Available!                        │");
@@ -3236,7 +3420,7 @@ fn print_update_message(current: &str, latest: &str) {
     println!("│  Latest:  v{:<28} │", latest);
     println!("├─────────────────────────────────────────────┤");
     println!("│  Run to update:                              │");
-    println!("│  npm install -g @mmmbuto/masix@latest       │");
+    println!("│  {:<43} │", update_cmd);
     println!("└─────────────────────────────────────────────┘");
     println!();
 }

@@ -7,6 +7,13 @@
 data_dir = "~/.masix"
 log_level = "info"
 
+[updates]
+enabled = true
+check_on_start = true
+auto_apply = true
+restart_after_update = true
+channel = "latest"
+
 [telegram]
 poll_timeout_secs = 60
 

@@ -10,6 +10,8 @@ use std::path::Path;
 pub struct Config {
     #[serde(default)]
     pub core: CoreConfig,
+    #[serde(default)]
+    pub updates: UpdatesConfig,
     pub telegram: Option<TelegramConfig>,
     pub whatsapp: Option<WhatsappConfig>,
     pub sms: Option<SmsConfig>,
@@ -26,6 +28,32 @@ pub struct CoreConfig {
     pub data_dir: Option<String>,
     pub log_level: Option<String>,
     pub soul_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdatesConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub check_on_start: bool,
+    #[serde(default = "default_true")]
+    pub auto_apply: bool,
+    #[serde(default = "default_true")]
+    pub restart_after_update: bool,
+    #[serde(default = "default_update_channel")]
+    pub channel: String,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            check_on_start: true,
+            auto_apply: true,
+            restart_after_update: true,
+            channel: default_update_channel(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -184,6 +212,10 @@ pub struct RateLimitConfig {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_update_channel() -> String {
+    "latest".to_string()
 }
 
 impl Config {
@@ -433,6 +465,10 @@ impl Config {
                     anyhow::bail!("exec.termux_allowlist contains an empty command");
                 }
             }
+        }
+
+        if self.updates.channel.trim().is_empty() {
+            anyhow::bail!("updates.channel cannot be empty");
         }
 
         if let Some(whatsapp) = &self.whatsapp {
@@ -760,6 +796,26 @@ workdir = "~/.masix/bots/ops"
 memory_file = "~/.masix/bots/ops/MEMORY.md"
 provider_primary = "openai"
 provider_fallback = ["openai", "openrouter"]
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_empty_updates_channel() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[updates]
+channel = ""
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
 "#,
         );
         assert!(cfg.validate().is_err());

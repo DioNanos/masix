@@ -3,7 +3,7 @@
 //! Tools that are always available to the LLM without MCP
 
 use anyhow::{anyhow, Result};
-use masix_exec::{run_command, ExecMode, ExecPolicy};
+use masix_exec::{is_termux_environment, run_command, ExecMode, ExecPolicy};
 use masix_intent::{execute_intent, IntentRequest};
 use masix_providers::ToolDefinition;
 use scraper::{Html, Selector};
@@ -46,7 +46,7 @@ struct TorrentSearchEntry {
 }
 
 pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
+    let mut tools = vec![
         ToolDefinition {
             tool_type: "function".to_string(),
             function: masix_providers::FunctionDefinition {
@@ -329,7 +329,13 @@ pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
                 }),
             },
         },
-    ]
+    ];
+
+    if !is_termux_environment() {
+        tools.retain(|tool| !matches!(tool.function.name.as_str(), "termux" | "intent"));
+    }
+
+    tools
 }
 
 pub async fn execute_builtin_tool(
@@ -354,6 +360,13 @@ pub async fn execute_builtin_tool(
             }
         }
         "termux" => {
+            if !is_termux_environment() {
+                return Ok(
+                    "Termux tool is unavailable on this platform (requires Android Termux)."
+                        .to_string(),
+                );
+            }
+
             let command = arguments["command"]
                 .as_str()
                 .ok_or_else(|| anyhow!("Missing 'command' argument"))?;
@@ -519,6 +532,13 @@ pub async fn execute_builtin_tool(
                 .to_string(),
         ),
         "intent" => {
+            if !is_termux_environment() {
+                return Ok(
+                    "Intent tool is unavailable on this platform (requires Android Termux)."
+                        .to_string(),
+                );
+            }
+
             if !exec_policy.enabled || !exec_policy.allow_termux {
                 return Ok("Intent tool is disabled. Enable in config with exec.enabled=true and exec.allow_termux=true".to_string());
             }

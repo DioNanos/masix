@@ -9,8 +9,8 @@ use base64::Engine;
 use builtin_tools::{execute_builtin_tool, get_builtin_tool_definitions, is_builtin_tool};
 use masix_config::{Config, RetryPolicyConfig};
 use masix_exec::{
-    manage_termux_boot, manage_termux_wake_lock, run_command, BootAction, ExecMode, ExecPolicy,
-    WakeLockAction,
+    is_termux_environment, manage_termux_boot, manage_termux_wake_lock, run_command, BootAction,
+    ExecMode, ExecPolicy, WakeLockAction,
 };
 use masix_ipc::{Envelope, EventBus, MessageKind, OutboundMessage};
 use masix_mcp::McpClient;
@@ -402,6 +402,13 @@ impl MasixRuntime {
     async fn start_sms_adapter(&self) -> Result<()> {
         if let Some(sms_config) = &self.config.sms {
             if sms_config.enabled {
+                if !is_termux_environment() {
+                    warn!(
+                        "SMS adapter is enabled in config but current platform is not Termux; skipping SMS watcher."
+                    );
+                    return Ok(());
+                }
+
                 let watch_interval = sms_config.watch_interval_secs.unwrap_or(30).max(1);
                 let event_bus = self.event_bus.clone();
                 info!("SMS adapter enabled (watch interval: {}s)", watch_interval);
@@ -2144,6 +2151,18 @@ impl MasixRuntime {
         }
 
         if trimmed == "/termux" || trimmed.starts_with("/termux ") {
+            if !is_termux_environment() {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag.clone(),
+                    chat_id,
+                    "Comandi /termux non disponibili su questa piattaforma (richiede Android Termux).",
+                    envelope.message_id,
+                );
+                return Ok(true);
+            }
+
             let rest = trimmed.strip_prefix("/termux").unwrap_or("");
             let command = rest.trim();
 
