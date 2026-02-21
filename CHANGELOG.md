@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.4-rc] - 2026-02-21
+
+### Added
+- **Dedicated MasiX wake lock management**
+  - New shared runtime/CLI wake lock management (`on`, `off`, `status`), separate from Termux boot script controls.
+  - New CLI command: `masix termux wake on|off|status`.
+  - New chat command path: `/termux wake on|off|status`.
+  - Wake lock state tracked in `~/.masix/runtime/wakelock.state.json` (or configured data dir).
+
+### Changed
+- **Lifecycle behavior**
+  - Foreground `masix start` now acquires wake lock through shared exec module and releases it on exit.
+  - `masix stop` and restart flow now explicitly release wake lock.
+- **Termux help/menu copy**
+  - Runtime `/termux help` and Telegram utility hints now include wake lock commands.
+
 ## [0.1.3-rc] - 2026-02-21
 
 ### Added

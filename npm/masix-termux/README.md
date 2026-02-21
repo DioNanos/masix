@@ -12,6 +12,7 @@ MasiX is a Rust-first messaging automation runtime inspired by OpenClaw, focused
 - Cron scope isolation per bot/account (`account_tag`)
 - Workdir isolation per Telegram account
 - User memory isolation with per-user catalog (`meta.json`)
+- Termux wake lock control (`masix termux wake on|off|status`)
 - Guarded command execution (`/exec`, `/termux`) with allowlists
 - Termux boot automation (`masix termux boot enable|disable|status`)
 - Optional WhatsApp and SMS integrations

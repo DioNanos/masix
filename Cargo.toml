@@ -19,7 +19,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.3-rc"
+version = "0.1.4-rc"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/DioNanos/masix"
