@@ -48,3 +48,5 @@ dirs.workspace = true
 url.workspace = true
 base64.workspace = true
 scraper = "0.21"
+hickory-resolver = "0.25"
+trust-dns-resolver = "0.23"

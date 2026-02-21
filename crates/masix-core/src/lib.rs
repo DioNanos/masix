@@ -3,6 +3,7 @@
 //! Main runtime orchestration with MCP + Cron + LLM support
 
 mod builtin_tools;
+pub mod search;
 
 use anyhow::{anyhow, Result};
 use base64::Engine;
