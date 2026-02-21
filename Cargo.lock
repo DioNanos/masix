@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "masix-cli"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1081,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "masix-config"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "masix-core"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "masix-cron"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "masix-exec"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "masix-intent"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "serde",
@@ -1159,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "masix-ipc"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "serde",
@@ -1171,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "masix-mcp"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "serde",
@@ -1183,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "masix-policy"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1193,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "masix-providers"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "masix-sms"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "masix-storage"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -1235,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "masix-telegram"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "masix-wasm-tools"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "serde",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "masix-whatsapp"
-version = "0.1.1-rc"
+version = "0.1.2-rc"
 dependencies = [
  "anyhow",
  "base64",
