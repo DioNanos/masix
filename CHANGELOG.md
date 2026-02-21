@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.5-rc] - 2026-02-21
+
+### Fixed
+- **Termux boot startup path stability**
+  - `masix termux boot enable` now writes a stable executable path in boot script (`/data/data/com.termux/files/usr/bin/masix`) instead of transient launcher paths (e.g. `/.l2s/...`) that break after reboot.
+  - Boot script startup after reboot now correctly starts daemon mode and allows wake lock activation in runtime.
+- **Regression guard**
+  - Added unit test for transient `/.l2s/` binary path rewrite during boot script generation.
+
 ## [0.1.4-rc] - 2026-02-21
 
 ### Added
