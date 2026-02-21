@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1-rc] - 2026-02-21
+
+### Added
+- **Provider dedupe and upsert safety**
+  - Wizard and provider CLI now update in place instead of creating duplicate provider entries.
+  - Duplicate target validation by `provider_type + base_url + model`.
+- **z.ai endpoint switch in wizard**
+  - Interactive choice between standard and coding endpoint.
+- **Configurable fallback chain and vision provider**
+  - Bot profile chain configuration from wizard.
+  - New optional `vision_provider` per profile for media analysis routing.
+- **Vision media analysis pipeline**
+  - Telegram media metadata ingestion.
+  - Optional dedicated vision endpoint call on inbound media.
+  - Vision analysis is injected into main model context.
+- **Cron tool exposure**
+  - `cron` is now available as tool call, sharing runtime logic with `/cron`.
+- **Android intent module/tool**
+  - New `masix-intent` crate.
+  - Built-in `intent` tool to dispatch Android intents through `am`.
+- **WhatsApp read-only listener**
+  - Rust adapter with schema version checks, sender allowlist, message size guard.
+  - Optional shared-secret ingress verification.
+  - Optional forwarding of summarized output to Telegram.
+- **SMS runtime watcher**
+  - Runtime ingestion from Termux SMS.
+  - Optional forwarding of summarized output to Telegram.
+
+### Changed
+- `masix test provider` now respects `provider_type` and uses native Anthropic health checks when configured.
+- Anthropic health check now probes `/v1/models` with proper headers.
+- Project status moved from beta to `0.1.1-rc`.
+
+### Fixed
+- Cron due-job execution now warns on invalid non-numeric recipients instead of silent skip.
+- Tool and profile validation tightened for startup safety.
+
 ## [0.1.0-beta.10] - 2026-02-20
 
 ### Added

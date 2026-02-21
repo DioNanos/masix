@@ -1,6 +1,6 @@
 # MasiX
 
-[![Status: Beta](https://img.shields.io/badge/Status-Early%20Beta-blue.svg)](#project-status)
+[![Status: RC](https://img.shields.io/badge/Status-0.1.1--rc-blue.svg)](#project-status)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![Target](https://img.shields.io/badge/Target-Termux%20%2F%20Linux-green.svg)](https://termux.dev)
@@ -11,7 +11,7 @@ MasiX is a Rust-first automation runtime focused on Termux/Linux mobile workflow
 
 ## Project Status
 
-- Early beta (study project)
+- 0.1.1 release candidate
 - Extracted from a commercial product and simplified into a public testable core
 - Primary focus: Telegram, MCP tool-calling, reminders, and stable Termux runtime
 
@@ -29,6 +29,10 @@ MasiX is a Rust-first automation runtime focused on Termux/Linux mobile workflow
 - NPM package: `@mmmbuto/masix`
 - Runtime provider/model switching via chat commands
 - MCP server management via CLI
+- Dedicated media vision provider per bot profile (`vision_provider`)
+- WhatsApp read-only listener mode with optional Telegram forwarding
+- SMS runtime watcher with optional Telegram forwarding
+- Android intent dispatch tool for Termux (`intent`)
 
 ## Quick Install
 
@@ -152,6 +156,9 @@ For local endpoint setup:
 ```text
 crates/masix-core        runtime orchestration
 crates/masix-telegram    telegram adapter + menus
+crates/masix-whatsapp    read-only WhatsApp listener adapter
+crates/masix-sms         Termux SMS/call integration
+crates/masix-intent      Android intent module (`am` wrapper)
 crates/masix-storage     sqlite persistence + cron storage
 crates/masix-providers   openai-compatible providers + tool calling
 crates/masix-mcp         mcp client
