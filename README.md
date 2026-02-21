@@ -1,6 +1,6 @@
 # MasiX
 
-[![Status](https://img.shields.io/badge/Status-0.1.8-blue.svg)](#project-status)
+[![Status](https://img.shields.io/badge/Status-0.1.9-blue.svg)](#project-status)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![Target](https://img.shields.io/badge/Target-Termux%20%2F%20Linux%20%2F%20macOS-green.svg)](https://termux.dev)
@@ -11,7 +11,7 @@ MasiX is a Rust-first automation runtime for Termux, Linux, and macOS workflows,
 
 ## Project Status
 
-- 0.1.8 stable release
+- 0.1.9 stable release
 - Extracted from a commercial product and simplified into a public testable core
 - Primary focus: Telegram, MCP tool-calling, reminders, and stable Termux runtime
 
@@ -114,11 +114,11 @@ masix config providers list
 
 # Add a new provider
 masix config providers add xai --key sk-xxx --default
-masix config providers add groq --key gsk-xxx --model llama-3.3-70b-versatile
+masix config providers add groq --key gsk-xxx --model openai/gpt-oss-120b
 
 # Change default provider or model
 masix config providers set-default openai
-masix config providers model openai gpt-4o
+masix config providers model openai gpt-5
 
 # Remove a provider
 masix config providers remove ollama
@@ -162,19 +162,19 @@ masix config mcp disable
 
 | Provider | Default Model | Notes |
 |----------|---------------|-------|
-| OpenAI | gpt-4o-mini | Official API |
-| OpenRouter | openai/gpt-4o-mini | Multi-provider gateway |
-| z.ai (GLM) | glm-4.5 | Chinese LLM |
-| Chutes | zai-org/GLM-5-TEE | Decentralized |
-| xAI (Grok) | grok-2-latest | Elon Musk's AI |
-| Groq | llama-3.3-70b-versatile | Fast inference |
-| Anthropic | claude-3-5-sonnet-latest | Claude |
-| Gemini | gemini-2.0-flash | Google |
-| DeepSeek | deepseek-chat | Chinese reasoning |
+| OpenAI | gpt-5 | Official API |
+| OpenRouter | openrouter/auto | Multi-provider gateway |
+| z.ai (GLM) | glm-5 | Chinese LLM |
+| Chutes | Qwen/Qwen3.5-397B-A17B-TEE | Decentralized |
+| xAI (Grok) | grok-4-latest | Elon Musk's AI |
+| Groq | openai/gpt-oss-120b | Fast inference |
+| Anthropic | claude-sonnet-4-6 | Claude |
+| Gemini | gemini-2.5-pro | Google |
+| DeepSeek | deepseek-reasoner | Chinese reasoning |
 | Mistral | mistral-large-latest | European |
-| Together AI | meta-llama/Llama-3-70b | Multi-model |
-| Fireworks | llama-v3-70b-instruct | Fast inference |
-| Cohere | command-r | Enterprise |
+| Together AI | moonshotai/Kimi-K2.5 | Multi-model |
+| Fireworks | llama-v3p1-70b-instruct | Fast inference |
+| Cohere | command-a-03-2025 | Enterprise |
 | llama.cpp | local-model | Local inference |
 
 ## Build From Source

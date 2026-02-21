@@ -138,7 +138,7 @@ model = "local-model"
 name = "openrouter"
 api_key = "OPENROUTER_API_KEY"
 base_url = "https://openrouter.ai/api/v1"
-model = "openai/gpt-4o-mini"
+model = "openrouter/auto"
 
 [bots]
 strict_account_profile_mapping = false

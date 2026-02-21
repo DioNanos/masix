@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
   echo "Usage: $0 <version-without-v> <tap-repo-path>"
-  echo "Example: $0 0.1.8 ~/Dev/homebrew-masix"
+  echo "Example: $0 0.1.9 ~/Dev/homebrew-masix"
   exit 1
 fi
 

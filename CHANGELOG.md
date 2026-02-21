@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-02-21
+
+### Changed
+- **Provider wizard defaults refreshed to top/latest models**
+  - Updated default model suggestions per endpoint in provider wizard (`get_known_providers`).
+  - Anthropic default set to `claude-sonnet-4-6`.
+  - OpenAI/OpenRouter/z.ai/Chutes/xAI/Groq/Gemini/DeepSeek/Together/Fireworks/Cohere defaults updated to newer top models.
+- **Documentation alignment**
+  - README provider table and CLI examples updated to new defaults.
+  - User guide provider examples updated.
+
 ## [0.1.8] - 2026-02-21
 
 ### Added

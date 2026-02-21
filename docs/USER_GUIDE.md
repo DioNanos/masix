@@ -97,7 +97,7 @@ default_provider = "openai"
 [[providers.providers]]
 name = "openai"
 api_key = "YOUR_API_KEY"
-model = "gpt-4o-mini"
+model = "gpt-5"
 ```
 
 ### 2.2 Multiple endpoints and providers
@@ -119,13 +119,13 @@ default_provider = "openrouter"
 name = "openai"
 api_key = "OPENAI_API_KEY"
 base_url = "https://api.openai.com/v1"
-model = "gpt-4o-mini"
+model = "gpt-5"
 
 [[providers.providers]]
 name = "openrouter"
 api_key = "OPENROUTER_API_KEY"
 base_url = "https://openrouter.ai/api/v1"
-model = "openai/gpt-4o-mini"
+model = "openrouter/auto"
 
 [[providers.providers]]
 name = "llama_local"
@@ -137,13 +137,13 @@ model = "local-model"
 name = "zai"
 api_key = "ZAI_API_KEY"
 base_url = "https://api.z.ai/api/paas/v4"
-model = "glm-4.5"
+model = "glm-5"
 
 [[providers.providers]]
 name = "chutes"
 api_key = "CHUTES_API_KEY"
 base_url = "https://llm.chutes.ai/v1"
-model = "zai-org/GLM-5-TEE"
+model = "Qwen/Qwen3.5-397B-A17B-TEE"
 ```
 
 Switch active endpoint/provider:
