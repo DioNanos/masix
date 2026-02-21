@@ -12,7 +12,7 @@ use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::doh::DohResolver;
 use super::cache::MagnetCache;
