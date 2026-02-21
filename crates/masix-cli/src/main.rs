@@ -269,7 +269,13 @@ enum ConfigCommands {
     /// Validate configuration
     Validate,
     /// Configure Telegram bot interactively
-    Telegram,
+    Telegram {
+        /// Show configured Telegram bots/chats and exit
+        #[arg(short, long)]
+        list: bool,
+    },
+    /// Configure SMS watcher interactively
+    Sms,
     /// Configure LLM provider interactively
     Provider {
         /// Provider name (openai, openrouter, zai, chutes, llama.cpp, xai, groq, etc.)
@@ -808,8 +814,15 @@ async fn main() -> Result<()> {
                 Ok(_) => println!("Configuration is valid."),
                 Err(e) => eprintln!("Configuration is invalid: {}", e),
             },
-            ConfigCommands::Telegram => {
-                run_telegram_wizard(cli.config.clone())?;
+            ConfigCommands::Telegram { list } => {
+                if list {
+                    run_telegram_list(cli.config.clone())?;
+                } else {
+                    run_telegram_wizard(cli.config.clone())?;
+                }
+            }
+            ConfigCommands::Sms => {
+                run_sms_wizard(cli.config.clone())?;
             }
             ConfigCommands::Provider { name } => {
                 run_provider_wizard(cli.config.clone(), name)?;
@@ -1462,9 +1475,112 @@ fn create_default_config(config_path: Option<String>) -> Result<()> {
     println!("Configuration created at: {}", config_path.display());
     println!("\nEdit the file to add your tokens and API keys, or run:");
     println!("  masix config telegram   - Configure Telegram bot");
+    println!("  masix config telegram --list - List Telegram bots/chats");
+    println!("  masix config sms        - Configure SMS watcher");
     println!("  masix config provider   - Configure LLM provider");
 
     Ok(())
+}
+
+fn load_config_for_wizard(config_path: &PathBuf) -> Result<Config> {
+    let content = fs::read_to_string(config_path)?;
+    let mut config: Config = toml::from_str(&content)?;
+    let deduped = dedupe_telegram_accounts_by_tag(&mut config);
+    if deduped > 0 {
+        println!(
+            "Warning: removed {} duplicate Telegram account entries (same bot id).",
+            deduped
+        );
+    }
+    let normalized_profiles = normalize_telegram_account_profiles(&mut config);
+    if normalized_profiles > 0 {
+        println!(
+            "Warning: normalized {} Telegram account profile binding(s).",
+            normalized_profiles
+        );
+    }
+    Ok(config)
+}
+
+fn dedupe_telegram_accounts_by_tag(config: &mut Config) -> usize {
+    let Some(telegram) = config.telegram.as_mut() else {
+        return 0;
+    };
+
+    let before = telegram.accounts.len();
+    if before <= 1 {
+        return 0;
+    }
+
+    let mut normalized: Vec<masix_config::TelegramAccount> = Vec::new();
+    for account in telegram.accounts.clone() {
+        let tag = telegram_account_tag(&account.bot_token);
+        if let Some(index) = normalized
+            .iter()
+            .position(|item| telegram_account_tag(&item.bot_token) == tag)
+        {
+            normalized[index] = account;
+        } else {
+            normalized.push(account);
+        }
+    }
+
+    telegram.accounts = normalized;
+    before.saturating_sub(telegram.accounts.len())
+}
+
+fn normalize_telegram_account_profiles(config: &mut Config) -> usize {
+    let (strict_mapping, profile_names) = if let Some(bots) = &config.bots {
+        (
+            bots.strict_account_profile_mapping.unwrap_or(false),
+            bots.profiles
+                .iter()
+                .map(|profile| profile.name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        (false, Vec::new())
+    };
+
+    let fallback_profile = if profile_names.iter().any(|name| name == "default") {
+        Some("default".to_string())
+    } else {
+        profile_names.first().cloned()
+    };
+
+    let Some(telegram) = config.telegram.as_mut() else {
+        return 0;
+    };
+
+    let mut changed = 0usize;
+    for account in &mut telegram.accounts {
+        match account
+            .bot_profile
+            .as_ref()
+            .map(|name| name.trim().to_string())
+        {
+            Some(current) if current.is_empty() => {
+                account.bot_profile = None;
+                changed += 1;
+            }
+            Some(current) if !profile_names.is_empty() && !profile_names.contains(&current) => {
+                account.bot_profile = fallback_profile.clone();
+                changed += 1;
+            }
+            Some(_) if profile_names.is_empty() => {
+                account.bot_profile = None;
+                changed += 1;
+            }
+            None if strict_mapping && !profile_names.is_empty() => {
+                account.bot_profile = fallback_profile.clone();
+                changed += 1;
+            }
+            _ => {}
+        }
+    }
+
+    changed
 }
 
 fn run_config_wizard(config_path: Option<String>) -> Result<()> {
@@ -1478,7 +1594,7 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
     let mut config = if config_path.exists() {
         println!("Found existing config at: {}", config_path.display());
         if prompt_confirm("Update existing configuration?", true)? {
-            Config::load(&config_path)?
+            load_config_for_wizard(&config_path)?
         } else {
             return Ok(());
         }
@@ -1725,7 +1841,63 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
     }
 
     // SMS watcher
+    configure_sms_watcher(&mut config)?;
+
+    config.validate()?;
+
+    // Write config
+    let config_toml = toml::to_string_pretty(&config)?;
+    fs::write(&config_path, config_toml)?;
+
+    println!("\n✅ Configuration saved to: {}", config_path.display());
+    println!("\nNext steps:");
+    println!("  1. Review config: masix config show");
+    println!("  2. Start daemon:  masix start");
+
+    Ok(())
+}
+
+fn run_telegram_list(config_path: Option<String>) -> Result<()> {
+    let config_path = get_config_path(config_path)?;
+    let config = if config_path.exists() {
+        load_config_for_wizard(&config_path)?
+    } else {
+        Config::default()
+    };
+
+    println!("Config path: {}", config_path.display());
+    print_telegram_accounts_and_channels(&config);
+    Ok(())
+}
+
+fn run_sms_wizard(config_path: Option<String>) -> Result<()> {
+    println!("╔════════════════════════════════════════════╗");
+    println!("║        SMS Watcher Configuration           ║");
+    println!("╚════════════════════════════════════════════╝");
+    println!();
+
+    let config_path = get_config_path(config_path)?;
+    let mut config = if config_path.exists() {
+        load_config_for_wizard(&config_path)?
+    } else {
+        Config::default()
+    };
+
+    configure_sms_watcher(&mut config)?;
+    config.validate()?;
+
+    let config_toml = toml::to_string_pretty(&config)?;
+    fs::write(&config_path, config_toml)?;
+
+    println!("\n✅ SMS configuration saved");
+    println!("Config saved to: {}", config_path.display());
+    Ok(())
+}
+
+fn configure_sms_watcher(config: &mut Config) -> Result<()> {
     println!("\n── SMS Watcher Setup ──");
+    print_sms_prereq_status();
+
     let existing_sms = config.sms.clone();
     let sms_enabled_default = existing_sms.as_ref().map(|s| s.enabled).unwrap_or(false);
     if prompt_confirm("Enable SMS watcher?", sms_enabled_default)? {
@@ -1748,6 +1920,15 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
         let forward_default = existing.forward_to_telegram_chat_id.is_some();
         let (forward_to_telegram_chat_id, forward_to_telegram_account_tag, forward_prefix) =
             if prompt_confirm("Forward SMS summaries to Telegram?", forward_default)? {
+                if !has_telegram_accounts(config) {
+                    anyhow::bail!(
+                        "Cannot enable SMS forwarding: no Telegram bot configured. Run `masix config telegram` first."
+                    );
+                }
+
+                println!("Available Telegram bots/chats for SMS forwarding:");
+                print_telegram_accounts_and_channels(config);
+
                 let chat_default = existing
                     .forward_to_telegram_chat_id
                     .map(|value| value.to_string())
@@ -1767,7 +1948,14 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
                 let account_tag = if account_tag_input.trim().is_empty() {
                     None
                 } else {
-                    Some(account_tag_input.trim().to_string())
+                    let tag = account_tag_input.trim().to_string();
+                    if !telegram_account_tag_exists(config, &tag) {
+                        anyhow::bail!(
+                            "Unknown Telegram account tag '{}'. Use `masix config telegram --list`.",
+                            tag
+                        );
+                    }
+                    Some(tag)
                 };
 
                 let prefix_default = existing
@@ -1801,18 +1989,108 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
         println!("✓ SMS watcher disabled");
     }
 
-    config.validate()?;
-
-    // Write config
-    let config_toml = toml::to_string_pretty(&config)?;
-    fs::write(&config_path, config_toml)?;
-
-    println!("\n✅ Configuration saved to: {}", config_path.display());
-    println!("\nNext steps:");
-    println!("  1. Review config: masix config show");
-    println!("  2. Start daemon:  masix start");
-
     Ok(())
+}
+
+fn print_sms_prereq_status() {
+    let required = ["termux-sms-list", "termux-sms-send", "termux-call-log"];
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|command| !command_exists(command))
+        .collect();
+    if missing.is_empty() {
+        println!("SMS prerequisites: OK (Termux:API commands detected).");
+    } else {
+        println!(
+            "SMS prerequisites: missing commands: {}",
+            missing.join(", ")
+        );
+        println!("Install/verify: `pkg install termux-api` and Termux:API app permissions.");
+    }
+}
+
+fn command_exists(command: &str) -> bool {
+    Command::new("which")
+        .arg(command)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn has_telegram_accounts(config: &Config) -> bool {
+    config
+        .telegram
+        .as_ref()
+        .map(|telegram| !telegram.accounts.is_empty())
+        .unwrap_or(false)
+}
+
+fn telegram_account_tag_exists(config: &Config, account_tag: &str) -> bool {
+    config
+        .telegram
+        .as_ref()
+        .map(|telegram| {
+            telegram
+                .accounts
+                .iter()
+                .any(|account| telegram_account_tag(&account.bot_token) == account_tag)
+        })
+        .unwrap_or(false)
+}
+
+fn print_telegram_accounts_and_channels(config: &Config) {
+    let Some(telegram) = &config.telegram else {
+        println!("No Telegram account configured yet.");
+        return;
+    };
+    if telegram.accounts.is_empty() {
+        println!("No Telegram account configured yet.");
+        return;
+    }
+
+    println!("Configured Telegram bots:");
+    let mut unique_chats = HashSet::new();
+    for (index, account) in telegram.accounts.iter().enumerate() {
+        let account_tag = telegram_account_tag(&account.bot_token);
+        let profile = account.bot_profile.as_deref().unwrap_or("(none)");
+        println!("  {:2}. tag={} profile={}", index + 1, account_tag, profile);
+
+        if let Some(chats) = &account.allowed_chats {
+            if chats.is_empty() {
+                println!("      channels/chats: (all, no filter)");
+            } else {
+                let mut sorted = chats.clone();
+                sorted.sort_unstable();
+                sorted.dedup();
+                for chat in &sorted {
+                    unique_chats.insert(*chat);
+                }
+                let list = sorted
+                    .iter()
+                    .map(|chat| chat.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("      channels/chats: {}", list);
+            }
+        } else {
+            println!("      channels/chats: (all, no filter)");
+        }
+    }
+
+    if unique_chats.is_empty() {
+        println!("Known channels/chats from config: (none, bots accept all chats)");
+    } else {
+        let mut ordered = unique_chats.into_iter().collect::<Vec<_>>();
+        ordered.sort_unstable();
+        let list = ordered
+            .iter()
+            .map(|chat| chat.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("Known channels/chats from config: {}", list);
+    }
 }
 
 fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
@@ -1829,7 +2107,7 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
     // Load or create config
     let config_path = get_config_path(config_path)?;
     let mut config = if config_path.exists() {
-        Config::load(&config_path)?
+        load_config_for_wizard(&config_path)?
     } else {
         Config::default()
     };
@@ -1840,15 +2118,8 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
         .map(|tg| tg.accounts.clone())
         .unwrap_or_default();
 
-    if existing_accounts.is_empty() {
-        println!("No Telegram account configured yet.");
-    } else {
-        println!("Existing Telegram accounts:");
-        for (index, account) in existing_accounts.iter().enumerate() {
-            let account_tag = telegram_account_tag(&account.bot_token);
-            let profile = account.bot_profile.as_deref().unwrap_or("(none)");
-            println!("  {:2}. tag={} profile={}", index + 1, account_tag, profile);
-        }
+    print_telegram_accounts_and_channels(&config);
+    if !existing_accounts.is_empty() {
         println!(
             "Tip: inserisci un token dello stesso bot (stesso id prima di ':') per aggiornare in-place."
         );
@@ -1958,7 +2229,7 @@ fn run_provider_wizard(config_path: Option<String>, name: Option<String>) -> Res
 
     let config_path = get_config_path(config_path)?;
     let mut config = if config_path.exists() {
-        Config::load(&config_path)?
+        load_config_for_wizard(&config_path)?
     } else {
         Config::default()
     };
@@ -2128,7 +2399,7 @@ fn get_known_providers() -> Vec<(
 fn handle_provider_command(action: ProviderCommands, config_path: Option<String>) -> Result<()> {
     let config_path = get_config_path(config_path)?;
     let mut config = if config_path.exists() {
-        Config::load(&config_path)?
+        load_config_for_wizard(&config_path)?
     } else {
         Config::default()
     };
@@ -2714,7 +2985,7 @@ fn default_profile_paths(config: &Config) -> (String, String) {
 fn handle_mcp_command(action: McpCommands, config_path: Option<String>) -> Result<()> {
     let config_path = get_config_path(config_path)?;
     let mut config = if config_path.exists() {
-        Config::load(&config_path)?
+        load_config_for_wizard(&config_path)?
     } else {
         Config::default()
     };
@@ -3002,6 +3273,18 @@ mod tests {
         }
     }
 
+    fn make_bot_profile(name: &str) -> masix_config::BotProfileConfig {
+        masix_config::BotProfileConfig {
+            name: name.to_string(),
+            workdir: "~/.masix".to_string(),
+            memory_file: "~/.masix/memory/default/MEMORY.md".to_string(),
+            provider_primary: "openai".to_string(),
+            vision_provider: None,
+            provider_fallback: Vec::new(),
+            retry: None,
+        }
+    }
+
     #[test]
     fn daemon_args_put_global_options_before_subcommand() {
         let args = build_daemon_args(Some("/tmp/config.toml"), "debug");
@@ -3198,6 +3481,57 @@ mod tests {
         assert_eq!(tag, "67890");
         let telegram = config.telegram.as_ref().expect("telegram config");
         assert_eq!(telegram.accounts.len(), 2);
+    }
+
+    #[test]
+    fn telegram_account_tag_exists_checks_configured_accounts() {
+        let mut config = Config::default();
+        assert!(!has_telegram_accounts(&config));
+        assert!(!telegram_account_tag_exists(&config, "12345"));
+
+        config
+            .telegram
+            .get_or_insert_with(Default::default)
+            .accounts
+            .push(make_telegram_account("12345:token-a", None, Some("a")));
+
+        assert!(has_telegram_accounts(&config));
+        assert!(telegram_account_tag_exists(&config, "12345"));
+        assert!(!telegram_account_tag_exists(&config, "67890"));
+    }
+
+    #[test]
+    fn normalize_telegram_account_profiles_maps_unknown_to_default_profile() {
+        let mut config = Config::default();
+        config.bots = Some(masix_config::BotsConfig {
+            strict_account_profile_mapping: Some(true),
+            profiles: vec![make_bot_profile("default"), make_bot_profile("ops")],
+        });
+        config
+            .telegram
+            .get_or_insert_with(Default::default)
+            .accounts
+            .push(make_telegram_account("12345:token-a", None, Some("MasiX")));
+
+        let changed = normalize_telegram_account_profiles(&mut config);
+        assert_eq!(changed, 1);
+        let account = &config.telegram.as_ref().expect("telegram config").accounts[0];
+        assert_eq!(account.bot_profile.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn normalize_telegram_account_profiles_clears_profile_when_no_bots_defined() {
+        let mut config = Config::default();
+        config
+            .telegram
+            .get_or_insert_with(Default::default)
+            .accounts
+            .push(make_telegram_account("12345:token-a", None, Some("legacy")));
+
+        let changed = normalize_telegram_account_profiles(&mut config);
+        assert_eq!(changed, 1);
+        let account = &config.telegram.as_ref().expect("telegram config").accounts[0];
+        assert!(account.bot_profile.is_none());
     }
 
     #[test]
