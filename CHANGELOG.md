@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-02-21
+
+### Added
+- **Advanced search module** (`crates/masix-core/src/search/`)
+  - DNS-over-HTTPS resolver bypassing ISP DNS blocking (Cloudflare + Google)
+  - Multi-engine web search aggregation (SearXNG, DuckDuckGo, Brave, Qwant)
+  - Torrent search with automatic proxy/mirror fallback for blocked sites
+  - Magnet cache with 72-hour TTL for persistent storage
+- **Enhanced torrent tools**
+  - `torrent_search` now uses direct site scraping with proxy bypass
+  - 12+ torrent providers with mirror catalog (1337x, TPB, YTS, Nyaa, etc.)
+  - `torrent_extract_magnet` with caching support
+  - Automatic magnet detection in search results
+
+### Changed
+- **web_search tool** now aggregates multiple engines instead of DuckDuckGo only
+- **torrent_search tool** completely rewritten with proxy/mirror support
+- Removed dependency on native DNS libraries for Termux compatibility
+
 ## [0.1.9] - 2026-02-21
 
 ### Changed
