@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
   - Torrent provider search now runs in parallel with per-provider and global time caps to avoid long blocking chains.
 - **Tool loop stability**
   - Runtime now skips duplicate tool calls with identical arguments within the same turn to prevent repeated blocking loops.
+- **Runtime/process stability**
+  - `masix start --foreground` now writes PID metadata and clears it on shutdown, preventing accidental parallel runtime starts.
+  - CLI start/stop/status now detect unmanaged foreground MasiX instances and handle them explicitly.
+  - Telegram adapters now skip duplicated account token/account_tag entries in runtime startup.
+- **Provider chain validation hardening**
+  - Config validation now rejects fallback chains that include the primary provider.
+  - Config validation now rejects duplicate Telegram account tokens/account tags.
 
 ## [0.1.6-rc] - 2026-02-21
 
