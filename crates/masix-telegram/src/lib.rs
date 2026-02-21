@@ -597,7 +597,13 @@ impl TelegramAdapter {
             if let Some(event_bus) = &self.event_bus {
                 let mut payload = serde_json::json!({
                     "account_tag": self.account_tag.clone(),
+                    "chat_type": message.chat.chat_type.clone(),
                 });
+                if !from_id.is_empty() {
+                    if let Some(obj) = payload.as_object_mut() {
+                        obj.insert("from_user_id".to_string(), serde_json::json!(from_id));
+                    }
+                }
                 if let Some(media) = Self::extract_media_payload(message) {
                     if let Some(obj) = payload.as_object_mut() {
                         obj.insert("media".to_string(), media);
@@ -696,6 +702,11 @@ impl TelegramAdapter {
         }
 
         if let Some(event_bus) = &self.event_bus {
+            let chat_type = callback
+                .message
+                .as_ref()
+                .map(|msg| msg.chat.chat_type.clone())
+                .unwrap_or_else(|| "unknown".to_string());
             let envelope = Envelope::new(
                 "telegram",
                 MessageKind::Callback {
@@ -705,6 +716,8 @@ impl TelegramAdapter {
             )
             .with_payload(serde_json::json!({
                 "account_tag": self.account_tag.clone(),
+                "chat_type": chat_type,
+                "from_user_id": callback.from.id.to_string(),
             }));
 
             if let Some(chat_id) = chat_id {

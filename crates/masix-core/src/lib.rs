@@ -17,7 +17,7 @@ use masix_providers::{
     RetryPolicy, ToolCall, ToolDefinition,
 };
 use masix_storage::Storage;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,6 +50,16 @@ struct ChatMemoryEntry {
     ts: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct UserMemoryMeta {
+    account_tag: String,
+    user_id: String,
+    first_seen: String,
+    last_seen: String,
+    channels: Vec<String>,
+    chat_ids: Vec<i64>,
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct TelegramGetFileResponse {
     ok: bool,
@@ -77,9 +87,9 @@ pub struct MasixRuntime {
     mcp_client: Option<Arc<Mutex<McpClient>>>,
     event_bus: EventBus,
     system_prompt: String,
-    user_languages: Arc<Mutex<HashMap<i64, Language>>>,
-    user_providers: Arc<Mutex<HashMap<i64, String>>>,
-    user_models: Arc<Mutex<HashMap<i64, String>>>,
+    user_languages: Arc<Mutex<HashMap<String, Language>>>,
+    user_providers: Arc<Mutex<HashMap<String, String>>>,
+    user_models: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl MasixRuntime {
@@ -451,15 +461,16 @@ impl MasixRuntime {
                 let account_tag = Self::account_tag_from_token(&account.bot_token);
                 let context = if let Some(profile_name) = &account.bot_profile {
                     if let Some(profile) = profile_map.get(profile_name) {
-                        let workdir =
+                        let profile_root =
                             Self::resolve_path_with_base(&profile.workdir, base_data_dir)?;
+                        let workdir = Self::scoped_account_workdir(&profile_root, &account_tag);
                         let memory_file =
-                            Self::resolve_path_with_base(&profile.memory_file, &workdir)?;
+                            Self::scoped_account_memory_file(&profile.memory_file, &workdir);
                         let mut provider_chain = vec![profile.provider_primary.clone()];
                         provider_chain.extend(profile.provider_fallback.clone());
 
                         BotContext {
-                            profile_name: profile.name.clone(),
+                            profile_name: format!("{}/{}", profile.name, account_tag),
                             memory_dir: workdir.join("memory"),
                             workdir,
                             memory_file,
@@ -469,10 +480,10 @@ impl MasixRuntime {
                             exec_policy: Self::exec_policy_from_config(self.config.exec.as_ref()),
                         }
                     } else {
-                        default_context.clone()
+                        self.default_account_bot_context(base_data_dir, &account_tag)?
                     }
                 } else {
-                    default_context.clone()
+                    self.default_account_bot_context(base_data_dir, &account_tag)?
                 };
 
                 Self::ensure_bot_context_dirs(&context)?;
@@ -502,6 +513,45 @@ impl MasixRuntime {
         };
         Self::ensure_bot_context_dirs(&context)?;
         Ok(context)
+    }
+
+    fn default_account_bot_context(
+        &self,
+        base_data_dir: &Path,
+        account_tag: &str,
+    ) -> Result<BotContext> {
+        let workdir = Self::scoped_account_workdir(base_data_dir, account_tag);
+        let context = BotContext {
+            profile_name: format!("default/{}", account_tag),
+            workdir: workdir.clone(),
+            memory_dir: workdir.join("memory"),
+            memory_file: workdir.join("MEMORY.md"),
+            provider_chain: vec![self.config.providers.default_provider.clone()],
+            vision_provider: None,
+            retry_policy: RetryPolicy::default(),
+            exec_policy: Self::exec_policy_from_config(self.config.exec.as_ref()),
+        };
+        Self::ensure_bot_context_dirs(&context)?;
+        Ok(context)
+    }
+
+    fn scoped_account_workdir(base: &Path, account_tag: &str) -> PathBuf {
+        base.join("accounts")
+            .join(Self::sanitize_scope_component(account_tag))
+    }
+
+    fn scoped_account_memory_file(memory_file: &str, account_workdir: &Path) -> PathBuf {
+        let template = PathBuf::from(memory_file);
+        if memory_file == "~" || memory_file.starts_with("~/") || template.is_absolute() {
+            let fallback = "MEMORY.md".to_string();
+            let filename = template
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(fallback.as_str());
+            account_workdir.join(filename)
+        } else {
+            account_workdir.join(template)
+        }
     }
 
     fn ensure_bot_context_dirs(context: &BotContext) -> Result<()> {
@@ -758,9 +808,9 @@ impl MasixRuntime {
         policy: &PolicyEngine,
         rate_state: &Arc<Mutex<HashMap<String, (i64, u32)>>>,
         bot_contexts: &Arc<HashMap<String, BotContext>>,
-        user_languages: &Arc<Mutex<HashMap<i64, masix_telegram::menu::Language>>>,
-        user_providers: &Arc<Mutex<HashMap<i64, String>>>,
-        user_models: &Arc<Mutex<HashMap<i64, String>>>,
+        user_languages: &Arc<Mutex<HashMap<String, masix_telegram::menu::Language>>>,
+        user_providers: &Arc<Mutex<HashMap<String, String>>>,
+        user_models: &Arc<Mutex<HashMap<String, String>>>,
         config: &Config,
     ) -> Result<()> {
         let account_tag = envelope
@@ -769,6 +819,12 @@ impl MasixRuntime {
             .and_then(|v| v.as_str())
             .map(|value| value.to_string());
         let bot_context = Self::resolve_bot_context(bot_contexts, account_tag.as_deref());
+        let user_scope_id = Self::resolve_user_scope_id(&envelope);
+        let user_state_key = Self::user_state_key(
+            account_tag.as_deref(),
+            user_scope_id.as_deref(),
+            envelope.chat_id,
+        );
 
         match &envelope.kind {
             MessageKind::Message { from, text } => {
@@ -778,6 +834,7 @@ impl MasixRuntime {
                     .chat_id
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| from.clone());
+                let scoped_sender_id = Self::scoped_value(account_tag.as_deref(), &sender_id);
 
                 if !policy.is_allowed(&sender_id) {
                     warn!("Blocked message by policy from {}", sender_id);
@@ -794,7 +851,7 @@ impl MasixRuntime {
                     return Ok(());
                 }
 
-                if !Self::check_and_update_rate_limit(policy, rate_state, &sender_id).await {
+                if !Self::check_and_update_rate_limit(policy, rate_state, &scoped_sender_id).await {
                     warn!("Rate limit exceeded for {}", sender_id);
                     if let Some(chat_id) = envelope.chat_id {
                         Self::send_outbound_text(
@@ -809,13 +866,22 @@ impl MasixRuntime {
                     return Ok(());
                 }
 
+                let _ = Self::record_user_catalog(
+                    &bot_context,
+                    account_tag.as_deref(),
+                    user_scope_id.as_deref(),
+                    envelope.chat_id,
+                    &envelope.channel,
+                )
+                .await;
+
                 // Show command list when user types just "/"
                 if text == "/" {
                     if let Some(chat_id) = envelope.chat_id {
                         let lang = user_languages
                             .lock()
                             .await
-                            .get(&chat_id)
+                            .get(&user_state_key)
                             .copied()
                             .unwrap_or_default();
                         let cmd_list = masix_telegram::menu::command_list(lang);
@@ -840,7 +906,7 @@ impl MasixRuntime {
                         let lang = user_languages
                             .lock()
                             .await
-                            .get(&chat_id)
+                            .get(&user_state_key)
                             .copied()
                             .unwrap_or_default();
                         let (menu_text, keyboard) = masix_telegram::menu::home_menu(lang);
@@ -868,11 +934,17 @@ impl MasixRuntime {
                         let lang = user_languages
                             .lock()
                             .await
-                            .get(&chat_id)
+                            .get(&user_state_key)
                             .copied()
                             .unwrap_or_default();
                         let reset_text = masix_telegram::menu::session_reset_text(lang);
-                        Self::clear_chat_memory(&bot_context, chat_id).await;
+                        Self::clear_chat_memory(
+                            &bot_context,
+                            account_tag.as_deref(),
+                            user_scope_id.as_deref(),
+                            Some(chat_id),
+                        )
+                        .await;
                         let msg = OutboundMessage {
                             channel: envelope.channel.clone(),
                             account_tag: account_tag.clone(),
@@ -894,7 +966,7 @@ impl MasixRuntime {
                         let lang = user_languages
                             .lock()
                             .await
-                            .get(&chat_id)
+                            .get(&user_state_key)
                             .copied()
                             .unwrap_or_default();
                         let help_text = masix_telegram::menu::help_text(lang);
@@ -919,7 +991,7 @@ impl MasixRuntime {
                         let lang = user_languages
                             .lock()
                             .await
-                            .get(&chat_id)
+                            .get(&user_state_key)
                             .copied()
                             .unwrap_or_default();
                         let (menu_text, keyboard) = masix_telegram::menu::language_menu(lang);
@@ -943,7 +1015,7 @@ impl MasixRuntime {
                     if let Some(chat_id) = envelope.chat_id {
                         let response = Self::handle_provider_chat_command(
                             text,
-                            chat_id,
+                            &user_state_key,
                             config,
                             user_providers,
                         )
@@ -968,7 +1040,7 @@ impl MasixRuntime {
                     if let Some(chat_id) = envelope.chat_id {
                         let response = Self::handle_model_chat_command(
                             text,
-                            chat_id,
+                            &user_state_key,
                             config,
                             user_providers,
                             user_models,
@@ -1131,15 +1203,15 @@ impl MasixRuntime {
                     user_message.push_str("\n\n[Vision Analysis]\n");
                     user_message.push_str(analysis);
                 }
-                if let Some(chat_id) = envelope.chat_id {
-                    let history = Self::load_chat_memory_history(
-                        &bot_context,
-                        chat_id,
-                        MEMORY_MAX_CONTEXT_ENTRIES,
-                    )
-                    .await;
-                    messages.extend(history);
-                }
+                let history = Self::load_chat_memory_history(
+                    &bot_context,
+                    account_tag.as_deref(),
+                    user_scope_id.as_deref(),
+                    envelope.chat_id,
+                    MEMORY_MAX_CONTEXT_ENTRIES,
+                )
+                .await;
+                messages.extend(history);
                 messages.push(ChatMessage {
                     role: "user".to_string(),
                     content: Some(user_message.clone()),
@@ -1252,18 +1324,31 @@ impl MasixRuntime {
                     final_response.push_str(&used_tools.join(", "));
                 }
 
-                if let Some(chat_id) = envelope.chat_id {
-                    let _ = Self::append_chat_memory(&bot_context, chat_id, "user", &user_message)
-                        .await;
-                    let _ = Self::append_chat_memory(
-                        &bot_context,
-                        chat_id,
-                        "assistant",
-                        &final_response,
-                    )
-                    .await;
-                    let _ = Self::update_summary_snapshot(&bot_context, chat_id).await;
-                }
+                let _ = Self::append_chat_memory(
+                    &bot_context,
+                    account_tag.as_deref(),
+                    user_scope_id.as_deref(),
+                    envelope.chat_id,
+                    "user",
+                    &user_message,
+                )
+                .await;
+                let _ = Self::append_chat_memory(
+                    &bot_context,
+                    account_tag.as_deref(),
+                    user_scope_id.as_deref(),
+                    envelope.chat_id,
+                    "assistant",
+                    &final_response,
+                )
+                .await;
+                let _ = Self::update_summary_snapshot(
+                    &bot_context,
+                    account_tag.as_deref(),
+                    user_scope_id.as_deref(),
+                    envelope.chat_id,
+                )
+                .await;
 
                 if envelope.channel == "telegram" {
                     if let Some(chat_id) = envelope.chat_id {
@@ -1306,7 +1391,10 @@ impl MasixRuntime {
                     if data.starts_with("lang:") {
                         let lang_code = data.strip_prefix("lang:").unwrap_or("en");
                         if let Ok(new_lang) = lang_code.parse::<Language>() {
-                            user_languages.lock().await.insert(chat_id, new_lang);
+                            user_languages
+                                .lock()
+                                .await
+                                .insert(user_state_key.clone(), new_lang);
                             let (_text, keyboard) = masix_telegram::menu::settings_menu(new_lang);
                             let msg = OutboundMessage {
                                 channel: envelope.channel.clone(),
@@ -1326,7 +1414,7 @@ impl MasixRuntime {
                     let lang = user_languages
                         .lock()
                         .await
-                        .get(&chat_id)
+                        .get(&user_state_key)
                         .copied()
                         .unwrap_or_default();
                     if let Some(msg) = masix_telegram::menu::handle_callback(
@@ -2259,15 +2347,199 @@ impl MasixRuntime {
         fs::read_to_string(&context.memory_file).await.ok()
     }
 
+    fn resolve_user_scope_id(envelope: &Envelope) -> Option<String> {
+        if let MessageKind::Message { from, .. } = &envelope.kind {
+            let trimmed = from.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+
+        if let Some(value) = envelope.payload.get("from_user_id") {
+            if let Some(id) = value.as_i64() {
+                return Some(id.to_string());
+            }
+            if let Some(id) = value.as_str() {
+                let trimmed = id.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+
+        None
+    }
+
+    fn normalized_user_id(user_scope_id: Option<&str>, chat_id: Option<i64>) -> String {
+        user_scope_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string())
+            .or_else(|| chat_id.map(|id| format!("chat_{}", id)))
+            .unwrap_or_else(|| "anonymous".to_string())
+    }
+
+    fn sanitize_scope_component(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        for ch in value.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                out.push(ch);
+            } else {
+                out.push('_');
+            }
+        }
+        let trimmed = out.trim_matches('_');
+        if trimmed.is_empty() {
+            "unknown".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn account_scope(account_tag: Option<&str>) -> String {
+        account_tag
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("__default__")
+            .to_string()
+    }
+
+    fn user_state_key(
+        account_tag: Option<&str>,
+        user_scope_id: Option<&str>,
+        chat_id: Option<i64>,
+    ) -> String {
+        let account = Self::sanitize_scope_component(&Self::account_scope(account_tag));
+        let user =
+            Self::sanitize_scope_component(&Self::normalized_user_id(user_scope_id, chat_id));
+        format!("{}::{}", account, user)
+    }
+
+    fn scoped_value(account_tag: Option<&str>, value: &str) -> String {
+        let account = Self::sanitize_scope_component(&Self::account_scope(account_tag));
+        format!("{}::{}", account, value.trim())
+    }
+
+    fn user_memory_dir(
+        context: &BotContext,
+        account_tag: Option<&str>,
+        user_scope_id: Option<&str>,
+        chat_id: Option<i64>,
+    ) -> PathBuf {
+        let account = Self::sanitize_scope_component(&Self::account_scope(account_tag));
+        let user =
+            Self::sanitize_scope_component(&Self::normalized_user_id(user_scope_id, chat_id));
+        context
+            .memory_dir
+            .join("accounts")
+            .join(account)
+            .join("users")
+            .join(user)
+    }
+
+    fn chat_scope_label(chat_id: Option<i64>) -> String {
+        chat_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "global".to_string())
+    }
+
+    fn scoped_chat_memory_path(
+        context: &BotContext,
+        account_tag: Option<&str>,
+        user_scope_id: Option<&str>,
+        chat_id: Option<i64>,
+    ) -> PathBuf {
+        Self::user_memory_dir(context, account_tag, user_scope_id, chat_id)
+            .join(format!("chat_{}.jsonl", Self::chat_scope_label(chat_id)))
+    }
+
+    fn scoped_summary_path(
+        context: &BotContext,
+        account_tag: Option<&str>,
+        user_scope_id: Option<&str>,
+        chat_id: Option<i64>,
+    ) -> PathBuf {
+        Self::user_memory_dir(context, account_tag, user_scope_id, chat_id)
+            .join(format!("summary_{}.md", Self::chat_scope_label(chat_id)))
+    }
+
+    fn legacy_chat_memory_path(context: &BotContext, chat_id: Option<i64>) -> Option<PathBuf> {
+        chat_id.map(|id| context.memory_dir.join(format!("chat_{}.jsonl", id)))
+    }
+
+    async fn record_user_catalog(
+        context: &BotContext,
+        account_tag: Option<&str>,
+        user_scope_id: Option<&str>,
+        chat_id: Option<i64>,
+        channel: &str,
+    ) -> Result<()> {
+        let account = Self::account_scope(account_tag);
+        let user_id = Self::normalized_user_id(user_scope_id, chat_id);
+        let user_dir = Self::user_memory_dir(context, account_tag, user_scope_id, chat_id);
+        fs::create_dir_all(&user_dir).await?;
+
+        let meta_path = user_dir.join("meta.json");
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut meta = match fs::read_to_string(&meta_path).await {
+            Ok(raw) => serde_json::from_str::<UserMemoryMeta>(&raw).unwrap_or(UserMemoryMeta {
+                account_tag: account.clone(),
+                user_id: user_id.clone(),
+                first_seen: now.clone(),
+                last_seen: now.clone(),
+                channels: Vec::new(),
+                chat_ids: Vec::new(),
+            }),
+            Err(_) => UserMemoryMeta {
+                account_tag: account.clone(),
+                user_id: user_id.clone(),
+                first_seen: now.clone(),
+                last_seen: now.clone(),
+                channels: Vec::new(),
+                chat_ids: Vec::new(),
+            },
+        };
+
+        meta.account_tag = account;
+        meta.user_id = user_id;
+        meta.last_seen = now;
+
+        let mut channel_set: HashSet<String> = meta.channels.into_iter().collect();
+        channel_set.insert(channel.to_string());
+        meta.channels = channel_set.into_iter().collect();
+        meta.channels.sort();
+
+        if let Some(id) = chat_id {
+            let mut chat_set: HashSet<i64> = meta.chat_ids.into_iter().collect();
+            chat_set.insert(id);
+            meta.chat_ids = chat_set.into_iter().collect();
+            meta.chat_ids.sort_unstable();
+        }
+
+        let body = serde_json::to_string_pretty(&meta)?;
+        fs::write(meta_path, body).await?;
+        Ok(())
+    }
+
     async fn load_chat_memory_history(
         context: &BotContext,
-        chat_id: i64,
+        account_tag: Option<&str>,
+        user_scope_id: Option<&str>,
+        chat_id: Option<i64>,
         max_entries: usize,
     ) -> Vec<ChatMessage> {
-        let path = context.memory_dir.join(format!("chat_{}.jsonl", chat_id));
-        let content = match fs::read_to_string(path).await {
+        let path = Self::scoped_chat_memory_path(context, account_tag, user_scope_id, chat_id);
+        let content = match fs::read_to_string(&path).await {
             Ok(c) => c,
-            Err(_) => return Vec::new(),
+            Err(_) => {
+                let Some(legacy_path) = Self::legacy_chat_memory_path(context, chat_id) else {
+                    return Vec::new();
+                };
+                match fs::read_to_string(legacy_path).await {
+                    Ok(c) => c,
+                    Err(_) => return Vec::new(),
+                }
+            }
         };
 
         let mut entries = Vec::new();
@@ -2296,15 +2568,19 @@ impl MasixRuntime {
 
     async fn append_chat_memory(
         context: &BotContext,
-        chat_id: i64,
+        account_tag: Option<&str>,
+        user_scope_id: Option<&str>,
+        chat_id: Option<i64>,
         role: &str,
         content: &str,
     ) -> Result<()> {
         if content.trim().is_empty() {
             return Ok(());
         }
-        fs::create_dir_all(&context.memory_dir).await?;
-        let path = context.memory_dir.join(format!("chat_{}.jsonl", chat_id));
+        let path = Self::scoped_chat_memory_path(context, account_tag, user_scope_id, chat_id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -2321,22 +2597,47 @@ impl MasixRuntime {
         Ok(())
     }
 
-    async fn clear_chat_memory(context: &BotContext, chat_id: i64) {
-        let path = context.memory_dir.join(format!("chat_{}.jsonl", chat_id));
+    async fn clear_chat_memory(
+        context: &BotContext,
+        account_tag: Option<&str>,
+        user_scope_id: Option<&str>,
+        chat_id: Option<i64>,
+    ) {
+        let path = Self::scoped_chat_memory_path(context, account_tag, user_scope_id, chat_id);
         if path.exists() {
             let _ = std::fs::remove_file(&path);
-            info!("Cleared chat memory for chat_id: {}", chat_id);
         }
+        if let Some(legacy_path) = Self::legacy_chat_memory_path(context, chat_id) {
+            if legacy_path.exists() {
+                let _ = std::fs::remove_file(legacy_path);
+            }
+        }
+        info!(
+            "Cleared scoped chat memory for user={} chat={}",
+            Self::normalized_user_id(user_scope_id, chat_id),
+            Self::chat_scope_label(chat_id)
+        );
     }
 
-    async fn update_summary_snapshot(context: &BotContext, chat_id: i64) -> Result<()> {
-        let history = Self::load_chat_memory_history(context, chat_id, 6).await;
+    async fn update_summary_snapshot(
+        context: &BotContext,
+        account_tag: Option<&str>,
+        user_scope_id: Option<&str>,
+        chat_id: Option<i64>,
+    ) -> Result<()> {
+        let history =
+            Self::load_chat_memory_history(context, account_tag, user_scope_id, chat_id, 6).await;
         if history.is_empty() {
             return Ok(());
         }
 
+        let user_label = Self::normalized_user_id(user_scope_id, chat_id);
+        let chat_label = Self::chat_scope_label(chat_id);
         let mut lines = vec![
-            format!("# Chat Summary ({})", chat_id),
+            format!(
+                "# Chat Summary (user: {}, chat: {})",
+                user_label, chat_label
+            ),
             format!("Updated: {}", chrono::Utc::now().to_rfc3339()),
             String::new(),
         ];
@@ -2352,7 +2653,10 @@ impl MasixRuntime {
             lines.push(format!("- {}: {}", role, shortened.replace('\n', " ")));
         }
 
-        let path = context.memory_dir.join(format!("summary_{}.md", chat_id));
+        let path = Self::scoped_summary_path(context, account_tag, user_scope_id, chat_id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
         fs::write(path, lines.join("\n")).await?;
         Ok(())
     }
@@ -2440,9 +2744,9 @@ impl MasixRuntime {
 
     async fn handle_provider_chat_command(
         text: &str,
-        chat_id: i64,
+        user_state_key: &str,
         config: &Config,
-        user_providers: &Arc<Mutex<HashMap<i64, String>>>,
+        user_providers: &Arc<Mutex<HashMap<String, String>>>,
     ) -> String {
         let rest = text.strip_prefix("/provider").unwrap_or("").trim();
 
@@ -2452,7 +2756,7 @@ impl MasixRuntime {
                 String::new(),
                 "/provider - Show current provider".to_string(),
                 "/provider list - List all providers".to_string(),
-                "/provider set <name> - Set provider for this chat".to_string(),
+                "/provider set <name> - Set provider for this user".to_string(),
                 String::new(),
                 "Available providers:".to_string(),
             ];
@@ -2467,7 +2771,7 @@ impl MasixRuntime {
             lines.join("\n")
         } else if rest.eq_ignore_ascii_case("list") {
             let mut lines = vec!["📋 *Configured Providers*".to_string(), String::new()];
-            let current_provider = user_providers.lock().await.get(&chat_id).cloned();
+            let current_provider = user_providers.lock().await.get(user_state_key).cloned();
             for p in &config.providers.providers {
                 let is_default = p.name == config.providers.default_provider;
                 let is_current = current_provider.as_deref() == Some(&p.name);
@@ -2503,14 +2807,14 @@ impl MasixRuntime {
                 user_providers
                     .lock()
                     .await
-                    .insert(chat_id, name.to_string());
-                format!("✅ Provider set to '{}' for this chat.", name)
+                    .insert(user_state_key.to_string(), name.to_string());
+                format!("✅ Provider set to '{}' for this user.", name)
             }
         } else {
             let current = user_providers
                 .lock()
                 .await
-                .get(&chat_id)
+                .get(user_state_key)
                 .cloned()
                 .unwrap_or_else(|| config.providers.default_provider.clone());
             format!("📍 Current provider: {}", current)
@@ -2519,10 +2823,10 @@ impl MasixRuntime {
 
     async fn handle_model_chat_command(
         text: &str,
-        chat_id: i64,
+        user_state_key: &str,
         config: &Config,
-        user_providers: &Arc<Mutex<HashMap<i64, String>>>,
-        user_models: &Arc<Mutex<HashMap<i64, String>>>,
+        user_providers: &Arc<Mutex<HashMap<String, String>>>,
+        user_models: &Arc<Mutex<HashMap<String, String>>>,
     ) -> String {
         let rest = text.strip_prefix("/model").unwrap_or("").trim();
 
@@ -2530,10 +2834,10 @@ impl MasixRuntime {
             let current_provider = user_providers
                 .lock()
                 .await
-                .get(&chat_id)
+                .get(user_state_key)
                 .cloned()
                 .unwrap_or_else(|| config.providers.default_provider.clone());
-            let current_model = user_models.lock().await.get(&chat_id).cloned();
+            let current_model = user_models.lock().await.get(user_state_key).cloned();
 
             let provider_config = config
                 .providers
@@ -2554,17 +2858,20 @@ impl MasixRuntime {
                     current_model.as_deref().unwrap_or(default_model)
                 ),
                 String::new(),
-                "/model <name> - Set model for this chat".to_string(),
+                "/model <name> - Set model for this user".to_string(),
                 "/model reset - Reset to default model".to_string(),
             ];
             lines.join("\n")
         } else if rest.eq_ignore_ascii_case("reset") {
-            user_models.lock().await.remove(&chat_id);
-            "✅ Model reset to default for this chat.".to_string()
+            user_models.lock().await.remove(user_state_key);
+            "✅ Model reset to default for this user.".to_string()
         } else {
             let model = rest.trim();
-            user_models.lock().await.insert(chat_id, model.to_string());
-            format!("✅ Model set to '{}' for this chat.", model)
+            user_models
+                .lock()
+                .await
+                .insert(user_state_key.to_string(), model.to_string());
+            format!("✅ Model set to '{}' for this user.", model)
         }
     }
 
