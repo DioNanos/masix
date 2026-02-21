@@ -165,21 +165,21 @@ pub fn language_menu(lang: Language) -> (String, Vec<Vec<InlineButton>>) {
 
 pub fn help_text(lang: Language) -> String {
     match lang {
-        Language::English => "📚 *Help - Available Commands*\n\n/start - Show main menu\n/menu - Show main menu\n/new - Reset conversation\n/help - Show this help\n/language - Change language\n/provider - Manage LLM provider\n/model - Change model\n/mcp - MCP status\n\nJust send a message to chat with me!",
-        Language::Spanish => "📚 *Ayuda - Comandos Disponibles*\n\n/start - Mostrar menú principal\n/menu - Mostrar menú principal\n/new - Reiniciar conversación\n/help - Mostrar esta ayuda\n/language - Cambiar idioma\n/provider - Gestionar proveedor LLM\n/model - Cambiar modelo\n/mcp - Estado MCP\n\n¡Solo envía un mensaje para chatear conmigo!",
-        Language::Chinese => "📚 *帮助 - 可用命令*\n\n/start - 显示主菜单\n/menu - 显示主菜单\n/new - 重置对话\n/help - 显示帮助\n/language - 更改语言\n/provider - 管理LLM提供商\n/model - 更改模型\n/mcp - MCP状态\n\n只需发送消息与我聊天！",
-        Language::Russian => "📚 *Помощь - Доступные команды*\n\n/start - Показать главное меню\n/menu - Показать главное меню\n/new - Сбросить разговор\n/help - Показать помощь\n/language - Сменить язык\n/provider - Управление провайдером\n/model - Изменить модель\n/mcp - Статус MCP\n\nПросто отправьте сообщение, чтобы пообщаться!",
-        Language::Italian => "📚 *Aiuto - Comandi Disponibili*\n\n/start - Mostra menu principale\n/menu - Mostra menu principale\n/new - Resetta conversazione\n/help - Mostra aiuto\n/language - Cambia lingua\n/provider - Gestisci provider LLM\n/model - Cambia modello\n/mcp - Stato MCP\n\nInvia un messaggio per chiacchierare con me!",
+        Language::English => "📚 *Help - Available Commands*\n\n/start - Show main menu\n/menu - Show main menu\n/new - Reset conversation\n/help - Show this help\n/language - Change language\n/provider - Manage LLM provider\n/model - Change model\n/mcp - MCP status\n/tools - Runtime tools list\n\nJust send a message to chat with me!",
+        Language::Spanish => "📚 *Ayuda - Comandos Disponibles*\n\n/start - Mostrar menú principal\n/menu - Mostrar menú principal\n/new - Reiniciar conversación\n/help - Mostrar esta ayuda\n/language - Cambiar idioma\n/provider - Gestionar proveedor LLM\n/model - Cambiar modelo\n/mcp - Estado MCP\n/tools - Lista de tools runtime\n\n¡Solo envía un mensaje para chatear conmigo!",
+        Language::Chinese => "📚 *帮助 - 可用命令*\n\n/start - 显示主菜单\n/menu - 显示主菜单\n/new - 重置对话\n/help - 显示帮助\n/language - 更改语言\n/provider - 管理LLM提供商\n/model - 更改模型\n/mcp - MCP状态\n/tools - 运行时工具列表\n\n只需发送消息与我聊天！",
+        Language::Russian => "📚 *Помощь - Доступные команды*\n\n/start - Показать главное меню\n/menu - Показать главное меню\n/new - Сбросить разговор\n/help - Показать помощь\n/language - Сменить язык\n/provider - Управление провайдером\n/model - Изменить модель\n/mcp - Статус MCP\n/tools - Список инструментов runtime\n\nПросто отправьте сообщение, чтобы пообщаться!",
+        Language::Italian => "📚 *Aiuto - Comandi Disponibili*\n\n/start - Mostra menu principale\n/menu - Mostra menu principale\n/new - Resetta conversazione\n/help - Mostra aiuto\n/language - Cambia lingua\n/provider - Gestisci provider LLM\n/model - Cambia modello\n/mcp - Stato MCP\n/tools - Lista tool runtime\n\nInvia un messaggio per chiacchierare con me!",
     }.to_string()
 }
 
 pub fn command_list(lang: Language) -> String {
     match lang {
-        Language::English => "📋 *Commands*\n\n/start - Main menu\n/menu - Main menu\n/new - Reset session\n/help - Help\n/language - Language\n/provider - LLM provider\n/model - Change model\n/mcp - MCP status\n/cron - Reminders\n/exec - Run commands\n/termux - Termux tools",
-        Language::Spanish => "📋 *Comandos*\n\n/start - Menú principal\n/menu - Menú principal\n/new - Reiniciar sesión\n/help - Ayuda\n/language - Idioma\n/provider - Proveedor LLM\n/model - Cambiar modelo\n/mcp - Estado MCP\n/cron - Recordatorios\n/exec - Ejecutar comandos\n/termux - Herramientas Termux",
-        Language::Chinese => "📋 *命令*\n\n/start - 主菜单\n/menu - 主菜单\n/new - 重置会话\n/help - 帮助\n/language - 语言\n/provider - LLM提供商\n/model - 更改模型\n/mcp - MCP状态\n/cron - 提醒\n/exec - 执行命令\n/termux - Termux工具",
-        Language::Russian => "📋 *Команды*\n\n/start - Главное меню\n/menu - Главное меню\n/new - Сброс сессии\n/help - Помощь\n/language - Язык\n/provider - Провайдер LLM\n/model - Изменить модель\n/mcp - Статус MCP\n/cron - Напоминания\n/exec - Выполнить команды\n/termux - Инструменты Termux",
-        Language::Italian => "📋 *Comandi*\n\n/start - Menu principale\n/menu - Menu principale\n/new - Reset sessione\n/help - Aiuto\n/language - Lingua\n/provider - Provider LLM\n/model - Cambia modello\n/mcp - Stato MCP\n/cron - Promemoria\n/exec - Esegui comandi\n/termux - Strumenti Termux",
+        Language::English => "📋 *Commands*\n\n/start - Main menu\n/menu - Main menu\n/new - Reset session\n/help - Help\n/language - Language\n/provider - LLM provider\n/model - Change model\n/mcp - MCP status\n/tools - Runtime tools list\n/cron - Reminders\n/exec - Run commands\n/termux - Termux tools",
+        Language::Spanish => "📋 *Comandos*\n\n/start - Menú principal\n/menu - Menú principal\n/new - Reiniciar sesión\n/help - Ayuda\n/language - Idioma\n/provider - Proveedor LLM\n/model - Cambiar modelo\n/mcp - Estado MCP\n/tools - Lista de tools runtime\n/cron - Recordatorios\n/exec - Ejecutar comandos\n/termux - Herramientas Termux",
+        Language::Chinese => "📋 *命令*\n\n/start - 主菜单\n/menu - 主菜单\n/new - 重置会话\n/help - 帮助\n/language - 语言\n/provider - LLM提供商\n/model - 更改模型\n/mcp - MCP状态\n/tools - 运行时工具列表\n/cron - 提醒\n/exec - 执行命令\n/termux - Termux工具",
+        Language::Russian => "📋 *Команды*\n\n/start - Главное меню\n/menu - Главное меню\n/new - Сброс сессии\n/help - Помощь\n/language - Язык\n/provider - Провайдер LLM\n/model - Изменить модель\n/mcp - Статус MCP\n/tools - Список инструментов runtime\n/cron - Напоминания\n/exec - Выполнить команды\n/termux - Инструменты Termux",
+        Language::Italian => "📋 *Comandi*\n\n/start - Menu principale\n/menu - Menu principale\n/new - Reset sessione\n/help - Aiuto\n/language - Lingua\n/provider - Provider LLM\n/model - Cambia modello\n/mcp - Stato MCP\n/tools - Lista tool runtime\n/cron - Promemoria\n/exec - Esegui comandi\n/termux - Strumenti Termux",
     }.to_string()
 }
 

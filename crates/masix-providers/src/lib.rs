@@ -350,7 +350,7 @@ impl OpenAICompatibleProvider {
             }
         }
 
-        // Variant 2: plain `mcp.call ...` lines without markers
+        // Variant 2: plain textual tool-call lines without markers
         idx = 0;
         while idx < lines.len() {
             if consumed[idx] {
@@ -359,7 +359,7 @@ impl OpenAICompatibleProvider {
             }
 
             let line = lines[idx].trim();
-            if !line.starts_with("mcp.call") {
+            if !Self::is_textual_tool_call_line(line) {
                 idx += 1;
                 continue;
             }
@@ -375,7 +375,8 @@ impl OpenAICompatibleProvider {
                     break;
                 }
                 let trimmed = lines[idx].trim();
-                if trimmed.starts_with("mcp.call") || trimmed.eq_ignore_ascii_case("### TOOL_CALL")
+                if Self::is_textual_tool_call_line(trimmed)
+                    || trimmed.eq_ignore_ascii_case("### TOOL_CALL")
                 {
                     break;
                 }
@@ -435,7 +436,7 @@ impl OpenAICompatibleProvider {
         }
 
         let command_line = normalized_lines[0];
-        let (server, tool) = Self::extract_server_and_tool(command_line)?;
+        let function_name = Self::extract_function_name(command_line)?;
 
         let args_from_lines = if normalized_lines.len() > 1 {
             normalized_lines[1..].join("\n")
@@ -450,10 +451,63 @@ impl OpenAICompatibleProvider {
             id: format!("inferred_tool_call_{}", idx),
             tool_type: "function".to_string(),
             function: FunctionCall {
-                name: format!("{}_{}", server, tool),
+                name: function_name,
                 arguments,
             },
         })
+    }
+
+    fn is_textual_tool_call_line(line: &str) -> bool {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        lower.starts_with("mcp.call")
+            || lower.starts_with("call ")
+            || lower.starts_with("tool.call ")
+            || lower.starts_with("tool_call ")
+            || lower.starts_with("function.call ")
+            || lower.starts_with("function_call ")
+    }
+
+    fn extract_function_name(command_line: &str) -> Option<String> {
+        if let Some((server, tool)) = Self::extract_server_and_tool(command_line) {
+            return Some(format!("{}_{}", server, tool));
+        }
+
+        Self::extract_prefixed_function_name(command_line)
+    }
+
+    fn extract_prefixed_function_name(command_line: &str) -> Option<String> {
+        let trimmed = command_line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let rest = if lower.starts_with("call ") {
+            trimmed.get(5..)?.trim()
+        } else if lower.starts_with("tool.call ") || lower.starts_with("tool_call ") {
+            trimmed.get(10..)?.trim()
+        } else if lower.starts_with("function.call ") || lower.starts_with("function_call ") {
+            trimmed.get(14..)?.trim()
+        } else {
+            return None;
+        };
+
+        let token = rest
+            .split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == ',' || c == ':')
+            .find(|token| !token.is_empty())?;
+        let cleaned = token.trim_matches(|c| c == '"' || c == '\'' || c == '`');
+
+        if let Some((server, tool)) = cleaned.split_once('.') {
+            if Self::is_identifier(server) && Self::is_identifier(tool) {
+                return Some(format!("{}_{}", server, tool));
+            }
+        }
+
+        if Self::is_identifier(cleaned) {
+            return Some(cleaned.to_string());
+        }
+
+        None
     }
 
     fn extract_server_and_tool(command_line: &str) -> Option<(String, String)> {
@@ -1196,6 +1250,72 @@ mod tests {
         assert!(content.contains("Eseguo una ricerca."));
         assert!(content.contains("Attendo il risultato."));
         assert!(!content.contains("### TOOL_CALL"));
+    }
+
+    #[test]
+    fn parse_response_infers_builtin_tool_call_from_marker_block() {
+        let provider = OpenAICompatibleProvider::new(
+            "test".to_string(),
+            "key".to_string(),
+            None,
+            Some("fallback-model".to_string()),
+        );
+
+        let response = serde_json::json!({
+            "choices": [
+                {
+                    "message": {
+                        "content": "### TOOL_CALL\ncall exec\n{\"command\":\"pwd\"}\n### TOOL_CALL"
+                    },
+                    "finish_reason": "stop"
+                }
+            ]
+        });
+
+        let parsed = provider
+            .parse_response(response)
+            .expect("expected parse success");
+        let calls = parsed.tool_calls.expect("expected inferred tool call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "exec");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments)
+                .expect("valid arguments"),
+            serde_json::json!({"command": "pwd"})
+        );
+    }
+
+    #[test]
+    fn parse_response_infers_call_prefix_for_flattened_mcp_tool() {
+        let provider = OpenAICompatibleProvider::new(
+            "test".to_string(),
+            "key".to_string(),
+            None,
+            Some("fallback-model".to_string()),
+        );
+
+        let response = serde_json::json!({
+            "choices": [
+                {
+                    "message": {
+                        "content": "tool.call webfetch.web_search\n{\"query\":\"masix\"}"
+                    },
+                    "finish_reason": "stop"
+                }
+            ]
+        });
+
+        let parsed = provider
+            .parse_response(response)
+            .expect("expected parse success");
+        let calls = parsed.tool_calls.expect("expected inferred tool call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "webfetch_web_search");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments)
+                .expect("valid arguments"),
+            serde_json::json!({"query": "masix"})
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # MasiX
 
-[![Status: RC](https://img.shields.io/badge/Status-0.1.1--rc-blue.svg)](#project-status)
+[![Status: RC](https://img.shields.io/badge/Status-0.1.2--rc-blue.svg)](#project-status)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![Target](https://img.shields.io/badge/Target-Termux%20%2F%20Linux-green.svg)](https://termux.dev)
@@ -11,7 +11,7 @@ MasiX is a Rust-first automation runtime focused on Termux/Linux mobile workflow
 
 ## Project Status
 
-- 0.1.1 release candidate
+- 0.1.2 release candidate
 - Extracted from a commercial product and simplified into a public testable core
 - Primary focus: Telegram, MCP tool-calling, reminders, and stable Termux runtime
 
@@ -33,6 +33,9 @@ MasiX is a Rust-first automation runtime focused on Termux/Linux mobile workflow
 - WhatsApp read-only listener mode with optional Telegram forwarding
 - SMS runtime watcher with optional Telegram forwarding
 - Android intent dispatch tool for Termux (`intent`)
+- Runtime command/tool inventory via `/tools`
+- Torrent search tool (`torrent_search`) for links and optional magnet extraction
+- Telegram command menu auto-sync (`setMyCommands`) at adapter startup
 
 ## Quick Install
 
@@ -107,6 +110,7 @@ masix config mcp disable
 | `/model` | Show current model |
 | `/model <name>` | Change model for this chat |
 | `/mcp` | Show MCP status |
+| `/tools` | List runtime exposed tools (built-in + MCP) |
 | `/cron` | Manage reminders |
 | `/exec` | Run shell commands |
 | `/termux` | Termux-specific tools |

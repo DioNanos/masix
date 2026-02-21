@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2-rc] - 2026-02-21
+
+### Added
+- **Torrent search built-in tool**
+  - New `torrent_search` tool exposed in runtime tools.
+  - Multi-provider torrent web discovery (`providers=["all"]` by default).
+  - Link-first output with optional magnet extraction (`include_magnet=true`).
+- **Runtime tools visibility and diagnostics**
+  - New `/tools` chat command to list all exposed runtime tools.
+  - Runtime now logs tool exposure summary (built-in vs MCP).
+- **Tool execution feedback**
+  - Final model responses now append `🧰 Tool usati: ...` when tools were executed.
+- **Telegram command menu sync**
+  - Telegram adapter now calls `setMyCommands` at startup to keep bot command menu aligned.
+
+### Changed
+- Tool-calling system prompt guidance hardened:
+  - Always lists built-in tools explicitly.
+  - Adds strict fallback textual protocol (`### TOOL_CALL ...`) for non-native providers.
+  - Explicitly guides torrent requests to `torrent_search` (links/magnet only).
+- Provider textual tool-call inference improved:
+  - Supports `call <tool_name>` and `tool.call ...` forms in addition to `mcp.call ...`.
+
 ## [0.1.1-rc] - 2026-02-21
 
 ### Added

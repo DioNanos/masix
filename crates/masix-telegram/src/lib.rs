@@ -464,6 +464,12 @@ impl TelegramAdapter {
         let mut client_recreate_at =
             Instant::now() + Duration::from_secs(self.client_recreate_interval_secs);
 
+        if let Err(err) = self.sync_bot_commands(&client).await {
+            warn!("Failed to sync Telegram bot commands: {}", err);
+        } else {
+            info!("Telegram bot commands synced");
+        }
+
         loop {
             if Instant::now() >= client_recreate_at {
                 info!("Recreating HTTP client to prevent stale connections");
@@ -494,6 +500,49 @@ impl TelegramAdapter {
                 }
             }
         }
+    }
+
+    async fn sync_bot_commands(&self, client: &Client) -> Result<()> {
+        let url = format!("{}/setMyCommands", self.api_url);
+        let commands = serde_json::json!([
+            { "command": "start", "description": "Open main menu" },
+            { "command": "menu", "description": "Show menu" },
+            { "command": "new", "description": "Reset conversation" },
+            { "command": "help", "description": "Show help" },
+            { "command": "language", "description": "Set language" },
+            { "command": "provider", "description": "Manage provider" },
+            { "command": "model", "description": "Set model" },
+            { "command": "mcp", "description": "Show MCP status" },
+            { "command": "tools", "description": "List runtime tools" },
+            { "command": "cron", "description": "Manage reminders" },
+            { "command": "exec", "description": "Run shell commands" },
+            { "command": "termux", "description": "Use Termux tools" }
+        ]);
+
+        let payload = serde_json::json!({ "commands": commands });
+        let resp = client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| anyhow!("telegram setMyCommands request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("telegram setMyCommands HTTP {}: {}", status, body));
+        }
+
+        let parsed: ApiResponse<serde_json::Value> = resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("telegram setMyCommands decode failed: {}", e))?;
+
+        if !parsed.ok {
+            return Err(anyhow!("telegram setMyCommands returned ok=false"));
+        }
+
+        Ok(())
     }
 
     async fn handle_message(&self, message: &TelegramMessage) {

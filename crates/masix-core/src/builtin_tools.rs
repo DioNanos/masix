@@ -8,9 +8,40 @@ use masix_intent::{execute_intent, IntentRequest};
 use masix_providers::ToolDefinition;
 use scraper::{Html, Selector};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::Path;
 
 const MAX_WEB_CONTENT: usize = 15000;
+const TORRENT_PROVIDER_CATALOG: &[(&str, &str)] = &[
+    ("1337x", "1337x.to"),
+    ("thepiratebay", "thepiratebay.org"),
+    ("torrentgalaxy", "torrentgalaxy.to"),
+    ("yts", "yts.mx"),
+    ("limetorrents", "limetorrents.lol"),
+    ("eztv", "eztv.re"),
+    ("nyaa", "nyaa.si"),
+    ("torlock", "torlock.com"),
+    ("kickass", "kickasstorrents.to"),
+    ("yourbittorrent", "yourbittorrent.com"),
+    ("magnetdl", "magnetdl.com"),
+    ("bt4g", "bt4gprx.com"),
+    ("idope", "idope.se"),
+    ("solidtorrents", "solidtorrents.to"),
+];
+
+#[derive(Debug, Clone)]
+struct SearchResult {
+    title: String,
+    snippet: String,
+    url: String,
+}
+
+#[derive(Debug, Clone)]
+struct TorrentSearchEntry {
+    provider: String,
+    result: SearchResult,
+    magnet: Option<String>,
+}
 
 pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
     vec![
@@ -118,6 +149,36 @@ pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
                         "max_results": {
                             "type": "integer",
                             "description": "Maximum number of results (default: 5, max: 10)"
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: masix_providers::FunctionDefinition {
+                name: "torrent_search".to_string(),
+                description: "Search torrent-related results on the web and optionally extract magnet links from result pages.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Torrent search query (e.g. 'Debian 12.8 netinst')"
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of results (default: 8, max: 20)"
+                        },
+                        "include_magnet": {
+                            "type": "boolean",
+                            "description": "If true, try extracting magnet links from result pages (default: true)"
+                        },
+                        "providers": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Provider list. Use [\"all\"] (default) for full catalog, or names/domains (e.g. [\"1337x\",\"nyaa\"])."
                         }
                     },
                     "required": ["query"]
@@ -393,6 +454,19 @@ pub async fn execute_builtin_tool(
                 Err(e) => Ok(format!("Search error: {}", e)),
             }
         }
+        "torrent_search" => {
+            let query = arguments["query"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing 'query' argument"))?;
+            let max_results = arguments["max_results"].as_u64().unwrap_or(8).min(20) as usize;
+            let include_magnet = arguments["include_magnet"].as_bool().unwrap_or(true);
+            let providers = arguments.get("providers");
+
+            match torrent_search(query, max_results, include_magnet, providers).await {
+                Ok(results) => Ok(results),
+                Err(e) => Ok(format!("Torrent search error: {}", e)),
+            }
+        }
         "web_fetch" => {
             let url = arguments["url"]
                 .as_str()
@@ -437,6 +511,7 @@ pub fn is_builtin_tool(tool_name: &str) -> bool {
             | "write_file"
             | "list_dir"
             | "web_search"
+            | "torrent_search"
             | "web_fetch"
             | "device_info"
             | "cron"
@@ -450,6 +525,17 @@ pub fn is_builtin_tool(tool_name: &str) -> bool {
 // ============================================================================
 
 async fn web_search_duckduckgo(query: &str, max_results: usize) -> Result<String> {
+    let results = web_search_duckduckgo_results(query, max_results).await?;
+    Ok(format_search_results(
+        &results,
+        &format!("Found {} results:", results.len()),
+    ))
+}
+
+async fn web_search_duckduckgo_results(
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<SearchResult>> {
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
         .timeout(std::time::Duration::from_secs(15))
@@ -466,7 +552,7 @@ async fn web_search_duckduckgo(query: &str, max_results: usize) -> Result<String
     let title_selector = Selector::parse(".result__a").ok();
     let snippet_selector = Selector::parse(".result__snippet").ok();
 
-    let mut results = Vec::new();
+    let mut results: Vec<SearchResult> = Vec::new();
 
     if let (Some(result_sel), Some(title_sel), Some(snippet_sel)) =
         (result_selector, title_selector, snippet_selector)
@@ -489,40 +575,336 @@ async fn web_search_duckduckgo(query: &str, max_results: usize) -> Result<String
                 .to_string();
 
             // Get link from href attribute
-            let link = result
+            let raw_link = result
                 .select(&title_sel)
                 .next()
                 .and_then(|e| e.value().attr("href"))
                 .unwrap_or("")
                 .to_string();
+            let link = normalize_search_link(&raw_link);
 
             if !title.is_empty() {
-                results.push(format!(
-                    "**{}**\n{}\n🔗 {}\n",
+                results.push(SearchResult {
                     title,
-                    if snippet.is_empty() {
-                        "No description".to_string()
-                    } else {
-                        snippet
-                    },
-                    if link.is_empty() {
-                        "N/A".to_string()
-                    } else {
-                        link
-                    }
-                ));
+                    snippet,
+                    url: link,
+                });
             }
         }
     }
 
     if results.is_empty() {
-        Ok("No results found.".to_string())
+        Ok(Vec::new())
     } else {
-        Ok(format!(
-            "Found {} results:\n\n{}",
-            results.len(),
-            results.join("\n---\n")
-        ))
+        Ok(results)
+    }
+}
+
+fn format_search_results(results: &[SearchResult], header: &str) -> String {
+    if results.is_empty() {
+        return "No results found.".to_string();
+    }
+
+    let mut chunks = Vec::new();
+    for item in results {
+        chunks.push(format!(
+            "**{}**\n{}\n🔗 {}\n",
+            item.title,
+            if item.snippet.trim().is_empty() {
+                "No description".to_string()
+            } else {
+                item.snippet.trim().to_string()
+            },
+            if item.url.trim().is_empty() {
+                "N/A".to_string()
+            } else {
+                item.url.trim().to_string()
+            }
+        ));
+    }
+
+    format!("{}\n\n{}", header, chunks.join("\n---\n"))
+}
+
+fn normalize_search_link(raw_link: &str) -> String {
+    if raw_link.trim().is_empty() {
+        return String::new();
+    }
+
+    if let Ok(parsed) = url::Url::parse(raw_link) {
+        for (key, value) in parsed.query_pairs() {
+            if key == "uddg" {
+                return value.into_owned();
+            }
+        }
+        return raw_link.to_string();
+    }
+
+    if raw_link.starts_with('/') {
+        if let Ok(base) = url::Url::parse("https://duckduckgo.com") {
+            if let Ok(joined) = base.join(raw_link) {
+                for (key, value) in joined.query_pairs() {
+                    if key == "uddg" {
+                        return value.into_owned();
+                    }
+                }
+            }
+        }
+    }
+
+    raw_link.to_string()
+}
+
+async fn torrent_search(
+    query: &str,
+    max_results: usize,
+    include_magnet: bool,
+    providers_value: Option<&Value>,
+) -> Result<String> {
+    let providers = resolve_torrent_providers(providers_value);
+    if providers.is_empty() {
+        return Ok("No torrent providers available.".to_string());
+    }
+
+    let magnet_client = if include_magnet {
+        Some(
+            reqwest::Client::builder()
+                .user_agent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
+                .timeout(std::time::Duration::from_secs(12))
+                .build()?,
+        )
+    } else {
+        None
+    };
+
+    let mut entries: Vec<TorrentSearchEntry> = Vec::new();
+    let mut seen_urls: HashSet<String> = HashSet::new();
+    let per_provider_limit = ((max_results / providers.len()).max(1)).min(4);
+    let enhanced_query = if query.to_ascii_lowercase().contains("torrent") {
+        query.to_string()
+    } else {
+        format!("{} torrent", query)
+    };
+
+    for (provider_label, provider_domain) in &providers {
+        if entries.len() >= max_results {
+            break;
+        }
+
+        let provider_query = format!("site:{} {}", provider_domain, enhanced_query);
+        let fetched = web_search_duckduckgo_results(&provider_query, per_provider_limit).await;
+        let provider_results = match fetched {
+            Ok(items) => items,
+            Err(_) => continue,
+        };
+
+        for result in provider_results {
+            if entries.len() >= max_results {
+                break;
+            }
+            if result.url.trim().is_empty() {
+                continue;
+            }
+
+            let key = result.url.trim().to_ascii_lowercase();
+            if !seen_urls.insert(key) {
+                continue;
+            }
+
+            let magnet = if include_magnet {
+                if let Some(client) = &magnet_client {
+                    fetch_first_magnet_link(client, &result.url)
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let provider =
+                detect_provider_label(&result.url).unwrap_or_else(|| provider_label.clone());
+            entries.push(TorrentSearchEntry {
+                provider,
+                result,
+                magnet,
+            });
+        }
+    }
+
+    if entries.is_empty() {
+        let fallback_results = web_search_duckduckgo_results(&enhanced_query, max_results).await?;
+        for result in fallback_results {
+            if entries.len() >= max_results {
+                break;
+            }
+            if result.url.trim().is_empty() {
+                continue;
+            }
+            let key = result.url.trim().to_ascii_lowercase();
+            if !seen_urls.insert(key) {
+                continue;
+            }
+            let magnet = if include_magnet {
+                if let Some(client) = &magnet_client {
+                    fetch_first_magnet_link(client, &result.url)
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let provider =
+                detect_provider_label(&result.url).unwrap_or_else(|| "generic".to_string());
+            entries.push(TorrentSearchEntry {
+                provider,
+                result,
+                magnet,
+            });
+        }
+    }
+
+    if entries.is_empty() {
+        return Ok("No torrent results found.".to_string());
+    }
+
+    Ok(format_torrent_entries(&entries))
+}
+
+fn resolve_torrent_providers(providers_value: Option<&Value>) -> Vec<(String, String)> {
+    let mut requested: Vec<String> = Vec::new();
+
+    if let Some(value) = providers_value {
+        if let Some(items) = value.as_array() {
+            for item in items {
+                if let Some(s) = item.as_str() {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        requested.push(trimmed.to_ascii_lowercase());
+                    }
+                }
+            }
+        } else if let Some(s) = value.as_str() {
+            for token in s.split(',') {
+                let trimmed = token.trim();
+                if !trimmed.is_empty() {
+                    requested.push(trimmed.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+
+    let use_all = requested.is_empty() || requested.iter().any(|item| item == "all");
+    let mut providers: Vec<(String, String)> = Vec::new();
+
+    if use_all {
+        for (name, domain) in TORRENT_PROVIDER_CATALOG {
+            providers.push(((*name).to_string(), (*domain).to_string()));
+        }
+        return providers;
+    }
+
+    for requested_item in requested {
+        if let Some((name, domain)) = TORRENT_PROVIDER_CATALOG
+            .iter()
+            .find(|(name, _)| name.to_ascii_lowercase() == requested_item)
+        {
+            providers.push(((*name).to_string(), (*domain).to_string()));
+            continue;
+        }
+        if requested_item.contains('.') {
+            providers.push((requested_item.clone(), requested_item));
+        }
+    }
+
+    let mut seen = HashSet::new();
+    providers
+        .into_iter()
+        .filter(|(_, domain)| seen.insert(domain.clone()))
+        .collect()
+}
+
+fn detect_provider_label(url: &str) -> Option<String> {
+    let host = extract_host(url)?;
+    for (name, domain) in TORRENT_PROVIDER_CATALOG {
+        if host == *domain || host.ends_with(&format!(".{}", domain)) {
+            return Some((*name).to_string());
+        }
+    }
+    Some(host)
+}
+
+fn extract_host(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    parsed.host_str().map(|host| host.to_ascii_lowercase())
+}
+
+fn format_torrent_entries(entries: &[TorrentSearchEntry]) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("Found {} torrent links:", entries.len()));
+    lines.push(String::new());
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let title = if entry.result.title.trim().is_empty() {
+            "Untitled result".to_string()
+        } else {
+            entry.result.title.trim().to_string()
+        };
+        lines.push(format!(
+            "{}. [{}]({})",
+            idx + 1,
+            title,
+            entry.result.url.trim()
+        ));
+        lines.push(format!("   provider: {}", entry.provider));
+        if !entry.result.snippet.trim().is_empty() {
+            lines.push(format!("   snippet: {}", entry.result.snippet.trim()));
+        }
+        if let Some(magnet) = &entry.magnet {
+            lines.push(format!("   magnet: {}", magnet));
+        }
+        lines.push(String::new());
+    }
+
+    lines.join("\n")
+}
+
+async fn fetch_first_magnet_link(
+    client: &reqwest::Client,
+    page_url: &str,
+) -> Result<Option<String>> {
+    if page_url.trim().is_empty() {
+        return Ok(None);
+    }
+    if !page_url.starts_with("http://") && !page_url.starts_with("https://") {
+        return Ok(None);
+    }
+
+    let response = client.get(page_url).send().await?;
+    let html = response.text().await?;
+    Ok(extract_first_magnet_link(&html))
+}
+
+fn extract_first_magnet_link(html: &str) -> Option<String> {
+    let marker = "magnet:?";
+    let start = html.find(marker)?;
+    let tail = &html[start..];
+    let end = tail
+        .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '<' || c == '>')
+        .unwrap_or(tail.len());
+    if end == 0 {
+        return None;
+    }
+    let link = tail[..end].replace("&amp;", "&");
+    if link.starts_with("magnet:?xt=urn:btih:") {
+        Some(link)
+    } else {
+        None
     }
 }
 

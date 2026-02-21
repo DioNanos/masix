@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, Mutex};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use masix_telegram::menu::Language;
 
@@ -643,6 +643,44 @@ impl MasixRuntime {
         tools
     }
 
+    fn build_tool_call_guidance(tools: &[ToolDefinition]) -> String {
+        let mut builtin_names: Vec<String> = tools
+            .iter()
+            .map(|t| t.function.name.clone())
+            .filter(|name| is_builtin_tool(name))
+            .collect();
+        builtin_names.sort();
+        builtin_names.dedup();
+
+        let mut extra_names: Vec<String> = tools
+            .iter()
+            .map(|t| t.function.name.clone())
+            .filter(|name| !is_builtin_tool(name))
+            .collect();
+        extra_names.sort();
+        extra_names.dedup();
+
+        const MAX_LISTED_EXTRA_TOOLS: usize = 40;
+        let extra_preview = if extra_names.is_empty() {
+            "(none)".to_string()
+        } else if extra_names.len() > MAX_LISTED_EXTRA_TOOLS {
+            format!(
+                "{} (+{} more)",
+                extra_names[..MAX_LISTED_EXTRA_TOOLS].join(", "),
+                extra_names.len() - MAX_LISTED_EXTRA_TOOLS
+            )
+        } else {
+            extra_names.join(", ")
+        };
+
+        format!(
+            "\n\n# Tool Calling Protocol\nHai accesso a tool runtime.\nQuando una richiesta richiede azioni su shell/file/web/device/termux, usa un tool-call e non limitarti a descrivere i tool.\nPer ricerche torrent usa `torrent_search` (solo link/magnet, nessun download).\nPreferisci sempre il tool-calling nativo del provider.\nSe il provider non supporta tool-calling nativo, usa questo formato esatto:\n### TOOL_CALL\ncall <tool_name>\n{{\"arg\":\"value\"}}\n### TOOL_CALL\nBuilt-in tools sempre disponibili: {}\nMCP/extra tools disponibili: {}\nTotale tools disponibili: {}",
+            builtin_names.join(", "),
+            extra_preview,
+            builtin_names.len() + extra_names.len()
+        )
+    }
+
     async fn execute_tool_call(
         mcp_client: &Option<Arc<Mutex<McpClient>>>,
         tool_call: &ToolCall,
@@ -970,6 +1008,25 @@ impl MasixRuntime {
                     return Ok(());
                 }
 
+                if text.starts_with("/tools") {
+                    info!("Processing /tools");
+                    if let Some(chat_id) = envelope.chat_id {
+                        let response = Self::handle_tools_chat_command(mcp_client).await;
+                        let msg = OutboundMessage {
+                            channel: envelope.channel.clone(),
+                            account_tag: account_tag.clone(),
+                            chat_id,
+                            text: response,
+                            reply_to: None,
+                            edit_message_id: None,
+                            inline_keyboard: None,
+                            chat_action: None,
+                        };
+                        let _ = outbound_sender.send(msg);
+                    }
+                    return Ok(());
+                }
+
                 if Self::handle_cron_command(
                     text,
                     &envelope,
@@ -996,6 +1053,27 @@ impl MasixRuntime {
 
                 let tools = Self::get_mcp_tools(mcp_client).await;
                 let has_tools = !tools.is_empty();
+                let builtin_tools_count = tools
+                    .iter()
+                    .filter(|tool| is_builtin_tool(&tool.function.name))
+                    .count();
+                if has_tools {
+                    info!(
+                        "Tool exposure for '{}' profile: total={} builtins={} mcp={}",
+                        bot_context.profile_name,
+                        tools.len(),
+                        builtin_tools_count,
+                        tools.len().saturating_sub(builtin_tools_count)
+                    );
+                    debug!(
+                        "Tool names: {}",
+                        tools
+                            .iter()
+                            .map(|tool| tool.function.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
 
                 // Send typing action while processing
                 if let Some(chat_id) = envelope.chat_id {
@@ -1018,6 +1096,9 @@ impl MasixRuntime {
                         system_context.push_str("\n\n# Bot Memory\n");
                         system_context.push_str(&memory);
                     }
+                }
+                if has_tools {
+                    system_context.push_str(&Self::build_tool_call_guidance(&tools));
                 }
 
                 let mut messages = vec![ChatMessage {
@@ -1070,6 +1151,7 @@ impl MasixRuntime {
                 let mut final_response = String::new();
                 let mut iterations = 0;
                 let mut selected_provider: Option<String> = None;
+                let mut used_tools: Vec<String> = Vec::new();
 
                 loop {
                     iterations += 1;
@@ -1125,6 +1207,12 @@ impl MasixRuntime {
 
                         for tool_call in tool_calls {
                             info!("Executing tool: {}", tool_call.function.name);
+                            if !used_tools
+                                .iter()
+                                .any(|name| name == &tool_call.function.name)
+                            {
+                                used_tools.push(tool_call.function.name.clone());
+                            }
 
                             let tool_result = match Self::execute_tool_call(
                                 mcp_client,
@@ -1158,6 +1246,10 @@ impl MasixRuntime {
 
                 if final_response.is_empty() {
                     final_response = "Non ho potuto generare una risposta.".to_string();
+                }
+                if !used_tools.is_empty() {
+                    final_response.push_str("\n\n🧰 Tool usati: ");
+                    final_response.push_str(&used_tools.join(", "));
                 }
 
                 if let Some(chat_id) = envelope.chat_id {
@@ -2522,5 +2614,33 @@ impl MasixRuntime {
         } else {
             "Unknown command. Use /mcp for status.".to_string()
         }
+    }
+
+    async fn handle_tools_chat_command(mcp_client: &Option<Arc<Mutex<McpClient>>>) -> String {
+        let tools = Self::get_mcp_tools(mcp_client).await;
+        if tools.is_empty() {
+            return "⚠️ Nessun tool esposto in runtime.".to_string();
+        }
+
+        let mut names: Vec<String> = tools.iter().map(|t| t.function.name.clone()).collect();
+        names.sort();
+        names.dedup();
+
+        let builtins = names.iter().filter(|name| is_builtin_tool(name)).count();
+        let mcp_count = names.len().saturating_sub(builtins);
+
+        let mut lines = vec![
+            "🧰 *Runtime Tools*".to_string(),
+            String::new(),
+            format!("Totale: {}", names.len()),
+            format!("Built-in: {}", builtins),
+            format!("MCP: {}", mcp_count),
+            String::new(),
+            "Tool names:".to_string(),
+        ];
+        for name in names {
+            lines.push(format!("• {}", name));
+        }
+        lines.join("\n")
     }
 }
