@@ -727,11 +727,19 @@ impl MasixRuntime {
         };
 
         format!(
-            "\n\n# Tool Calling Protocol\nHai accesso a tool runtime.\nQuando una richiesta richiede azioni su shell/file/web/device/termux, usa un tool-call e non limitarti a descrivere i tool.\nPer ricerche torrent usa `torrent_search` (solo link/magnet, nessun download).\nPreferisci sempre il tool-calling nativo del provider.\nSe il provider non supporta tool-calling nativo, usa questo formato esatto:\n### TOOL_CALL\ncall <tool_name>\n{{\"arg\":\"value\"}}\n### TOOL_CALL\nBuilt-in tools sempre disponibili: {}\nMCP/extra tools disponibili: {}\nTotale tools disponibili: {}",
+            "\n\n# Tool Calling Protocol\nHai accesso a tool runtime.\nQuando una richiesta richiede azioni su shell/file/web/device/termux, usa un tool-call e non limitarti a descrivere i tool.\nPer torrent usa `torrent_search` per trovare link e `torrent_extract_magnet` solo sui link scelti (nessun download).\nPreferisci sempre il tool-calling nativo del provider.\nSe il provider non supporta tool-calling nativo, usa questo formato esatto:\n### TOOL_CALL\ncall <tool_name>\n{{\"arg\":\"value\"}}\n### TOOL_CALL\nBuilt-in tools sempre disponibili: {}\nMCP/extra tools disponibili: {}\nTotale tools disponibili: {}",
             builtin_names.join(", "),
             extra_preview,
             builtin_names.len() + extra_names.len()
         )
+    }
+
+    fn tool_call_signature(tool_call: &ToolCall) -> String {
+        let canonical_args =
+            serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|_| tool_call.function.arguments.trim().to_string());
+        format!("{}::{}", tool_call.function.name, canonical_args)
     }
 
     async fn execute_tool_call(
@@ -1227,6 +1235,7 @@ impl MasixRuntime {
                 let mut iterations = 0;
                 let mut selected_provider: Option<String> = None;
                 let mut used_tools: Vec<String> = Vec::new();
+                let mut used_tool_signatures: HashSet<String> = HashSet::new();
 
                 loop {
                     iterations += 1;
@@ -1287,6 +1296,22 @@ impl MasixRuntime {
                                 .any(|name| name == &tool_call.function.name)
                             {
                                 used_tools.push(tool_call.function.name.clone());
+                            }
+
+                            let signature = Self::tool_call_signature(tool_call);
+                            if !used_tool_signatures.insert(signature) {
+                                warn!(
+                                    "Skipping duplicate tool call within same turn: {}",
+                                    tool_call.function.name
+                                );
+                                messages.push(ChatMessage {
+                                    role: "tool".to_string(),
+                                    content: Some("Skipped duplicate tool call in same turn to prevent loops.".to_string()),
+                                    tool_calls: None,
+                                    tool_call_id: Some(tool_call.id.clone()),
+                                    name: Some(tool_call.function.name.clone()),
+                                });
+                                continue;
                             }
 
                             let tool_result = match Self::execute_tool_call(

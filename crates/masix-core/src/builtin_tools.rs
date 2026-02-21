@@ -28,6 +28,9 @@ const TORRENT_PROVIDER_CATALOG: &[(&str, &str)] = &[
     ("idope", "idope.se"),
     ("solidtorrents", "solidtorrents.to"),
 ];
+const TORRENT_SEARCH_PER_PROVIDER_TIMEOUT_SECS: u64 = 6;
+const TORRENT_SEARCH_GLOBAL_TIMEOUT_SECS: u64 = 18;
+const TORRENT_MAGNET_FETCH_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug, Clone)]
 struct SearchResult {
@@ -40,7 +43,6 @@ struct SearchResult {
 struct TorrentSearchEntry {
     provider: String,
     result: SearchResult,
-    magnet: Option<String>,
 }
 
 pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
@@ -159,7 +161,7 @@ pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
             tool_type: "function".to_string(),
             function: masix_providers::FunctionDefinition {
                 name: "torrent_search".to_string(),
-                description: "Search torrent-related results on the web and optionally extract magnet links from result pages.".to_string(),
+                description: "Search torrent-related results on the web and return titles + links. This tool does not fetch page magnets.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -171,10 +173,6 @@ pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
                             "type": "integer",
                             "description": "Maximum number of results (default: 8, max: 20)"
                         },
-                        "include_magnet": {
-                            "type": "boolean",
-                            "description": "If true, try extracting magnet links from result pages (default: true)"
-                        },
                         "providers": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -182,6 +180,27 @@ pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
                         }
                     },
                     "required": ["query"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: masix_providers::FunctionDefinition {
+                name: "torrent_extract_magnet".to_string(),
+                description: "Extract first magnet URI from a specific result page URL. Use only after selecting a candidate link from torrent_search.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Result page URL to inspect for a magnet URI"
+                        },
+                        "timeout_secs": {
+                            "type": "integer",
+                            "description": "Fetch timeout in seconds (default: 10, min: 3, max: 20)"
+                        }
+                    },
+                    "required": ["url"]
                 }),
             },
         },
@@ -459,12 +478,25 @@ pub async fn execute_builtin_tool(
                 .as_str()
                 .ok_or_else(|| anyhow!("Missing 'query' argument"))?;
             let max_results = arguments["max_results"].as_u64().unwrap_or(8).min(20) as usize;
-            let include_magnet = arguments["include_magnet"].as_bool().unwrap_or(true);
             let providers = arguments.get("providers");
 
-            match torrent_search(query, max_results, include_magnet, providers).await {
+            match torrent_search(query, max_results, providers).await {
                 Ok(results) => Ok(results),
                 Err(e) => Ok(format!("Torrent search error: {}", e)),
+            }
+        }
+        "torrent_extract_magnet" => {
+            let url = arguments["url"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing 'url' argument"))?;
+            let timeout_secs = arguments["timeout_secs"]
+                .as_u64()
+                .unwrap_or(TORRENT_MAGNET_FETCH_TIMEOUT_SECS)
+                .clamp(3, 20);
+
+            match torrent_extract_magnet(url, timeout_secs).await {
+                Ok(results) => Ok(results),
+                Err(e) => Ok(format!("Torrent magnet extraction error: {}", e)),
             }
         }
         "web_fetch" => {
@@ -512,6 +544,7 @@ pub fn is_builtin_tool(tool_name: &str) -> bool {
             | "list_dir"
             | "web_search"
             | "torrent_search"
+            | "torrent_extract_magnet"
             | "web_fetch"
             | "device_info"
             | "cron"
@@ -536,9 +569,17 @@ async fn web_search_duckduckgo_results(
     query: &str,
     max_results: usize,
 ) -> Result<Vec<SearchResult>> {
+    web_search_duckduckgo_results_with_timeout(query, max_results, 15).await
+}
+
+async fn web_search_duckduckgo_results_with_timeout(
+    query: &str,
+    max_results: usize,
+    timeout_secs: u64,
+) -> Result<Vec<SearchResult>> {
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()?;
 
     let encoded_query: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
@@ -658,24 +699,12 @@ fn normalize_search_link(raw_link: &str) -> String {
 async fn torrent_search(
     query: &str,
     max_results: usize,
-    include_magnet: bool,
     providers_value: Option<&Value>,
 ) -> Result<String> {
     let providers = resolve_torrent_providers(providers_value);
     if providers.is_empty() {
         return Ok("No torrent providers available.".to_string());
     }
-
-    let magnet_client = if include_magnet {
-        Some(
-            reqwest::Client::builder()
-                .user_agent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
-                .timeout(std::time::Duration::from_secs(12))
-                .build()?,
-        )
-    } else {
-        None
-    };
 
     let mut entries: Vec<TorrentSearchEntry> = Vec::new();
     let mut seen_urls: HashSet<String> = HashSet::new();
@@ -686,15 +715,51 @@ async fn torrent_search(
         format!("{} torrent", query)
     };
 
-    for (provider_label, provider_domain) in &providers {
+    let mut provider_tasks = tokio::task::JoinSet::new();
+    for (provider_label, provider_domain) in providers.clone() {
+        let provider_query = format!("site:{} {}", provider_domain, enhanced_query);
+        provider_tasks.spawn(async move {
+            let fetched = tokio::time::timeout(
+                std::time::Duration::from_secs(TORRENT_SEARCH_PER_PROVIDER_TIMEOUT_SECS),
+                web_search_duckduckgo_results_with_timeout(
+                    &provider_query,
+                    per_provider_limit,
+                    TORRENT_SEARCH_PER_PROVIDER_TIMEOUT_SECS,
+                ),
+            )
+            .await;
+            match fetched {
+                Ok(Ok(items)) => (provider_label, items),
+                _ => (provider_label, Vec::new()),
+            }
+        });
+    }
+
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(TORRENT_SEARCH_GLOBAL_TIMEOUT_SECS);
+    loop {
         if entries.len() >= max_results {
             break;
         }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            provider_tasks.abort_all();
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let join_result = tokio::time::timeout(remaining, provider_tasks.join_next()).await;
+        let Some(next_task) = (match join_result {
+            Ok(next_task) => next_task,
+            Err(_) => {
+                provider_tasks.abort_all();
+                break;
+            }
+        }) else {
+            break;
+        };
 
-        let provider_query = format!("site:{} {}", provider_domain, enhanced_query);
-        let fetched = web_search_duckduckgo_results(&provider_query, per_provider_limit).await;
-        let provider_results = match fetched {
-            Ok(items) => items,
+        let (provider_label, provider_results) = match next_task {
+            Ok(data) => data,
             Err(_) => continue,
         };
 
@@ -711,31 +776,15 @@ async fn torrent_search(
                 continue;
             }
 
-            let magnet = if include_magnet {
-                if let Some(client) = &magnet_client {
-                    fetch_first_magnet_link(client, &result.url)
-                        .await
-                        .ok()
-                        .flatten()
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
             let provider =
                 detect_provider_label(&result.url).unwrap_or_else(|| provider_label.clone());
-            entries.push(TorrentSearchEntry {
-                provider,
-                result,
-                magnet,
-            });
+            entries.push(TorrentSearchEntry { provider, result });
         }
     }
 
     if entries.is_empty() {
-        let fallback_results = web_search_duckduckgo_results(&enhanced_query, max_results).await?;
+        let fallback_results =
+            web_search_duckduckgo_results_with_timeout(&enhanced_query, max_results, 8).await?;
         for result in fallback_results {
             if entries.len() >= max_results {
                 break;
@@ -747,25 +796,9 @@ async fn torrent_search(
             if !seen_urls.insert(key) {
                 continue;
             }
-            let magnet = if include_magnet {
-                if let Some(client) = &magnet_client {
-                    fetch_first_magnet_link(client, &result.url)
-                        .await
-                        .ok()
-                        .flatten()
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
             let provider =
                 detect_provider_label(&result.url).unwrap_or_else(|| "generic".to_string());
-            entries.push(TorrentSearchEntry {
-                provider,
-                result,
-                magnet,
-            });
+            entries.push(TorrentSearchEntry { provider, result });
         }
     }
 
@@ -847,6 +880,8 @@ fn extract_host(url: &str) -> Option<String> {
 fn format_torrent_entries(entries: &[TorrentSearchEntry]) -> String {
     let mut lines = Vec::new();
     lines.push(format!("Found {} torrent links:", entries.len()));
+    lines
+        .push("Use `torrent_extract_magnet` on selected URLs if you need magnet URIs.".to_string());
     lines.push(String::new());
 
     for (idx, entry) in entries.iter().enumerate() {
@@ -865,13 +900,30 @@ fn format_torrent_entries(entries: &[TorrentSearchEntry]) -> String {
         if !entry.result.snippet.trim().is_empty() {
             lines.push(format!("   snippet: {}", entry.result.snippet.trim()));
         }
-        if let Some(magnet) = &entry.magnet {
-            lines.push(format!("   magnet: {}", magnet));
-        }
         lines.push(String::new());
     }
 
     lines.join("\n")
+}
+
+async fn torrent_extract_magnet(page_url: &str, timeout_secs: u64) -> Result<String> {
+    let trimmed_url = page_url.trim();
+    if trimmed_url.is_empty() {
+        return Ok("No URL provided for magnet extraction.".to_string());
+    }
+    if !trimmed_url.starts_with("http://") && !trimmed_url.starts_with("https://") {
+        return Ok("Invalid URL: must start with http:// or https://".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
+        .timeout(std::time::Duration::from_secs(timeout_secs.clamp(3, 20)))
+        .build()?;
+
+    match fetch_first_magnet_link(&client, trimmed_url).await? {
+        Some(magnet) => Ok(format!("Magnet found:\n{}", magnet)),
+        None => Ok("No magnet URI found on that page.".to_string()),
+    }
 }
 
 async fn fetch_first_magnet_link(
@@ -1066,5 +1118,48 @@ async fn get_device_info() -> Result<String> {
         Ok("Could not retrieve device information.".to_string())
     } else {
         Ok(info.join("\n\n"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_torrent_providers_defaults_to_catalog() {
+        let providers = resolve_torrent_providers(None);
+        assert_eq!(providers.len(), TORRENT_PROVIDER_CATALOG.len());
+        assert!(providers.iter().any(|(name, _)| name == "1337x"));
+    }
+
+    #[test]
+    fn resolve_torrent_providers_filters_requested_names() {
+        let value = serde_json::json!(["1337x", "nyaa", "unknown"]);
+        let providers = resolve_torrent_providers(Some(&value));
+        assert_eq!(providers.len(), 2);
+        assert!(providers.iter().any(|(name, _)| name == "1337x"));
+        assert!(providers.iter().any(|(name, _)| name == "nyaa"));
+    }
+
+    #[test]
+    fn extract_first_magnet_link_parses_html() {
+        let html = r#"<a href="magnet:?xt=urn:btih:1234567890ABCDEF&amp;dn=demo">link</a>"#;
+        let magnet = extract_first_magnet_link(html).expect("expected magnet");
+        assert_eq!(magnet, "magnet:?xt=urn:btih:1234567890ABCDEF&dn=demo");
+    }
+
+    #[test]
+    fn format_torrent_entries_does_not_embed_magnet_lines() {
+        let entries = vec![TorrentSearchEntry {
+            provider: "1337x".to_string(),
+            result: SearchResult {
+                title: "Debian 12.8".to_string(),
+                snippet: "netinst".to_string(),
+                url: "https://1337x.to/example".to_string(),
+            },
+        }];
+        let formatted = format_torrent_entries(&entries);
+        assert!(formatted.contains("torrent_extract_magnet"));
+        assert!(!formatted.contains("magnet:"));
     }
 }
