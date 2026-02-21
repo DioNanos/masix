@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3-rc] - 2026-02-21
+
+### Added
+- **User memory catalog and isolation**
+  - Runtime now stores per-user memory under scoped paths:
+    - `memory/accounts/<account_tag>/users/<user_id>/chat_<chat>.jsonl`
+    - `memory/accounts/<account_tag>/users/<user_id>/summary_<chat>.md`
+  - Per-user `meta.json` catalog is maintained (`first_seen`, `last_seen`, channels, chat_ids).
+- **Telegram payload identity enrichment**
+  - Telegram adapter now forwards `from_user_id` and `chat_type` in inbound payloads.
+
+### Changed
+- **State isolation**
+  - Runtime language/provider/model chat-state is now scoped by `account + user` (not shared at chat level).
+- **Workdir isolation**
+  - Account-specific bot contexts now use isolated workdirs under `accounts/<account_tag>`.
+- **UX wording**
+  - `/provider` and `/model` help/output now explicitly refer to “this user”.
+
 ## [0.1.2-rc] - 2026-02-21
 
 ### Added
