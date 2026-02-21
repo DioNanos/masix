@@ -35,7 +35,7 @@ MasiX is a Rust-first automation runtime focused on Termux/Linux mobile workflow
 - SMS runtime watcher with optional Telegram forwarding
 - Android intent dispatch tool for Termux (`intent`)
 - Runtime command/tool inventory via `/tools`
-- Torrent search tool (`torrent_search`) for links and optional magnet extraction
+- Torrent tools split: `torrent_search` (links) + `torrent_extract_magnet` (on-demand magnet extraction)
 - Telegram command menu auto-sync (`setMyCommands`) at adapter startup
 - Account-scoped bot workdir isolation (`.../accounts/<account_tag>/...`)
 - User-scoped memory isolation and catalog (`memory/accounts/<account>/users/<user>/meta.json`)

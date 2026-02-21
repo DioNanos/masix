@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Torrent tools split and hardened**
+  - `torrent_search` now returns link results only and no longer fetches magnets inline.
+  - New `torrent_extract_magnet` built-in tool extracts a magnet URI from a selected result URL on demand.
+  - Torrent provider search now runs in parallel with per-provider and global time caps to avoid long blocking chains.
+- **Tool loop stability**
+  - Runtime now skips duplicate tool calls with identical arguments within the same turn to prevent repeated blocking loops.
+
 ## [0.1.6-rc] - 2026-02-21
 
 ### Fixed
