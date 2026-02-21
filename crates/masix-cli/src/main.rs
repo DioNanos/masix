@@ -22,6 +22,13 @@ use tracing::info;
 const PID_FILE: &str = "masix.pid";
 const ZAI_STANDARD_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
+type KnownProviderDef = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
 
 #[derive(Parser)]
 #[command(name = "masix")]
@@ -2105,28 +2112,175 @@ fn provider_target_key(provider: &masix_config::ProviderConfig) -> Option<String
     Some(format!("{}|{}|{}", provider_type, base_url, model))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ProviderReference {
+    Configured(String),
+    KnownButMissing { key: String, display_name: String },
+    Unknown(String),
+}
+
+fn configured_provider_names(config: &Config) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    for provider in &config.providers.providers {
+        if seen.insert(provider.name.clone()) {
+            names.push(provider.name.clone());
+        }
+    }
+    names
+}
+
+fn canonical_provider_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+fn resolve_provider_reference(
+    token: &str,
+    config: &Config,
+    known_providers: &[KnownProviderDef],
+) -> ProviderReference {
+    let token = token.trim();
+    if token.is_empty() {
+        return ProviderReference::Unknown(String::new());
+    }
+
+    let configured = configured_provider_names(config);
+    let normalized = canonical_provider_token(token);
+
+    if let Ok(index) = token.parse::<usize>() {
+        if index >= 1 && index <= configured.len() {
+            return ProviderReference::Configured(configured[index - 1].clone());
+        }
+    }
+
+    if let Some(name) = configured
+        .iter()
+        .find(|name| name.eq_ignore_ascii_case(token))
+        .cloned()
+    {
+        return ProviderReference::Configured(name);
+    }
+
+    if let Some(name) = configured
+        .iter()
+        .find(|name| canonical_provider_token(name) == normalized)
+        .cloned()
+    {
+        return ProviderReference::Configured(name);
+    }
+
+    for (key, display_name, _, _, _) in known_providers {
+        let key_normalized = canonical_provider_token(key);
+        let display_normalized = canonical_provider_token(display_name);
+        if token.eq_ignore_ascii_case(key)
+            || token.eq_ignore_ascii_case(display_name)
+            || normalized == key_normalized
+            || normalized == display_normalized
+        {
+            if let Some(name) = configured
+                .iter()
+                .find(|name| {
+                    name.eq_ignore_ascii_case(key)
+                        || canonical_provider_token(name) == key_normalized
+                })
+                .cloned()
+            {
+                return ProviderReference::Configured(name);
+            }
+
+            return ProviderReference::KnownButMissing {
+                key: (*key).to_string(),
+                display_name: (*display_name).to_string(),
+            };
+        }
+    }
+
+    ProviderReference::Unknown(token.to_string())
+}
+
+fn configure_known_provider_interactive(
+    config: &mut Config,
+    provider_key: &str,
+    known_providers: &[KnownProviderDef],
+) -> Result<String> {
+    let (key, display_name, base_url, default_model, provider_type) = known_providers
+        .iter()
+        .find(|(key, _, _, _, _)| *key == provider_key)
+        .ok_or_else(|| anyhow!("Unknown provider '{}'", provider_key))?;
+
+    println!("\nConfiguring {}...", display_name);
+
+    let existing_api_key = config
+        .providers
+        .providers
+        .iter()
+        .find(|p| p.name == *key)
+        .map(|p| p.api_key.clone())
+        .unwrap_or_default();
+    let model_default = config
+        .providers
+        .providers
+        .iter()
+        .find(|p| p.name == *key)
+        .and_then(|p| p.model.clone())
+        .unwrap_or_else(|| (*default_model).to_string());
+
+    let api_key = if *key == "llama.cpp" {
+        println!("llama.cpp runs locally, no API key needed.");
+        "not-needed".to_string()
+    } else {
+        prompt_input(&format!("{} API key", display_name), &existing_api_key)?
+    };
+
+    let resolved_base_url = if *key == "zai" {
+        let current_is_coding = config
+            .providers
+            .providers
+            .iter()
+            .find(|p| p.name == "zai")
+            .and_then(|p| p.base_url.as_deref())
+            .is_some_and(|url| url.contains("/coding/"));
+        if prompt_confirm("Use z.ai coding endpoint?", current_is_coding)? {
+            ZAI_CODING_BASE_URL.to_string()
+        } else {
+            ZAI_STANDARD_BASE_URL.to_string()
+        }
+    } else {
+        (*base_url).to_string()
+    };
+
+    let model = prompt_input("Model name", &model_default)?;
+    let provider = masix_config::ProviderConfig {
+        name: (*key).to_string(),
+        api_key,
+        base_url: Some(resolved_base_url),
+        model: Some(model),
+        provider_type: Some((*provider_type).to_string()),
+    };
+    let (replaced, stored_name) = upsert_provider(config, provider);
+    if replaced {
+        println!("✓ {} provider updated", display_name);
+    } else {
+        println!("✓ {} provider configured", display_name);
+    }
+
+    Ok(stored_name)
+}
+
 fn configure_default_profile_provider_chain(
     config: &mut Config,
     primary_provider: &str,
 ) -> Result<()> {
-    let mut provider_names = config
-        .providers
-        .providers
-        .iter()
-        .map(|p| p.name.clone())
-        .collect::<Vec<_>>();
-    provider_names.sort();
-    provider_names.dedup();
+    let known_providers = get_known_providers();
+    let provider_names = configured_provider_names(config);
 
     if !provider_names.iter().any(|name| name == primary_provider) {
         anyhow::bail!("Primary provider '{}' is not configured", primary_provider);
     }
-
-    let available_fallbacks = provider_names
-        .iter()
-        .filter(|name| name.as_str() != primary_provider)
-        .cloned()
-        .collect::<Vec<_>>();
 
     let existing_fallback = config
         .bots
@@ -2141,46 +2295,93 @@ fn configure_default_profile_provider_chain(
         .and_then(|profile| profile.vision_provider.clone())
         .unwrap_or_default();
 
-    println!("\nAvailable fallback providers:");
-    if available_fallbacks.is_empty() {
-        println!("  (none)");
-    } else {
-        for name in &available_fallbacks {
-            println!("  - {}", name);
+    println!("\nConfigured providers:");
+    for (index, name) in provider_names.iter().enumerate() {
+        if name == primary_provider {
+            println!("  {:2}. {} (primary)", index + 1, name);
+        } else {
+            println!("  {:2}. {}", index + 1, name);
         }
     }
+    println!(
+        "References accepted: configured name, numeric index, or known provider key/name (e.g. zai, z.ai, Google Gemini)."
+    );
+    println!("Missing known providers can be configured directly from this step.");
 
     let fallback_input = prompt_input(
-        "Fallback providers (comma-separated, empty for none)",
+        "Fallback providers (comma-separated names/indices, empty for none)",
         &existing_fallback,
     )?;
-    let fallback = parse_provider_list(&fallback_input);
-    let vision_input = prompt_input(
-        "Vision provider for media (provider name, empty for none)",
-        &existing_vision,
-    )?;
-    let vision_provider = if vision_input.trim().is_empty() {
-        None
-    } else {
-        Some(vision_input.trim().to_string())
-    };
+    let mut fallback = Vec::new();
+    let mut fallback_seen = HashSet::new();
+    for token in parse_provider_list(&fallback_input) {
+        let resolved = resolve_provider_reference(&token, config, &known_providers);
+        let resolved_name = match resolved {
+            ProviderReference::Configured(name) => name,
+            ProviderReference::KnownButMissing { key, display_name } => {
+                if !prompt_confirm(
+                    &format!(
+                        "Fallback provider '{}' is not configured. Configure now?",
+                        display_name
+                    ),
+                    true,
+                )? {
+                    anyhow::bail!("Fallback provider '{}' is not configured", token);
+                }
+                configure_known_provider_interactive(config, &key, &known_providers)?
+            }
+            ProviderReference::Unknown(value) => {
+                anyhow::bail!(
+                    "Unknown fallback provider reference '{}'. Use configured name/index or known provider key/name.",
+                    value
+                );
+            }
+        };
 
-    for name in &fallback {
-        if name == primary_provider {
+        if resolved_name == primary_provider {
             anyhow::bail!(
                 "Fallback chain cannot include the primary provider '{}'",
                 primary_provider
             );
         }
-        if !provider_names.iter().any(|provider| provider == name) {
-            anyhow::bail!("Fallback provider '{}' is not configured", name);
+        if fallback_seen.insert(resolved_name.clone()) {
+            fallback.push(resolved_name);
         }
     }
-    if let Some(name) = &vision_provider {
-        if !provider_names.iter().any(|provider| provider == name) {
-            anyhow::bail!("Vision provider '{}' is not configured", name);
+
+    let vision_input = prompt_input(
+        "Vision provider for media (name/index, empty for none)",
+        &existing_vision,
+    )?;
+    let vision_provider = if vision_input.trim().is_empty() {
+        None
+    } else {
+        match resolve_provider_reference(&vision_input, config, &known_providers) {
+            ProviderReference::Configured(name) => Some(name),
+            ProviderReference::KnownButMissing { key, display_name } => {
+                if !prompt_confirm(
+                    &format!(
+                        "Vision provider '{}' is not configured. Configure now?",
+                        display_name
+                    ),
+                    true,
+                )? {
+                    anyhow::bail!("Vision provider '{}' is not configured", vision_input);
+                }
+                Some(configure_known_provider_interactive(
+                    config,
+                    &key,
+                    &known_providers,
+                )?)
+            }
+            ProviderReference::Unknown(value) => {
+                anyhow::bail!(
+                    "Unknown vision provider reference '{}'. Use configured name/index or known provider key/name.",
+                    value
+                );
+            }
         }
-    }
+    };
 
     let (default_workdir, default_memory_file) = default_profile_paths(config);
     let bots = config.bots.get_or_insert_with(|| masix_config::BotsConfig {
@@ -2695,5 +2896,66 @@ mod tests {
         assert_eq!(config.providers.providers.len(), 1);
         assert_eq!(config.providers.default_provider, "zai-primary");
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn resolve_provider_reference_accepts_aliases_for_known_missing_provider() {
+        let mut config = Config::default();
+        config.providers.providers.push(make_provider(
+            "chutes",
+            "https://llm.chutes.ai/v1",
+            "zai-org/GLM-5-TEE",
+            "openai",
+            "k1",
+        ));
+        let known = get_known_providers();
+
+        assert_eq!(
+            resolve_provider_reference("z.ai", &config, &known),
+            ProviderReference::KnownButMissing {
+                key: "zai".to_string(),
+                display_name: "z.ai (GLM)".to_string()
+            }
+        );
+        assert_eq!(
+            resolve_provider_reference("Google Gemini", &config, &known),
+            ProviderReference::KnownButMissing {
+                key: "gemini".to_string(),
+                display_name: "Google Gemini".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_provider_reference_supports_index_and_case_insensitive_names() {
+        let mut config = Config::default();
+        config.providers.providers.push(make_provider(
+            "chutes",
+            "https://llm.chutes.ai/v1",
+            "zai-org/GLM-5-TEE",
+            "openai",
+            "k1",
+        ));
+        config.providers.providers.push(make_provider(
+            "zai",
+            "https://api.z.ai/api/paas/v4",
+            "glm-4.7",
+            "openai",
+            "k2",
+        ));
+        let known = get_known_providers();
+
+        assert_eq!(
+            resolve_provider_reference("1", &config, &known),
+            ProviderReference::Configured("chutes".to_string())
+        );
+        assert_eq!(
+            resolve_provider_reference("ZAI", &config, &known),
+            ProviderReference::Configured("zai".to_string())
+        );
+        assert_eq!(
+            resolve_provider_reference("z.ai", &config, &known),
+            ProviderReference::Configured("zai".to_string())
+        );
     }
 }
