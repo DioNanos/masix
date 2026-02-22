@@ -94,6 +94,16 @@ enum Commands {
         action: CronCommands,
     },
 
+    /// Configure system startup at boot (multi-platform)
+    Boot {
+        #[arg(short, long)]
+        enable: bool,
+        #[arg(short, long)]
+        disable: bool,
+        #[arg(short, long)]
+        status: bool,
+    },
+
     /// Termux specific commands
     Termux {
         #[command(subcommand)]
@@ -335,6 +345,11 @@ enum ProviderCommands {
     /// Remove a provider
     Remove {
         /// Provider name
+        name: String,
+    },
+    /// Set vision provider for media handling
+    Vision {
+        /// Provider name or 'auto' to use primary/fallback with vision capability
         name: String,
     },
 }
@@ -758,6 +773,35 @@ async fn main() -> Result<()> {
                         Err(e) => eprintln!("Error: {}", e),
                     }
                 }
+            }
+        }
+
+        Commands::Boot { enable, disable, status } => {
+            let boot_action = if enable {
+                BootAction::Enable
+            } else if disable {
+                BootAction::Disable
+            } else if status {
+                BootAction::Status
+            } else {
+                eprintln!("Use --enable, --disable, or --status");
+                return Ok(());
+            };
+            let masix_bin = std::env::current_exe().unwrap_or_else(|_| "masix".into());
+            let config_path_buf = cli.config.clone().map(std::path::PathBuf::from);
+            match manage_termux_boot(boot_action, &masix_bin, config_path_buf.as_deref()).await
+            {
+                Ok(status) => {
+                    println!("Script: {}", status.script_path.display());
+                    println!("Method: {}", status.method);
+                    println!("Enabled: {}", status.enabled);
+                    if matches!(boot_action, BootAction::Enable) && is_termux_environment() {
+                        println!(
+                            "Make sure Termux:Boot app is installed and permission granted."
+                        );
+                    }
+                }
+                Err(e) => eprintln!("Boot config error: {}", e),
             }
         }
 
@@ -1897,7 +1941,8 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
     println!("\n✅ Configuration saved to: {}", config_path.display());
     println!("\nNext steps:");
     println!("  1. Review config: masix config show");
-    println!("  2. Start daemon:  masix start");
+    println!("  2. Enable boot:   masix boot --enable");
+    println!("  3. Start daemon:  masix start");
 
     Ok(())
 }
@@ -2476,6 +2521,15 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
                     println!("    Key: {}", key_preview);
                     println!();
                 }
+                let vision = config
+                    .bots
+                    .as_ref()
+                    .and_then(|b| b.profiles.iter().find(|p| p.name == "default"))
+                    .and_then(|p| p.vision_provider.as_deref());
+                match vision {
+                    Some(v) => println!("Vision provider: {} (dedicated)", v),
+                    None => println!("Vision provider: auto (uses primary/fallback with vision)"),
+                }
             }
         }
         ProviderCommands::Add {
@@ -2563,6 +2617,45 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
             let config_toml = toml::to_string_pretty(&config)?;
             fs::write(&config_path, config_toml)?;
             println!("✅ Provider '{}' removed", name);
+        }
+        ProviderCommands::Vision { name } => {
+            if name.to_lowercase() == "auto" {
+                if let Some(bots) = config.bots.as_mut() {
+                    if let Some(profile) = bots.profiles.iter_mut().find(|p| p.name == "default") {
+                        profile.vision_provider = None;
+                    }
+                }
+                let config_toml = toml::to_string_pretty(&config)?;
+                fs::write(&config_path, config_toml)?;
+                println!("✅ Vision provider set to auto (use primary/fallback with vision capability)");
+            } else {
+                let exists = config.providers.providers.iter().any(|p| p.name == name);
+                if !exists {
+                    anyhow::bail!("Provider '{}' not found", name);
+                }
+                let (default_workdir, default_memory_file) = default_profile_paths(&config);
+                let default_provider = config.providers.default_provider.clone();
+                let bots = config.bots.get_or_insert_with(|| masix_config::BotsConfig {
+                    strict_account_profile_mapping: None,
+                    profiles: Vec::new(),
+                });
+                if let Some(profile) = bots.profiles.iter_mut().find(|p| p.name == "default") {
+                    profile.vision_provider = Some(name.clone());
+                } else {
+                    bots.profiles.push(masix_config::BotProfileConfig {
+                        name: "default".to_string(),
+                        workdir: default_workdir,
+                        memory_file: default_memory_file,
+                        provider_primary: default_provider,
+                        vision_provider: Some(name.clone()),
+                        provider_fallback: Vec::new(),
+                        retry: None,
+                    });
+                }
+                let config_toml = toml::to_string_pretty(&config)?;
+                fs::write(&config_path, config_toml)?;
+                println!("✅ Vision provider set to '{}'", name);
+            }
         }
     }
 
@@ -2798,21 +2891,20 @@ fn configure_default_profile_provider_chain(
         .and_then(|profile| profile.vision_provider.clone())
         .unwrap_or_default();
 
-    println!("\nConfigured providers:");
-    for (index, name) in provider_names.iter().enumerate() {
-        if name == primary_provider {
-            println!("  {:2}. {} (primary)", index + 1, name);
+    println!("\nAvailable providers for fallback:");
+    for (i, (_, name, _, _, _)) in known_providers.iter().enumerate() {
+        let configured = provider_names.iter().find(|p| *p == *name);
+        let marker = if configured.is_some() { " [configured]" } else { "" };
+        if *name == primary_provider {
+            println!("  {:2}. {} (primary){}", i + 1, name, marker);
         } else {
-            println!("  {:2}. {}", index + 1, name);
+            println!("  {:2}. {}{}", i + 1, name, marker);
         }
     }
-    println!(
-        "References accepted: configured name, numeric index, or known provider key/name (e.g. zai, z.ai, Google Gemini)."
-    );
-    println!("Missing known providers can be configured directly from this step.");
+    println!("Enter number, provider name, or leave empty for no fallback.");
 
     let fallback_input = prompt_input(
-        "Fallback providers (comma-separated names/indices, empty for none)",
+        "Fallback providers (comma-separated, empty for none)",
         &existing_fallback,
     )?;
     let mut fallback = Vec::new();
@@ -2835,7 +2927,7 @@ fn configure_default_profile_provider_chain(
             }
             ProviderReference::Unknown(value) => {
                 anyhow::bail!(
-                    "Unknown fallback provider reference '{}'. Use configured name/index or known provider key/name.",
+                    "Unknown fallback provider reference '{}'. Use number or provider name.",
                     value
                 );
             }
@@ -2852,11 +2944,20 @@ fn configure_default_profile_provider_chain(
         }
     }
 
+    println!("\nAvailable providers for vision:");
+    println!("  {:2}. auto (use primary/fallback with vision capability)", 0);
+    for (i, (_, name, _, _, _)) in known_providers.iter().enumerate() {
+        let configured = provider_names.iter().find(|p| *p == *name);
+        let marker = if configured.is_some() { " [configured]" } else { "" };
+        println!("  {:2}. {}{}", i + 1, name, marker);
+    }
+    println!("Enter 0 for auto, or number/provider name for dedicated vision provider.");
+
     let vision_input = prompt_input(
-        "Vision provider for media (name/index, empty for none)",
+        "Vision provider (0=auto, or select)",
         &existing_vision,
     )?;
-    let vision_provider = if vision_input.trim().is_empty() {
+    let vision_provider = if vision_input.trim().is_empty() || vision_input.trim() == "0" || vision_input.to_lowercase() == "auto" {
         None
     } else {
         match resolve_provider_reference(&vision_input, config, &known_providers) {
@@ -2879,7 +2980,7 @@ fn configure_default_profile_provider_chain(
             }
             ProviderReference::Unknown(value) => {
                 anyhow::bail!(
-                    "Unknown vision provider reference '{}'. Use configured name/index or known provider key/name.",
+                    "Unknown vision provider reference '{}'. Use 0 for auto, or number/provider name.",
                     value
                 );
             }
