@@ -40,6 +40,10 @@ pub struct TelegramMessage {
     pub document: Option<TelegramDocument>,
     #[serde(default)]
     pub video: Option<TelegramVideo>,
+    #[serde(default)]
+    pub voice: Option<TelegramVoice>,
+    #[serde(default)]
+    pub audio: Option<TelegramAudio>,
     pub chat: TelegramChat,
     pub from: Option<TelegramUser>,
     #[serde(default)]
@@ -75,6 +79,34 @@ pub struct TelegramVideo {
     pub width: Option<i64>,
     #[serde(default)]
     pub height: Option<i64>,
+    #[serde(default)]
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramVoice {
+    pub file_id: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub duration: Option<i64>,
+    #[serde(default)]
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramAudio {
+    pub file_id: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub duration: Option<i64>,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub performer: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub file_size: Option<i64>,
 }
@@ -574,6 +606,10 @@ impl TelegramAdapter {
                     Some("[Media: image_document]".to_string())
                 } else if message.video.is_some() {
                     Some("[Media: video]".to_string())
+                } else if message.voice.is_some() {
+                    Some("[Media: voice]".to_string())
+                } else if message.audio.is_some() {
+                    Some("[Media: audio]".to_string())
                 } else {
                     None
                 }
@@ -679,6 +715,31 @@ impl TelegramAdapter {
                 "width": video.width,
                 "height": video.height,
                 "file_size": video.file_size,
+                "caption": caption,
+            }));
+        }
+
+        if let Some(voice) = &message.voice {
+            return Some(serde_json::json!({
+                "kind": "voice",
+                "file_id": voice.file_id,
+                "mime_type": voice.mime_type,
+                "duration": voice.duration,
+                "file_size": voice.file_size,
+                "caption": caption,
+            }));
+        }
+
+        if let Some(audio) = &message.audio {
+            return Some(serde_json::json!({
+                "kind": "audio",
+                "file_id": audio.file_id,
+                "mime_type": audio.mime_type,
+                "duration": audio.duration,
+                "file_name": audio.file_name,
+                "performer": audio.performer,
+                "title": audio.title,
+                "file_size": audio.file_size,
                 "caption": caption,
             }));
         }

@@ -38,6 +38,14 @@ enabled = true
 # forward_to_telegram_account_tag = "123456789"
 # forward_prefix = "SMS Alert"
 
+[stt]
+enabled = false
+engine = "local_whisper_cpp"
+# local_model_path = "~/.masix/models/whisper/whisper_base.bin"
+# local_bin = "whisper-cli"
+# local_threads = 2
+# local_language = "it"
+
 [mcp]
 enabled = true
 

@@ -291,6 +291,8 @@ enum ConfigCommands {
     },
     /// Configure SMS watcher interactively
     Sms,
+    /// Configure local STT (whisper.cpp) interactively
+    Stt,
     /// Configure LLM provider interactively
     Provider {
         /// Provider name (openai, openrouter, zai, chutes, llama.cpp, xai, groq, etc.)
@@ -886,6 +888,9 @@ async fn main() -> Result<()> {
             }
             ConfigCommands::Sms => {
                 run_sms_wizard(cli.config.clone())?;
+            }
+            ConfigCommands::Stt => {
+                run_stt_wizard(cli.config.clone())?;
             }
             ConfigCommands::Provider { name } => {
                 run_provider_wizard(cli.config.clone(), name)?;
@@ -1544,6 +1549,7 @@ fn create_default_config(config_path: Option<String>) -> Result<()> {
     println!("  masix config telegram   - Configure Telegram bot");
     println!("  masix config telegram --list - List Telegram bots/chats");
     println!("  masix config sms        - Configure SMS watcher");
+    println!("  masix config stt        - Configure local STT (whisper.cpp)");
     println!("  masix config provider   - Configure LLM provider");
 
     Ok(())
@@ -1931,6 +1937,7 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
 
     // SMS watcher
     configure_sms_watcher(&mut config)?;
+    configure_local_stt(&mut config)?;
 
     config.validate()?;
 
@@ -1981,6 +1988,109 @@ fn run_sms_wizard(config_path: Option<String>) -> Result<()> {
 
     println!("\n✅ SMS configuration saved");
     println!("Config saved to: {}", config_path.display());
+    Ok(())
+}
+
+fn run_stt_wizard(config_path: Option<String>) -> Result<()> {
+    println!("╔════════════════════════════════════════════╗");
+    println!("║         Local STT Configuration            ║");
+    println!("╚════════════════════════════════════════════╝");
+    println!();
+
+    let config_path = get_config_path(config_path)?;
+    let mut config = if config_path.exists() {
+        load_config_for_wizard(&config_path)?
+    } else {
+        Config::default()
+    };
+
+    configure_local_stt(&mut config)?;
+    config.validate()?;
+
+    let config_toml = toml::to_string_pretty(&config)?;
+    fs::write(&config_path, config_toml)?;
+
+    println!("\n✅ STT configuration saved");
+    println!("Config saved to: {}", config_path.display());
+    Ok(())
+}
+
+fn configure_local_stt(config: &mut Config) -> Result<()> {
+    println!("\n── Local STT (whisper.cpp) Setup ──");
+    print_stt_prereq_status();
+
+    let current = config.stt.clone().unwrap_or_default();
+    if prompt_confirm(
+        "Enable local STT for Telegram voice/audio?",
+        current.enabled,
+    )? {
+        let data_dir = get_data_dir(config);
+        let default_model_path = current.local_model_path.clone().unwrap_or_else(|| {
+            data_dir
+                .join("models")
+                .join("whisper")
+                .join("whisper_base.bin")
+                .display()
+                .to_string()
+        });
+        let model_path = prompt_input("Local model path (ggml*.bin)", &default_model_path)?;
+        if model_path.trim().is_empty() {
+            anyhow::bail!("Local STT requires a model path");
+        }
+
+        let bin_default = current.local_bin.clone().unwrap_or_default();
+        let bin_input = prompt_input(
+            "Whisper binary path (empty/auto = whisper-cli from PATH)",
+            &bin_default,
+        )?;
+        let local_bin = if bin_input.trim().is_empty() || bin_input.trim().eq_ignore_ascii_case("auto") {
+            None
+        } else {
+            Some(bin_input.trim().to_string())
+        };
+
+        let threads_default = current.local_threads.unwrap_or(2).to_string();
+        let threads_input = prompt_input("Whisper threads (1-32)", &threads_default)?;
+        let threads = threads_input
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| anyhow!("Invalid STT threads '{}'", threads_input))?;
+        if !(1..=32).contains(&threads) {
+            anyhow::bail!("Whisper threads must be in range 1..=32");
+        }
+
+        let language_default = current
+            .local_language
+            .clone()
+            .unwrap_or_else(|| "it".to_string());
+        let language_input = prompt_input(
+            "Language hint (auto for detection, e.g. it/en)",
+            &language_default,
+        )?;
+        let local_language = if language_input.trim().is_empty()
+            || language_input.trim().eq_ignore_ascii_case("auto")
+        {
+            None
+        } else {
+            Some(language_input.trim().to_string())
+        };
+
+        config.stt = Some(masix_config::SttConfig {
+            enabled: true,
+            engine: "local_whisper_cpp".to_string(),
+            local_model_path: Some(model_path.trim().to_string()),
+            local_bin,
+            local_threads: Some(threads),
+            local_language,
+        });
+        println!("✓ Local STT configured");
+    } else {
+        let mut disabled = current;
+        disabled.enabled = false;
+        config.stt = Some(disabled);
+        println!("✓ Local STT disabled");
+    }
+
     Ok(())
 }
 
@@ -2097,6 +2207,37 @@ fn print_sms_prereq_status() {
             missing.join(", ")
         );
         println!("Install/verify: `pkg install termux-api` and Termux:API app permissions.");
+    }
+}
+
+fn print_stt_prereq_status() {
+    let whisper = command_exists("whisper-cli");
+    let ffmpeg = command_exists("ffmpeg");
+
+    println!(
+        "STT prerequisites: whisper-cli={}, ffmpeg={}",
+        if whisper { "OK" } else { "missing" },
+        if ffmpeg { "OK" } else { "missing" }
+    );
+
+    if !whisper {
+        if is_termux_environment() {
+            println!("Install whisper-cli on Termux: `pkg install whisper-cpp`");
+        } else if cfg!(target_os = "macos") {
+            println!("Install whisper-cli on macOS: `brew install whisper-cpp`");
+        } else {
+            println!("Install whisper-cli (whisper.cpp CLI) and ensure it is on PATH.");
+        }
+    }
+
+    if !ffmpeg {
+        if is_termux_environment() {
+            println!("Install ffmpeg on Termux: `pkg install ffmpeg`");
+        } else if cfg!(target_os = "macos") {
+            println!("Install ffmpeg on macOS: `brew install ffmpeg`");
+        } else {
+            println!("Install ffmpeg (required for Telegram voice/ogg-opus conversion).");
+        }
     }
 }
 

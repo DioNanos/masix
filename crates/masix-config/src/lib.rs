@@ -15,6 +15,7 @@ pub struct Config {
     pub telegram: Option<TelegramConfig>,
     pub whatsapp: Option<WhatsappConfig>,
     pub sms: Option<SmsConfig>,
+    pub stt: Option<SttConfig>,
     pub mcp: Option<McpConfig>,
     #[serde(default)]
     pub providers: ProvidersConfig,
@@ -103,6 +104,31 @@ pub struct SmsConfig {
     pub forward_prefix: Option<String>,
     #[serde(default)]
     pub rules: Vec<SmsRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SttConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_stt_engine")]
+    pub engine: String,
+    pub local_model_path: Option<String>,
+    pub local_bin: Option<String>,
+    pub local_threads: Option<u32>,
+    pub local_language: Option<String>,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            engine: default_stt_engine(),
+            local_model_path: None,
+            local_bin: None,
+            local_threads: Some(2),
+            local_language: Some("it".to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +242,10 @@ fn default_true() -> bool {
 
 fn default_update_channel() -> String {
     "latest".to_string()
+}
+
+fn default_stt_engine() -> String {
+    "local_whisper_cpp".to_string()
 }
 
 impl Config {
@@ -523,6 +553,34 @@ impl Config {
             }
         }
 
+        if let Some(stt) = &self.stt {
+            let engine = stt.engine.trim();
+            if engine.is_empty() {
+                anyhow::bail!("stt.engine cannot be empty");
+            }
+            if engine != "local_whisper_cpp" {
+                anyhow::bail!(
+                    "stt.engine '{}' is unsupported (supported: local_whisper_cpp)",
+                    engine
+                );
+            }
+            if stt.enabled {
+                let model_path = stt
+                    .local_model_path
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if model_path.is_empty() {
+                    anyhow::bail!("stt.local_model_path is required when stt.enabled=true");
+                }
+                if let Some(threads) = stt.local_threads {
+                    if threads == 0 || threads > 32 {
+                        anyhow::bail!("stt.local_threads must be in range 1..=32");
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -816,6 +874,51 @@ default_provider = "openai"
 [[providers.providers]]
 name = "openai"
 api_key = "k"
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_local_stt_configuration() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+
+[stt]
+enabled = true
+engine = "local_whisper_cpp"
+local_model_path = "~/.masix/models/whisper/whisper_base.bin"
+local_threads = 2
+local_language = "it"
+"#,
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_stt_enabled_without_model_path() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+
+[stt]
+enabled = true
+engine = "local_whisper_cpp"
 "#,
         );
         assert!(cfg.validate().is_err());

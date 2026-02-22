@@ -8,7 +8,7 @@ pub mod search;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use builtin_tools::{execute_builtin_tool, get_builtin_tool_definitions, is_builtin_tool};
-use masix_config::{Config, RetryPolicyConfig};
+use masix_config::{Config, RetryPolicyConfig, SttConfig};
 use masix_exec::{
     is_termux_environment, manage_termux_boot, manage_termux_wake_lock, run_command, BootAction,
     ExecMode, ExecPolicy, WakeLockAction,
@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
+use tokio::process::Command as TokioCommand;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, error, info, warn};
 
@@ -80,6 +81,7 @@ struct TelegramGetFileResult {
 struct MediaFileReference {
     file_id: String,
     mime_type: String,
+    file_name: Option<String>,
     caption: Option<String>,
 }
 
@@ -1216,6 +1218,26 @@ impl MasixRuntime {
                 }];
                 let mut user_message =
                     Self::enrich_user_message_with_media(text, &envelope.payload);
+                let stt_transcript = match Self::transcribe_media_with_local_stt(
+                    config,
+                    account_tag.as_deref(),
+                    &envelope.payload,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        warn!(
+                            "Local STT failed for profile '{}': {}",
+                            bot_context.profile_name, e
+                        );
+                        None
+                    }
+                };
+                if let Some(transcript) = &stt_transcript {
+                    user_message.push_str("\n\n[STT Transcript]\n");
+                    user_message.push_str(transcript);
+                }
                 let vision_analysis = match Self::analyze_media_with_vision_provider(
                     config,
                     &bot_context,
@@ -1603,11 +1625,54 @@ impl MasixRuntime {
             .and_then(|v| v.as_i64())
             .map(|v| v.to_string())
             .unwrap_or_else(|| "n/a".to_string());
+        let duration = media
+            .get("duration")
+            .and_then(|v| v.as_i64())
+            .map(|v| v.to_string());
+        let file_name = media
+            .get("file_name")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .unwrap_or("n/a");
+        let title = media
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .unwrap_or("n/a");
+        let performer = media
+            .get("performer")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .unwrap_or("n/a");
 
-        Some(format!(
-            "kind: {}\nfile_id: {}\nmime_type: {}\nsize: {} bytes\nresolution: {}x{}\ncaption: {}",
-            kind, file_id, mime_type, file_size, width, height, caption
-        ))
+        let mut lines = vec![
+            format!("kind: {}", kind),
+            format!("file_id: {}", file_id),
+            format!("mime_type: {}", mime_type),
+            format!("size: {} bytes", file_size),
+        ];
+
+        if width != "n/a" || height != "n/a" {
+            lines.push(format!("resolution: {}x{}", width, height));
+        }
+        if let Some(duration) = duration {
+            lines.push(format!("duration: {}s", duration));
+        }
+        if file_name != "n/a" {
+            lines.push(format!("file_name: {}", file_name));
+        }
+        if title != "n/a" {
+            lines.push(format!("title: {}", title));
+        }
+        if performer != "n/a" {
+            lines.push(format!("performer: {}", performer));
+        }
+        lines.push(format!("caption: {}", caption));
+
+        Some(lines.join("\n"))
     }
 
     fn media_file_reference_from_payload(
@@ -1624,25 +1689,42 @@ impl MasixRuntime {
             .get("kind")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
+        let file_name = media
+            .get("file_name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_string());
 
         let mut mime_type = media
             .get("mime_type")
             .and_then(|v| v.as_str())
             .map(|v| v.trim().to_string())
-            .unwrap_or_else(|| {
-                if kind == "photo" {
-                    "image/jpeg".to_string()
-                } else {
-                    "application/octet-stream".to_string()
-                }
+            .or_else(|| {
+                file_name
+                    .as_deref()
+                    .and_then(Self::guess_mime_from_file_name)
+            })
+            .unwrap_or_else(|| match kind {
+                "photo" | "image_document" => "image/jpeg".to_string(),
+                "voice" => "audio/ogg".to_string(),
+                "audio" => "audio/mpeg".to_string(),
+                _ => "application/octet-stream".to_string(),
             });
 
-        if mime_type == "application/octet-stream" && kind == "image_document" {
-            mime_type = "image/jpeg".to_string();
-        }
+        if mime_type == "application/octet-stream" {
+            if let Some(name) = file_name.as_deref() {
+                if let Some(guess) = Self::guess_mime_from_file_name(name) {
+                    mime_type = guess;
+                }
+            }
 
-        if !mime_type.starts_with("image/") {
-            return None;
+            if mime_type == "application/octet-stream" && kind == "image_document" {
+                mime_type = "image/jpeg".to_string();
+            }
+            if mime_type == "application/octet-stream" && kind == "voice" {
+                mime_type = "audio/ogg".to_string();
+            }
         }
 
         let caption = media
@@ -1655,8 +1737,51 @@ impl MasixRuntime {
         Some(MediaFileReference {
             file_id,
             mime_type,
+            file_name,
             caption,
         })
+    }
+
+    fn audio_media_file_reference_from_payload(
+        payload: &serde_json::Value,
+    ) -> Option<MediaFileReference> {
+        let media = payload.get("media")?;
+        let kind = media
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        if kind != "voice" && kind != "audio" {
+            return None;
+        }
+
+        let media_ref = Self::media_file_reference_from_payload(payload)?;
+        if media_ref.mime_type.starts_with("audio/") || kind == "voice" || kind == "audio" {
+            Some(media_ref)
+        } else {
+            None
+        }
+    }
+
+    fn guess_mime_from_file_name(file_name: &str) -> Option<String> {
+        let ext = std::path::Path::new(file_name)
+            .extension()
+            .and_then(|value| value.to_str())?
+            .to_ascii_lowercase();
+        let mime = match ext.as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "png" => "image/png",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            "mp3" => "audio/mpeg",
+            "wav" => "audio/wav",
+            "ogg" => "audio/ogg",
+            "oga" => "audio/ogg",
+            "opus" => "audio/opus",
+            "m4a" => "audio/mp4",
+            "mp4" => "video/mp4",
+            _ => return None,
+        };
+        Some(mime.to_string())
     }
 
     fn resolve_telegram_bot_token(config: &Config, account_tag: Option<&str>) -> Option<String> {
@@ -1883,6 +2008,9 @@ impl MasixRuntime {
         let Some(media_ref) = Self::media_file_reference_from_payload(payload) else {
             return Ok(None);
         };
+        if !media_ref.mime_type.starts_with("image/") {
+            return Ok(None);
+        }
 
         let provider = config
             .providers
@@ -1931,6 +2059,401 @@ impl MasixRuntime {
             analysis = format!("{}...", analysis.chars().take(4000).collect::<String>());
         }
         Ok(Some(analysis))
+    }
+
+    async fn transcribe_media_with_local_stt(
+        config: &Config,
+        account_tag: Option<&str>,
+        payload: &serde_json::Value,
+    ) -> Result<Option<String>> {
+        let Some(stt) = config.stt.as_ref() else {
+            return Ok(None);
+        };
+        if !stt.enabled {
+            return Ok(None);
+        }
+        if stt.engine.trim() != "local_whisper_cpp" {
+            return Ok(None);
+        }
+
+        let Some(media_ref) = Self::audio_media_file_reference_from_payload(payload) else {
+            return Ok(None);
+        };
+
+        let (media_bytes, detected_mime) =
+            Self::fetch_telegram_media_bytes(config, account_tag, &media_ref.file_id).await?;
+        if media_bytes.is_empty() {
+            return Ok(None);
+        }
+        if media_bytes.len() > 25 * 1024 * 1024 {
+            anyhow::bail!(
+                "Media too large for local STT ({} bytes)",
+                media_bytes.len()
+            );
+        }
+
+        let mime_type = if media_ref.mime_type == "application/octet-stream" {
+            detected_mime.unwrap_or(media_ref.mime_type)
+        } else {
+            media_ref.mime_type
+        };
+
+        let mut transcript = Self::run_local_whisper_cpp(
+            config,
+            stt,
+            &media_bytes,
+            &mime_type,
+            media_ref.file_name.as_deref(),
+        )
+        .await?;
+
+        transcript = transcript.trim().to_string();
+        if transcript.is_empty() {
+            return Ok(None);
+        }
+        if transcript.chars().count() > 4000 {
+            transcript = format!("{}...", transcript.chars().take(4000).collect::<String>());
+        }
+        Ok(Some(transcript))
+    }
+
+    async fn run_local_whisper_cpp(
+        config: &Config,
+        stt: &SttConfig,
+        audio_bytes: &[u8],
+        mime_type: &str,
+        file_name: Option<&str>,
+    ) -> Result<String> {
+        let model_raw = stt
+            .local_model_path
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default();
+        if model_raw.is_empty() {
+            anyhow::bail!("stt.local_model_path is not configured");
+        }
+
+        let data_dir = Self::data_dir_from_config(config)?;
+        let model_path = Self::resolve_path_with_base(model_raw, &data_dir)?;
+        if !model_path.exists() {
+            anyhow::bail!("STT model file not found: {}", model_path.display());
+        }
+
+        let bin_config = stt
+            .local_bin
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let whisper_bin = if let Some(value) = bin_config {
+            PathBuf::from(value)
+        } else if Self::is_command_available("whisper-cli") {
+            PathBuf::from("whisper-cli")
+        } else {
+            let bundled = data_dir.join("bin").join("whisper-cli");
+            if bundled.exists() {
+                bundled
+            } else {
+                anyhow::bail!(
+                    "whisper-cli not found. Set stt.local_bin or install whisper.cpp CLI."
+                );
+            }
+        };
+        if !Self::is_command_available_path(&whisper_bin) {
+            anyhow::bail!("STT binary not found/executable: {}", whisper_bin.display());
+        }
+
+        let threads = stt.local_threads.unwrap_or(2).clamp(1, 32);
+        let language = stt
+            .local_language
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        let work_dir = std::env::temp_dir().join(format!(
+            "masix-stt-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_millis()
+        ));
+        fs::create_dir_all(&work_dir).await?;
+
+        let result: Result<String> = async {
+            let ext = Self::audio_extension_for_input(mime_type, file_name);
+            let input_path = work_dir.join(format!("input.{}", ext));
+            fs::write(&input_path, audio_bytes).await?;
+
+            let mut whisper_input_path = input_path.clone();
+            if Self::mime_requires_ffmpeg_conversion(mime_type, file_name) {
+                if !Self::is_command_available("ffmpeg") {
+                    anyhow::bail!(
+                        "ffmpeg is required for '{}' audio (voice/ogg-opus). Install ffmpeg.",
+                        mime_type
+                    );
+                }
+
+                let converted = work_dir.join("input.wav");
+                let ffmpeg_output = TokioCommand::new("ffmpeg")
+                    .arg("-y")
+                    .arg("-i")
+                    .arg(&input_path)
+                    .arg("-ar")
+                    .arg("16000")
+                    .arg("-ac")
+                    .arg("1")
+                    .arg(&converted)
+                    .output()
+                    .await?;
+                if !ffmpeg_output.status.success() {
+                    anyhow::bail!(
+                        "ffmpeg conversion failed: {}",
+                        String::from_utf8_lossy(&ffmpeg_output.stderr)
+                            .trim()
+                            .chars()
+                            .take(240)
+                            .collect::<String>()
+                    );
+                }
+                whisper_input_path = converted;
+            }
+
+            let out_prefix = work_dir.join("transcript");
+            let mut cmd = TokioCommand::new(&whisper_bin);
+            cmd.arg("-m")
+                .arg(&model_path)
+                .arg("-f")
+                .arg(&whisper_input_path)
+                .arg("-of")
+                .arg(&out_prefix)
+                .arg("-otxt")
+                .arg("-t")
+                .arg(threads.to_string());
+            if let Some(language) = language {
+                cmd.arg("-l").arg(language);
+            }
+
+            let output =
+                tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output()).await;
+            let output = match output {
+                Ok(inner) => inner?,
+                Err(_) => anyhow::bail!("whisper-cli timed out after 120 seconds"),
+            };
+            if !output.status.success() {
+                anyhow::bail!(
+                    "whisper-cli failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                        .trim()
+                        .chars()
+                        .take(320)
+                        .collect::<String>()
+                );
+            }
+
+            Self::discover_whisper_transcript(
+                &work_dir,
+                &out_prefix,
+                &whisper_input_path,
+                &output.stdout,
+            )
+            .await
+        }
+        .await;
+
+        if let Err(err) = fs::remove_dir_all(&work_dir).await {
+            debug!(
+                "Failed to cleanup temporary STT directory '{}': {}",
+                work_dir.display(),
+                err
+            );
+        }
+
+        result
+    }
+
+    async fn discover_whisper_transcript(
+        work_dir: &Path,
+        out_prefix: &Path,
+        whisper_input_path: &Path,
+        stdout: &[u8],
+    ) -> Result<String> {
+        let candidate_paths = vec![
+            PathBuf::from(format!("{}.txt", out_prefix.display())),
+            PathBuf::from(format!("{}.txt", whisper_input_path.display())),
+            whisper_input_path.with_extension("txt"),
+            work_dir.join("transcript.txt"),
+        ];
+
+        let mut seen = HashSet::new();
+        for candidate in candidate_paths {
+            if !seen.insert(candidate.clone()) {
+                continue;
+            }
+            if !candidate.exists() {
+                continue;
+            }
+            let raw = fs::read_to_string(&candidate).await.unwrap_or_default();
+            if let Some(text) = Self::normalize_whisper_transcript(&raw) {
+                return Ok(text);
+            }
+        }
+
+        let mut newest_txt: Option<(std::time::SystemTime, PathBuf)> = None;
+        let mut dir = fs::read_dir(work_dir).await?;
+        while let Some(entry) = dir.next_entry().await? {
+            let path = entry.path();
+            let is_txt = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"));
+            if !is_txt {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .await
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            match &newest_txt {
+                Some((current, _)) if modified <= *current => {}
+                _ => newest_txt = Some((modified, path)),
+            }
+        }
+        if let Some((_, candidate)) = newest_txt {
+            let raw = fs::read_to_string(candidate).await.unwrap_or_default();
+            if let Some(text) = Self::normalize_whisper_transcript(&raw) {
+                return Ok(text);
+            }
+        }
+
+        let stdout_text = String::from_utf8_lossy(stdout);
+        if let Some(text) = Self::normalize_whisper_transcript(&stdout_text) {
+            return Ok(text);
+        }
+
+        anyhow::bail!("whisper-cli completed but transcript output was not found");
+    }
+
+    fn normalize_whisper_transcript(raw: &str) -> Option<String> {
+        let mut parts = Vec::new();
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.starts_with("main:")
+                || lower.starts_with("system_info:")
+                || lower.starts_with("loading model")
+                || lower.starts_with("processing")
+                || lower.starts_with("output")
+                || lower.starts_with("whisper")
+                || lower.starts_with("usage:")
+            {
+                continue;
+            }
+
+            let mut cleaned = trimmed;
+            if trimmed.starts_with('[') {
+                if let Some(end) = trimmed.rfind(']') {
+                    if end + 1 < trimmed.len() {
+                        cleaned = trimmed[end + 1..].trim();
+                    }
+                }
+            }
+            if cleaned.is_empty() {
+                continue;
+            }
+            parts.push(cleaned.to_string());
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" "))
+        }
+    }
+
+    fn audio_extension_for_input(mime_type: &str, file_name: Option<&str>) -> String {
+        if let Some(file_name) = file_name {
+            if let Some(ext) = std::path::Path::new(file_name)
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase())
+            {
+                if !ext.is_empty() {
+                    return ext;
+                }
+            }
+        }
+
+        let mime = mime_type.to_ascii_lowercase();
+        if mime.contains("wav") {
+            "wav".to_string()
+        } else if mime.contains("mpeg") || mime.contains("mp3") {
+            "mp3".to_string()
+        } else if mime.contains("mp4") || mime.contains("m4a") {
+            "m4a".to_string()
+        } else if mime.contains("ogg") || mime.contains("opus") {
+            "ogg".to_string()
+        } else {
+            "bin".to_string()
+        }
+    }
+
+    fn mime_requires_ffmpeg_conversion(mime_type: &str, file_name: Option<&str>) -> bool {
+        let mime = mime_type.to_ascii_lowercase();
+        if mime.contains("opus") {
+            return true;
+        }
+        if mime.contains("ogg") && !mime.contains("vorbis") {
+            return true;
+        }
+
+        if let Some(file_name) = file_name {
+            let ext = std::path::Path::new(file_name)
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            return ext == "opus" || ext == "ogg";
+        }
+
+        false
+    }
+
+    fn is_command_available(binary: &str) -> bool {
+        let path = PathBuf::from(binary);
+        if path.components().count() > 1 {
+            return path.exists();
+        }
+        std::env::var_os("PATH")
+            .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(binary).exists()))
+    }
+
+    fn is_command_available_path(path: &Path) -> bool {
+        if path.components().count() > 1 {
+            return path.exists();
+        }
+        path.to_str().is_some_and(Self::is_command_available)
+    }
+
+    fn data_dir_from_config(config: &Config) -> Result<PathBuf> {
+        if let Some(data_dir) = &config.core.data_dir {
+            if data_dir == "~" || data_dir.starts_with("~/") {
+                let home =
+                    dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Home directory not found"))?;
+                if data_dir == "~" {
+                    Ok(home)
+                } else {
+                    Ok(home.join(data_dir.trim_start_matches("~/")))
+                }
+            } else {
+                Ok(PathBuf::from(data_dir))
+            }
+        } else {
+            let home =
+                dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Home directory not found"))?;
+            Ok(home.join(".masix"))
+        }
     }
 
     async fn execute_cron_tool(
