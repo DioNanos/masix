@@ -16,6 +16,7 @@ MasiX is a Rust-first messaging automation runtime inspired by OpenClaw, focused
 - Guarded command execution (`/exec`, `/termux`) with allowlists
 - Termux boot automation (`masix termux boot enable|disable|status`)
 - Optional WhatsApp and SMS integrations
+- Optional local STT via whisper.cpp (`masix config stt`)
 - SOUL.md startup memory context
 - Startup auto-update check/apply with configurable toggle in `config.toml` (`[updates]`)
 
@@ -42,6 +43,7 @@ masix start
 masix start
 masix config show
 masix config validate
+masix config stt
 masix cron add 'domani alle 9 "Daily check"'
 masix cron list
 masix cron cancel 1

@@ -1,6 +1,6 @@
 # MasiX
 
-[![Status](https://img.shields.io/badge/Status-0.1.9-blue.svg)](#project-status)
+[![Status](https://img.shields.io/badge/Status-0.2.1-blue.svg)](#project-status)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![Target](https://img.shields.io/badge/Target-Termux%20%2F%20Linux%20%2F%20macOS-green.svg)](https://termux.dev)
@@ -11,7 +11,7 @@ MasiX is a Rust-first automation runtime for Termux, Linux, and macOS workflows,
 
 ## Project Status
 
-- 0.1.9 stable release
+- 0.2.1 stable release
 - Extracted from a commercial product and simplified into a public testable core
 - Primary focus: Telegram, MCP tool-calling, reminders, and stable Termux runtime
 
@@ -31,6 +31,7 @@ MasiX is a Rust-first automation runtime for Termux, Linux, and macOS workflows,
 - Runtime provider/model switching via chat commands
 - MCP server management via CLI
 - Dedicated media vision provider per bot profile (`vision_provider`)
+- Optional local STT (whisper.cpp) for Telegram voice/audio
 - WhatsApp read-only listener mode with optional Telegram forwarding
 - SMS runtime watcher with optional Telegram forwarding
 - Android intent dispatch tool for Termux (`intent`)
@@ -105,6 +106,7 @@ channel = "latest"
 - MCP enablement
 - WhatsApp read-only listener (secret, allowlist, forwarding)
 - SMS watcher (interval, forwarding)
+- Local STT profile (`[stt]`: model path, binary, threads, language)
 
 ## Provider Management (CLI)
 
@@ -122,7 +124,25 @@ masix config providers model openai gpt-5
 
 # Remove a provider
 masix config providers remove ollama
+
+# Set dedicated vision provider (or auto fallback)
+masix config providers vision gemini
+masix config providers vision auto
 ```
+
+## Local STT (whisper.cpp)
+
+Configure local STT:
+
+```bash
+masix config stt
+```
+
+Required runtime dependencies:
+- `whisper-cli` (whisper.cpp CLI)
+- `ffmpeg` (required for Telegram voice/ogg-opus conversion)
+
+When `[stt].enabled = true`, Telegram `voice`/`audio` media is transcribed locally and transcript context is appended to the LLM prompt.
 
 ## MCP Management (CLI)
 
