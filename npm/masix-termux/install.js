@@ -4,6 +4,7 @@ const { execSync } = require('child_process');
 
 const BINARY_NAME = 'masix';
 const PACKAGE_BIN_PATH = path.join(__dirname, 'prebuilt', BINARY_NAME);
+const PREBUILT_DIR = path.join(__dirname, 'prebuilt');
 
 // Check if running in Termux
 const isTermux = process.env.TERMUX_VERSION !== undefined || 
@@ -14,12 +15,22 @@ if (!isTermux) {
   console.warn('   Installation may fail on other platforms.');
 }
 
-// Check if prebuilt binary exists
-const prebuiltPath = path.join(__dirname, 'prebuilt', BINARY_NAME);
+function hasValidElfPrebuilt(binaryPath) {
+  if (!fs.existsSync(binaryPath)) return false;
+  try {
+    const fd = fs.openSync(binaryPath, 'r');
+    const buf = Buffer.alloc(4);
+    fs.readSync(fd, buf, 0, 4, 0);
+    fs.closeSync(fd);
+    return buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46; // ELF
+  } catch {
+    return false;
+  }
+}
 
-if (fs.existsSync(prebuiltPath)) {
-  fs.chmodSync(prebuiltPath, 0o755);
-  console.log(`✅ Using packaged prebuilt binary: ${prebuiltPath}`);
+if (hasValidElfPrebuilt(PACKAGE_BIN_PATH)) {
+  fs.chmodSync(PACKAGE_BIN_PATH, 0o755);
+  console.log(`✅ Using packaged prebuilt binary: ${PACKAGE_BIN_PATH}`);
 } else {
   console.log('🔨 No prebuilt binary found. Building from source...');
   console.log('   This requires Rust to be installed in Termux.');
@@ -37,6 +48,7 @@ if (fs.existsSync(prebuiltPath)) {
     }
     
     if (fs.existsSync(sourceBinary)) {
+      fs.mkdirSync(PREBUILT_DIR, { recursive: true });
       fs.copyFileSync(sourceBinary, PACKAGE_BIN_PATH);
       fs.chmodSync(PACKAGE_BIN_PATH, 0o755);
       console.log(`✅ Binary built and installed at: ${PACKAGE_BIN_PATH}`);
