@@ -10,7 +10,7 @@ MasiX is a Rust-first automation runtime built for Termux/Android first, with Li
 
 ## Project Status
 
-- `0.3.0` core-only MIT baseline (clean restart)
+- `0.3.0` core-only MIT baseline
 - Focus: Telegram, MCP tool-calling, reminders, stable Termux runtime
 - Optional modules are installed later via the wizard / plugin manager
 
@@ -100,5 +100,6 @@ npm/masix-termux         Termux package
 
 ## License
 
-MIT License — Copyright (c) 2026 Davide A. Guglielmi
+MIT License
+Copyright (c) 2026 Davide A. Guglielmi
 Made in Italy 🇮🇹
