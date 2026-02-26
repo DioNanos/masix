@@ -51,6 +51,8 @@ struct PluginAuthStore {
     #[serde(default)]
     server_url: Option<String>,
     #[serde(default)]
+    device_key: Option<String>,
+    #[serde(default)]
     plugin_keys: BTreeMap<String, String>,
     #[serde(default)]
     updated_at: Option<u64>,
@@ -299,6 +301,39 @@ pub async fn handle_plugin_command(action: PluginCommands, config_path: Option<S
                 registry.plugins.len()
             );
         }
+        PluginCommands::Key { regenerate, server } => {
+            let data_dir = resolve_data_dir(config_path.as_deref());
+            let plugins_dir = plugin_root_dir(&data_dir);
+            let auth_path = plugin_auth_store_path(&plugins_dir);
+            let mut auth_store = load_auth_store(&auth_path)?;
+            let server_url = resolve_plugin_server_url(server, auth_store.server_url.clone());
+
+            if !regenerate {
+                if let Some(existing) = &auth_store.device_key {
+                    println!("Device key: {}", existing);
+                    println!("\nSave this key! It identifies your device for plugin access.");
+                    return Ok(());
+                }
+            }
+
+            let device_id = plugin_device_id();
+            let new_key = generate_device_key(&device_id);
+            
+            let registered = register_device_key(&server_url, &new_key, &device_id).await?;
+            
+            auth_store.device_key = Some(new_key.clone());
+            auth_store.server_url = Some(server_url.clone());
+            auth_store.updated_at = Some(now_unix_secs());
+            save_auth_store(&auth_path, &auth_store)?;
+
+            println!("Generated new device key: {}", new_key);
+            println!("\n*** SAVE THIS KEY ***");
+            println!("This key identifies your device for plugin downloads.");
+            println!("Store it safely - you'll need it if you reinstall masix.");
+            if let Some(msg) = registered {
+                println!("\nServer: {}", msg);
+            }
+        }
     }
 
     Ok(())
@@ -315,15 +350,17 @@ async fn install_plugin_from_catalog(
     auth_store: &mut PluginAuthStore,
 ) -> Result<InstalledPluginRecord> {
     let entry = select_catalog_plugin(catalog, plugin_id, version, platform)?;
+    let requires_auth = entry.visibility.eq_ignore_ascii_case("private")
+        || entry.visibility.eq_ignore_ascii_case("key_required");
 
-    let auth_resp = if entry.visibility.eq_ignore_ascii_case("private") {
+    let auth_resp = if requires_auth {
         let key = key_override
             .map(str::to_string)
             .or_else(|| auth_store.plugin_keys.get(plugin_id).cloned())
+            .or_else(|| auth_store.device_key.clone())
             .ok_or_else(|| {
                 anyhow!(
-                    "Plugin '{}' is private. Run `masix plugin auth {} --key <KEY>` or pass --key.",
-                    plugin_id,
+                    "Plugin '{}' requires a key. Run `masix plugin key` to generate one.",
                     plugin_id
                 )
             })?;
@@ -730,5 +767,70 @@ fn versionish_parts(value: &str) -> Vec<String> {
         .split(['.', '-', '_'])
         .map(|p| format!("{:020}", p.parse::<u64>().unwrap_or(0)))
         .collect()
+}
+
+fn generate_device_key(device_id: &str) -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let hasher = RandomState::new().build_hasher();
+    let random_val = hasher.finish();
+    let raw = format!("{}|{}|{:016x}", device_id, timestamp, random_val);
+    let hash = sha256_hex(raw.as_bytes());
+    format!("mxkey_{}", &hash[..32])
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct RegisterKeyRequest {
+    device_key: String,
+    device_id: String,
+    platform: String,
+    masix_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct RegisterKeyResponse {
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    key_type: Option<String>,
+    #[serde(default)]
+    quota_remaining: Option<u32>,
+}
+
+async fn register_device_key(
+    server_url: &str,
+    device_key: &str,
+    device_id: &str,
+) -> Result<Option<String>> {
+    let url = format!("{}/v1/plugins/register-key", server_url.trim_end_matches('/'));
+    let req = RegisterKeyRequest {
+        device_key: device_key.to_string(),
+        device_id: device_id.to_string(),
+        platform: plugin_platform_id(),
+        masix_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let response = client
+        .post(&url)
+        .json(&req)
+        .send()
+        .await
+        .with_context(|| format!("Failed to reach key registration endpoint {}", url))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Key registration failed (HTTP {}): {}", status, body.trim());
+    }
+    let parsed: RegisterKeyResponse = response
+        .json()
+        .await
+        .with_context(|| format!("Invalid registration response JSON from {}", url))?;
+    Ok(parsed.message)
 }
 

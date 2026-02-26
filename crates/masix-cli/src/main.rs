@@ -516,6 +516,15 @@ enum PluginCommands {
         #[arg(long)]
         platform: Option<String>,
     },
+    /// Generate or show your device key (auto-registered for free plugins)
+    Key {
+        /// Generate a new key even if one exists
+        #[arg(short, long)]
+        regenerate: bool,
+        /// Override plugin server base URL
+        #[arg(long)]
+        server: Option<String>,
+    },
 }
 
 #[tokio::main]
