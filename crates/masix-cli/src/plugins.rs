@@ -396,6 +396,7 @@ async fn install_plugin_from_catalog(
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&package_path, &package_bytes)?;
+    ensure_plugin_package_permissions(&package_path, &entry)?;
 
     let registry_path = plugin_registry_path(plugins_dir);
     let mut registry = load_registry(&registry_path)?;
@@ -418,6 +419,29 @@ async fn install_plugin_from_catalog(
     save_registry(&registry_path, &registry)?;
 
     Ok(record)
+}
+
+fn ensure_plugin_package_permissions(package_path: &Path, entry: &PluginCatalogEntry) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let pkg_type = entry.package_type.as_deref().unwrap_or_default();
+        let is_executable = matches!(pkg_type, "mcp_binary" | "daemon");
+        if is_executable {
+            let mut perms = std::fs::metadata(package_path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(package_path, perms)?;
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = package_path;
+        let _ = entry;
+    }
+
+    Ok(())
 }
 
 fn select_catalog_plugin<'a>(
@@ -833,4 +857,3 @@ async fn register_device_key(
         .with_context(|| format!("Invalid registration response JSON from {}", url))?;
     Ok(parsed.message)
 }
-
