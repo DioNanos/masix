@@ -33,6 +33,8 @@ const UPDATE_CACHE_DURATION_SECS: u64 = 24 * 60 * 60;
 const WHISPER_MODEL_URL_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 const MASIX_GITHUB_RELEASES_BASE_URL: &str = "https://github.com/DioNanos/masix/releases/download";
 const MASIX_STT_PREBUILT_ASSET_PREFIX: &str = "masix-stt-whisper-cli";
+const AI_CONTRACT_SCHEMA_VERSION: &str = "masix.ai.contract.v1";
+const AI_DEFAULT_PLUGIN_SERVER_URL: &str = "http://127.0.0.1:8787";
 
 #[derive(Debug, Clone, Copy)]
 struct SttModelSpec {
@@ -178,6 +180,12 @@ enum Commands {
     Plugin {
         #[command(subcommand)]
         action: PluginCommands,
+    },
+
+    /// AI-first automation contract and bootstrap helpers
+    Ai {
+        #[command(subcommand)]
+        action: AiCommands,
     },
 
     /// Show statistics
@@ -524,6 +532,44 @@ enum PluginCommands {
         /// Override plugin server base URL
         #[arg(long)]
         server: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AiCommands {
+    /// Print machine-readable AI contract (recommended with --json)
+    #[command(alias = "ifyouareanaithisisyourhelp")]
+    Contract {
+        /// Output as JSON contract
+        #[arg(short, long)]
+        json: bool,
+    },
+    /// Report current readiness and missing requirements for autonomous setup
+    Status {
+        /// Output as JSON
+        #[arg(short, long)]
+        json: bool,
+        /// Override plugin server base URL
+        #[arg(long)]
+        server: Option<String>,
+        /// Override platform id (e.g. android-aarch64-termux, linux-x86_64)
+        #[arg(long)]
+        platform: Option<String>,
+    },
+    /// Generate or apply an AI bootstrap plan (safe baseline setup)
+    Bootstrap {
+        /// Output as JSON
+        #[arg(short, long)]
+        json: bool,
+        /// Apply safe bootstrap actions (create default config, ensure plugin key)
+        #[arg(long)]
+        apply: bool,
+        /// Override plugin server base URL
+        #[arg(long)]
+        server: Option<String>,
+        /// Override platform id
+        #[arg(long)]
+        platform: Option<String>,
     },
 }
 
@@ -1079,6 +1125,10 @@ async fn main() -> Result<()> {
             plugins::handle_plugin_command(action, cli.config.clone()).await?;
         }
 
+        Commands::Ai { action } => {
+            handle_ai_command(action, cli.config.clone()).await?;
+        }
+
         Commands::Stats => {
             println!("Masix Statistics");
             println!("================");
@@ -1343,6 +1393,369 @@ fn print_redacted_config(config: &Config) -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+async fn handle_ai_command(action: AiCommands, config_path: Option<String>) -> Result<()> {
+    match action {
+        AiCommands::Contract { json } => {
+            let contract = build_ai_contract(config_path);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&contract)?);
+            } else {
+                println!("MasiX AI Contract (schema: {})", AI_CONTRACT_SCHEMA_VERSION);
+                println!("Run `masix ai contract --json` for machine-readable output.");
+                println!("Key commands:");
+                println!("  - masix ai status --json");
+                println!("  - masix ai bootstrap --json");
+                println!("  - masix ai bootstrap --apply --json");
+            }
+        }
+        AiCommands::Status {
+            json,
+            server,
+            platform,
+        } => {
+            let status = build_ai_status(config_path, server, platform)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            } else {
+                println!("MasiX AI Status");
+                println!("Run `masix ai status --json` for machine-readable output.");
+                if let Some(summary) = status.get("summary") {
+                    println!("{}", serde_json::to_string_pretty(summary)?);
+                }
+                if let Some(required) = status.get("required_human_inputs") {
+                    println!("\nRequired human inputs:");
+                    println!("{}", serde_json::to_string_pretty(required)?);
+                }
+            }
+        }
+        AiCommands::Bootstrap {
+            json,
+            apply,
+            server,
+            platform,
+        } => {
+            if apply {
+                let result = run_ai_bootstrap_apply(config_path, server, platform).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("AI bootstrap apply completed.");
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+            } else {
+                let plan = build_ai_bootstrap_plan(config_path, server, platform)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&plan)?);
+                } else {
+                    println!("AI bootstrap plan generated.");
+                    println!("Run `masix ai bootstrap --json` for machine-readable output.");
+                    println!("{}", serde_json::to_string_pretty(&plan)?);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_ai_contract(config_path: Option<String>) -> serde_json::Value {
+    let config_path_resolved = config_path_for_diagnostics(config_path.clone());
+    let platform = ai_platform_id();
+    let server = resolve_ai_plugin_server(None);
+    json!({
+        "schema_version": AI_CONTRACT_SCHEMA_VERSION,
+        "masix_version": env!("CARGO_PKG_VERSION"),
+        "generated_at": now_unix_secs(),
+        "platform": platform,
+        "defaults": {
+            "config_path": config_path_resolved.display().to_string(),
+            "plugin_server": server
+        },
+        "commands": [
+            {
+                "id": "ai.contract",
+                "command": "masix ai contract --json",
+                "purpose": "Discover AI-operable command contract and guardrails"
+            },
+            {
+                "id": "ai.status",
+                "command": "masix ai status --json",
+                "purpose": "Readiness checks and required human inputs"
+            },
+            {
+                "id": "ai.bootstrap.plan",
+                "command": "masix ai bootstrap --json",
+                "purpose": "Generate safe bootstrap plan"
+            },
+            {
+                "id": "ai.bootstrap.apply",
+                "command": "masix ai bootstrap --apply --json",
+                "purpose": "Apply safe bootstrap actions and return result"
+            },
+            {
+                "id": "compat.alias",
+                "command": "masix ai ifyouareanaithisisyourhelp --json",
+                "purpose": "Compatibility alias for AI discovery"
+            }
+        ],
+        "human_in_the_loop": {
+            "required_for": [
+                "secrets or tokens not present",
+                "production-destructive operations",
+                "policy decisions outside allowed profile"
+            ]
+        },
+        "note": "Use JSON outputs as canonical machine-readable interface for AI workers."
+    })
+}
+
+fn build_ai_status(
+    config_path: Option<String>,
+    server_override: Option<String>,
+    platform_override: Option<String>,
+) -> Result<serde_json::Value> {
+    let config_path_resolved = config_path_for_diagnostics(config_path.clone());
+    let config_exists = config_path_resolved.exists();
+    let config = load_config(config_path.clone()).ok();
+    let config_valid = config.is_some();
+    let data_dir = config
+        .as_ref()
+        .map(get_data_dir)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".masix"));
+    let data_dir_exists = data_dir.exists();
+    let data_dir_writable = check_dir_writable(&data_dir);
+    let db_path = data_dir.join("masix.db");
+    let db_accessible = if db_path.exists() {
+        Storage::new(&db_path).is_ok()
+    } else {
+        true
+    };
+    let plugin_auth_path = data_dir.join("plugins").join("auth.json");
+    let plugin_registry_path = data_dir.join("plugins").join("installed.json");
+    let plugin_auth_exists = plugin_auth_path.exists();
+    let plugin_registry_exists = plugin_registry_path.exists();
+    let telegram_accounts = config
+        .as_ref()
+        .and_then(|cfg| cfg.telegram.as_ref().map(|t| t.accounts.len()))
+        .unwrap_or(0);
+    let providers_count = config
+        .as_ref()
+        .map(|cfg| cfg.providers.providers.len())
+        .unwrap_or(0);
+    let plugin_server = resolve_ai_plugin_server(server_override);
+    let platform = platform_override.unwrap_or_else(ai_platform_id);
+    let required_human_inputs =
+        collect_required_human_inputs(config_exists, config.as_ref(), telegram_accounts, providers_count);
+
+    let ready_for_runtime = config_valid && telegram_accounts > 0 && providers_count > 0;
+    let ready_for_module_ops = plugin_auth_exists && config_valid;
+
+    Ok(json!({
+        "schema_version": AI_CONTRACT_SCHEMA_VERSION,
+        "summary": {
+            "ready_for_runtime": ready_for_runtime,
+            "ready_for_module_ops": ready_for_module_ops,
+            "config_exists": config_exists,
+            "config_valid": config_valid,
+            "platform": platform,
+            "plugin_server": plugin_server
+        },
+        "checks": {
+            "config_path": {
+                "path": config_path_resolved.display().to_string(),
+                "exists": config_exists,
+                "valid": config_valid
+            },
+            "data_dir": {
+                "path": data_dir.display().to_string(),
+                "exists": data_dir_exists,
+                "writable": data_dir_writable
+            },
+            "storage": {
+                "db_path": db_path.display().to_string(),
+                "db_exists": db_path.exists(),
+                "db_accessible": db_accessible
+            },
+            "runtime": {
+                "telegram_accounts": telegram_accounts,
+                "providers_count": providers_count
+            },
+            "plugins": {
+                "auth_path": plugin_auth_path.display().to_string(),
+                "registry_path": plugin_registry_path.display().to_string(),
+                "auth_exists": plugin_auth_exists,
+                "registry_exists": plugin_registry_exists
+            }
+        },
+        "required_human_inputs": required_human_inputs
+    }))
+}
+
+fn build_ai_bootstrap_plan(
+    config_path: Option<String>,
+    server_override: Option<String>,
+    platform_override: Option<String>,
+) -> Result<serde_json::Value> {
+    let status = build_ai_status(config_path.clone(), server_override.clone(), platform_override.clone())?;
+    let plugin_server = resolve_ai_plugin_server(server_override);
+    let platform = platform_override.unwrap_or_else(ai_platform_id);
+    let cfg_path = config_path_for_diagnostics(config_path);
+    Ok(json!({
+        "schema_version": AI_CONTRACT_SCHEMA_VERSION,
+        "mode": "plan",
+        "target": {
+            "config_path": cfg_path.display().to_string(),
+            "plugin_server": plugin_server,
+            "platform": platform
+        },
+        "steps": [
+            {
+                "id": 1,
+                "action": "ensure_config",
+                "command": "masix config init --defaults",
+                "auto": true
+            },
+            {
+                "id": 2,
+                "action": "generate_or_reuse_device_key",
+                "command": "masix plugin key --server <plugin_server>",
+                "auto": true
+            },
+            {
+                "id": 3,
+                "action": "validate_runtime",
+                "commands": ["masix verify", "masix doctor --offline"],
+                "auto": true
+            },
+            {
+                "id": 4,
+                "action": "request_human_inputs_if_needed",
+                "source": "required_human_inputs",
+                "auto": false
+            }
+        ],
+        "status_snapshot": status
+    }))
+}
+
+async fn run_ai_bootstrap_apply(
+    config_path: Option<String>,
+    server_override: Option<String>,
+    platform_override: Option<String>,
+) -> Result<serde_json::Value> {
+    let mut applied_actions = Vec::new();
+    let config_path_resolved = config_path_for_diagnostics(config_path.clone());
+    if !config_path_resolved.exists() {
+        create_default_config(config_path.clone())?;
+        applied_actions.push("created_default_config");
+    }
+
+    let config = load_config(config_path.clone())
+        .with_context(|| "Unable to load config after bootstrap init. Provide required values and retry.")?;
+    let data_dir = get_data_dir(&config);
+    std::fs::create_dir_all(&data_dir)?;
+    applied_actions.push("ensured_data_dir");
+
+    let plugin_server = resolve_ai_plugin_server(server_override.clone());
+    plugins::handle_plugin_command(
+        PluginCommands::Key {
+            regenerate: false,
+            server: Some(plugin_server.clone()),
+        },
+        config_path.clone(),
+    )
+    .await?;
+    applied_actions.push("ensured_plugin_device_key");
+
+    let verify_exit = run_verify(&config, &data_dir, &config_path_resolved)?;
+    let doctor_exit = run_doctor(&config, &data_dir, &config_path_resolved, true).await?;
+    let status = build_ai_status(config_path, Some(plugin_server), platform_override)?;
+
+    Ok(json!({
+        "schema_version": AI_CONTRACT_SCHEMA_VERSION,
+        "mode": "apply",
+        "applied_actions": applied_actions,
+        "verify_exit_code": verify_exit,
+        "doctor_offline_exit_code": doctor_exit,
+        "status_snapshot": status
+    }))
+}
+
+fn resolve_ai_plugin_server(override_url: Option<String>) -> String {
+    override_url
+        .or_else(|| std::env::var("MASIX_PLUGIN_SERVER_URL").ok())
+        .unwrap_or_else(|| AI_DEFAULT_PLUGIN_SERVER_URL.to_string())
+}
+
+fn ai_platform_id() -> String {
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+    if is_termux_environment() && os == "android" {
+        return format!("{}-{}-termux", os, arch);
+    }
+    format!("{}-{}", os, arch)
+}
+
+fn check_dir_writable(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    let test_file = path.join(".ai_write_test");
+    match std::fs::write(&test_file, b"test") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&test_file);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn collect_required_human_inputs(
+    config_exists: bool,
+    config: Option<&Config>,
+    telegram_accounts: usize,
+    providers_count: usize,
+) -> Vec<serde_json::Value> {
+    let mut required = Vec::new();
+    if !config_exists {
+        required.push(json!({
+            "id": "config_file",
+            "reason": "config file missing",
+            "how_to_provide": "run `masix config init` (or allow AI bootstrap apply to create defaults)"
+        }));
+    }
+    if telegram_accounts == 0 {
+        required.push(json!({
+            "id": "telegram_bot_token",
+            "reason": "no Telegram accounts configured",
+            "how_to_provide": "run `masix config telegram` and provide bot token/chat bindings"
+        }));
+    }
+    if providers_count == 0 {
+        required.push(json!({
+            "id": "llm_provider_api_key",
+            "reason": "no providers configured",
+            "how_to_provide": "run `masix config provider` (or `masix config providers add`)"
+        }));
+    }
+    if let Some(cfg) = config {
+        if cfg.providers.default_provider.trim().is_empty() && !cfg.providers.providers.is_empty() {
+            required.push(json!({
+                "id": "default_provider_selection",
+                "reason": "providers exist but default provider is not set",
+                "how_to_provide": "set `[providers].default_provider` in config"
+            }));
+        }
+    }
+    required
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // ============================================================================
