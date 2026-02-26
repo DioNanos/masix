@@ -561,7 +561,9 @@ impl Config {
             }
         }
 
-        if !provider_names.contains(&self.providers.default_provider) {
+        if !self.providers.default_provider.is_empty()
+            && !provider_names.contains(&self.providers.default_provider)
+        {
             anyhow::bail!(
                 "default_provider '{}' is not defined in providers.providers",
                 self.providers.default_provider

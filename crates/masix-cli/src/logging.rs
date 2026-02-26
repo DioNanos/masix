@@ -32,6 +32,9 @@ impl LogManager {
     }
 
     pub fn cleanup_old_logs(&self) -> Result<()> {
+        if !self.log_dir.exists() {
+            return Ok(());
+        }
         let cutoff = SystemTime::now() - Duration::from_secs(LOG_RETENTION_DAYS * 24 * 60 * 60);
         let entries = fs::read_dir(&self.log_dir)?;
         let mut deleted_count = 0;
@@ -65,6 +68,9 @@ impl LogManager {
     }
 
     pub fn get_log_files(&self) -> Result<Vec<PathBuf>> {
+        if !self.log_dir.exists() {
+            return Ok(Vec::new());
+        }
         let mut files = Vec::new();
         let entries = fs::read_dir(&self.log_dir)?;
         for entry in entries {
