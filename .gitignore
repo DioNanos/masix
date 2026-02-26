@@ -1,0 +1,51 @@
+# Dependencies
+/target/
+**/target/
+
+# Build output
+*.so
+*.dylib
+*.dll
+
+# Config
+config/config.toml
+~/.config/masix/config.toml
+.env
+.env.*
+
+# Database
+*.db
+*.db-journal
+
+# Runtime
+runtime/
+*.offset
+
+# Secrets
+secrets.bin
+*.pem
+*.key
+whatsapp-*.json
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node modules (WhatsApp)
+node_modules/
+
+# npm/package artifacts
+*.tgz
+*.tar.gz
+
+# Internal docs (must stay outside repository)
+.docs/

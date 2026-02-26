@@ -1,0 +1,113 @@
+name: Release STT Whisper Assets
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing Git tag/release to upload assets to (empty = build artifacts only)"
+        required: false
+        type: string
+      whisper_cpp_ref:
+        description: "Optional whisper.cpp ref/tag/commit (empty = upstream default branch)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-upload:
+    name: ${{ matrix.target_id }}
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_id: linux-x86_64
+            runs_on: ubuntu-latest
+            needs_android_ndk: false
+          - target_id: android-aarch64-termux
+            runs_on: ubuntu-latest
+            needs_android_ndk: true
+          - target_id: macos-x86_64
+            runs_on: macos-13
+            needs_android_ndk: false
+          - target_id: macos-aarch64
+            runs_on: macos-14
+            needs_android_ndk: false
+
+    steps:
+      - name: Checkout MasiX
+        uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            tag="${{ github.event.release.tag_name }}"
+          else
+            tag="${{ inputs.release_tag }}"
+          fi
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "whisper_cpp_ref=${{ inputs.whisper_cpp_ref }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential git
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew update
+          brew install cmake
+
+      - name: Setup Android NDK
+        if: matrix.needs_android_ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
+      - name: Build STT asset
+        shell: bash
+        env:
+          WHISPER_CPP_REF: ${{ steps.meta.outputs.whisper_cpp_ref }}
+        run: |
+          bash ./scripts/build_stt_whisper_asset.sh "${{ matrix.target_id }}" ./dist
+
+      - name: Generate SHA256 sidecar
+        shell: bash
+        run: |
+          asset="dist/masix-stt-whisper-cli-${{ matrix.target_id }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$asset" > "${asset}.sha256"
+          else
+            shasum -a 256 "$asset" > "${asset}.sha256"
+          fi
+
+      - name: Upload CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stt-${{ matrix.target_id }}
+          path: |
+            dist/masix-stt-whisper-cli-${{ matrix.target_id }}
+            dist/masix-stt-whisper-cli-${{ matrix.target_id }}.sha256
+          if-no-files-found: error
+
+      - name: Upload assets to GitHub Release
+        if: steps.meta.outputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.release_tag }}
+          files: |
+            dist/masix-stt-whisper-cli-${{ matrix.target_id }}
+            dist/masix-stt-whisper-cli-${{ matrix.target_id }}.sha256
+          fail_on_unmatched_files: true
+          overwrite_files: true
+

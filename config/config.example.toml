@@ -1,0 +1,67 @@
+# Masix Configuration Example
+#
+# Run 'masix config init' for interactive setup wizard
+# The wizard will help you configure providers and models
+
+[core]
+data_dir = "~/.masix"
+log_level = "info"
+
+[updates]
+enabled = true
+check_on_start = true
+auto_apply = true
+restart_after_update = true
+channel = "latest"
+
+[telegram]
+poll_timeout_secs = 60
+
+[[telegram.accounts]]
+bot_token = "YOUR_BOT_TOKEN_HERE"
+
+# Optional modules are installed later via `masix plugin ...` / wizard plugin step.
+
+[stt]
+enabled = false
+engine = "local_whisper_cpp"
+# local_model_path = "~/.masix/models/whisper/whisper_base.bin"
+# local_bin = "whisper-cli"
+# local_threads = 2
+# local_language = "it"
+
+[mcp]
+enabled = true
+
+[[mcp.servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/data/data/com.termux/files/home"]
+
+[[mcp.servers]]
+name = "memory"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory"]
+
+# Providers will be configured by 'masix config init' wizard
+[providers]
+default_provider = ""
+
+# Bot profiles (optional)
+# [bots]
+# [[bots.profiles]]
+# name = "default"
+# workdir = "~/.masix"
+# memory_file = "~/.masix/MEMORY.md"
+# provider_primary = ""
+# vision_provider = "" # optional dedicated provider for media analysis
+# provider_fallback = []
+
+# Command execution
+[exec]
+enabled = true
+allow_base = true
+allow_termux = true
+
+[policy]
+rate_limit = { messages_per_minute = 60 }
