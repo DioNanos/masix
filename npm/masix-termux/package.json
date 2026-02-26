@@ -1,7 +1,7 @@
 {
   "name": "@mmmbuto/masix",
   "version": "0.3.0",
-  "description": "MIT Messaging Agent for Termux - Telegram, WhatsApp, SMS with MCP + Cron",
+  "description": "Termux-first MIT automation runtime (Telegram, MCP, Cron) with optional in-core STT",
   "main": "check-update.js",
   "files": [
     "README.md",
@@ -21,13 +21,12 @@
   "keywords": [
     "termux",
     "telegram",
-    "whatsapp",
-    "sms",
     "mcp",
     "cron",
     "ai",
     "messaging",
-    "android"
+    "android",
+    "stt"
   ],
   "author": "Davide A. Guglielmi <dev@mmmbuto.com>",
   "license": "MIT",
