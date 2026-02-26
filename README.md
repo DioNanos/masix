@@ -101,3 +101,4 @@ npm/masix-termux         Termux package
 ## License
 
 MIT License — Copyright (c) 2026 Davide A. Guglielmi
+Made in Italy 🇮🇹
