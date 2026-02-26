@@ -1,3 +1,5 @@
+# 🤖 MasiX - Termux & Linux/macOS
+
 [![Status](https://img.shields.io/badge/Status-0.3.0-blue.svg)](#project-status)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
