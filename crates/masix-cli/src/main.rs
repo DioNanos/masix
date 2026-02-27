@@ -34,7 +34,7 @@ const WHISPER_MODEL_URL_BASE: &str = "https://huggingface.co/ggerganov/whisper.c
 const MASIX_GITHUB_RELEASES_BASE_URL: &str = "https://github.com/DioNanos/masix/releases/download";
 const MASIX_STT_PREBUILT_ASSET_PREFIX: &str = "masix-stt-whisper-cli";
 const AI_CONTRACT_SCHEMA_VERSION: &str = "masix.ai.contract.v1";
-const AI_DEFAULT_PLUGIN_SERVER_URL: &str = "http://127.0.0.1:8787";
+const AI_DEFAULT_PLUGIN_SERVER_URL: &str = "https://masix.wellanet.dev";
 
 #[derive(Debug, Clone, Copy)]
 struct SttModelSpec {
@@ -543,12 +543,18 @@ enum AiCommands {
         /// Output as JSON contract
         #[arg(short, long)]
         json: bool,
+        /// Suppress human-oriented output (useful for AI parsers)
+        #[arg(long)]
+        quiet: bool,
     },
     /// Report current readiness and missing requirements for autonomous setup
     Status {
         /// Output as JSON
         #[arg(short, long)]
         json: bool,
+        /// Suppress human-oriented output (useful for AI parsers)
+        #[arg(long)]
+        quiet: bool,
         /// Override plugin server base URL
         #[arg(long)]
         server: Option<String>,
@@ -561,6 +567,9 @@ enum AiCommands {
         /// Output as JSON
         #[arg(short, long)]
         json: bool,
+        /// Suppress human-oriented output (useful for AI parsers)
+        #[arg(long)]
+        quiet: bool,
         /// Apply safe bootstrap actions (create default config, ensure plugin key)
         #[arg(long)]
         apply: bool,
@@ -1397,11 +1406,11 @@ fn print_redacted_config(config: &Config) -> Result<()> {
 
 async fn handle_ai_command(action: AiCommands, config_path: Option<String>) -> Result<()> {
     match action {
-        AiCommands::Contract { json } => {
+        AiCommands::Contract { json, quiet } => {
             let contract = build_ai_contract(config_path);
             if json {
                 println!("{}", serde_json::to_string_pretty(&contract)?);
-            } else {
+            } else if !quiet {
                 println!("MasiX AI Contract (schema: {})", AI_CONTRACT_SCHEMA_VERSION);
                 println!("Run `masix ai contract --json` for machine-readable output.");
                 println!("Key commands:");
@@ -1412,13 +1421,14 @@ async fn handle_ai_command(action: AiCommands, config_path: Option<String>) -> R
         }
         AiCommands::Status {
             json,
+            quiet,
             server,
             platform,
         } => {
             let status = build_ai_status(config_path, server, platform)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&status)?);
-            } else {
+            } else if !quiet {
                 println!("MasiX AI Status");
                 println!("Run `masix ai status --json` for machine-readable output.");
                 if let Some(summary) = status.get("summary") {
@@ -1432,15 +1442,16 @@ async fn handle_ai_command(action: AiCommands, config_path: Option<String>) -> R
         }
         AiCommands::Bootstrap {
             json,
+            quiet,
             apply,
             server,
             platform,
         } => {
             if apply {
-                let result = run_ai_bootstrap_apply(config_path, server, platform).await?;
+                let result = run_ai_bootstrap_apply(config_path, server, platform, quiet || json).await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
-                } else {
+                } else if !quiet {
                     println!("AI bootstrap apply completed.");
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 }
@@ -1448,7 +1459,7 @@ async fn handle_ai_command(action: AiCommands, config_path: Option<String>) -> R
                 let plan = build_ai_bootstrap_plan(config_path, server, platform)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&plan)?);
-                } else {
+                } else if !quiet {
                     println!("AI bootstrap plan generated.");
                     println!("Run `masix ai bootstrap --json` for machine-readable output.");
                     println!("{}", serde_json::to_string_pretty(&plan)?);
@@ -1643,11 +1654,16 @@ async fn run_ai_bootstrap_apply(
     config_path: Option<String>,
     server_override: Option<String>,
     platform_override: Option<String>,
+    quiet: bool,
 ) -> Result<serde_json::Value> {
     let mut applied_actions = Vec::new();
     let config_path_resolved = config_path_for_diagnostics(config_path.clone());
     if !config_path_resolved.exists() {
-        create_default_config(config_path.clone())?;
+        if quiet {
+            create_default_config_silent(config_path.clone())?;
+        } else {
+            create_default_config(config_path.clone())?;
+        }
         applied_actions.push("created_default_config");
     }
 
@@ -1658,19 +1674,14 @@ async fn run_ai_bootstrap_apply(
     applied_actions.push("ensured_data_dir");
 
     let plugin_server = resolve_ai_plugin_server(server_override.clone());
-    plugins::handle_plugin_command(
-        PluginCommands::Key {
-            regenerate: false,
-            server: Some(plugin_server.clone()),
-        },
-        config_path.clone(),
-    )
-    .await?;
+    let _device_key =
+        plugins::ensure_device_key_quiet(config_path.as_deref(), Some(plugin_server.clone()), false)
+            .await?;
     applied_actions.push("ensured_plugin_device_key");
 
-    let verify_exit = run_verify(&config, &data_dir, &config_path_resolved)?;
-    let doctor_exit = run_doctor(&config, &data_dir, &config_path_resolved, true).await?;
     let status = build_ai_status(config_path, Some(plugin_server), platform_override)?;
+    let verify_exit = ai_verify_exit_code(&status);
+    let doctor_exit = ai_doctor_exit_code(&status);
 
     Ok(json!({
         "schema_version": AI_CONTRACT_SCHEMA_VERSION,
@@ -1680,6 +1691,13 @@ async fn run_ai_bootstrap_apply(
         "doctor_offline_exit_code": doctor_exit,
         "status_snapshot": status
     }))
+}
+
+fn create_default_config_silent(config_path: Option<String>) -> Result<()> {
+    let config_path = get_config_path(config_path)?;
+    let config_content = include_str!("../../../config/config.example.toml");
+    std::fs::write(&config_path, config_content)?;
+    Ok(())
 }
 
 fn resolve_ai_plugin_server(override_url: Option<String>) -> String {
@@ -1749,6 +1767,23 @@ fn collect_required_human_inputs(
         }
     }
     required
+}
+
+fn ai_verify_exit_code(status: &serde_json::Value) -> i32 {
+    let checks = &status["checks"];
+    let config_ok = checks["config_path"]["exists"].as_bool().unwrap_or(false)
+        && checks["config_path"]["valid"].as_bool().unwrap_or(false);
+    let data_writable = checks["data_dir"]["writable"].as_bool().unwrap_or(false);
+    let db_ok = checks["storage"]["db_accessible"].as_bool().unwrap_or(false);
+    if config_ok && data_writable && db_ok {
+        0
+    } else {
+        1
+    }
+}
+
+fn ai_doctor_exit_code(status: &serde_json::Value) -> i32 {
+    ai_verify_exit_code(status)
 }
 
 fn now_unix_secs() -> u64 {

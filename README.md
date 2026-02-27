@@ -66,6 +66,9 @@ masix ai bootstrap --json
 
 # Apply safe bootstrap actions (config baseline + plugin device key + checks)
 masix ai bootstrap --apply --json
+
+# Parser-safe mode (no human-oriented chatter)
+masix ai bootstrap --apply --json --quiet
 ```
 
 Compatibility alias for AI discovery:

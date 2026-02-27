@@ -339,6 +339,35 @@ pub async fn handle_plugin_command(action: PluginCommands, config_path: Option<S
     Ok(())
 }
 
+pub async fn ensure_device_key_quiet(
+    config_path: Option<&str>,
+    server_override: Option<String>,
+    regenerate: bool,
+) -> Result<String> {
+    let data_dir = resolve_data_dir(config_path);
+    let plugins_dir = plugin_root_dir(&data_dir);
+    let auth_path = plugin_auth_store_path(&plugins_dir);
+    let mut auth_store = load_auth_store(&auth_path)?;
+    let server_url = resolve_plugin_server_url(server_override, auth_store.server_url.clone());
+
+    if !regenerate {
+        if let Some(existing) = &auth_store.device_key {
+            return Ok(existing.clone());
+        }
+    }
+
+    let device_id = plugin_device_id();
+    let new_key = generate_device_key(&device_id);
+    let _ = register_device_key(&server_url, &new_key, &device_id).await?;
+
+    auth_store.device_key = Some(new_key.clone());
+    auth_store.server_url = Some(server_url);
+    auth_store.updated_at = Some(now_unix_secs());
+    save_auth_store(&auth_path, &auth_store)?;
+
+    Ok(new_key)
+}
+
 async fn install_plugin_from_catalog(
     plugins_dir: &Path,
     server_url: &str,
