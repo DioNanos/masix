@@ -15,7 +15,7 @@ use masix_exec::{
 use masix_providers::{AnthropicProvider, OpenAICompatibleProvider, Provider};
 use masix_storage::Storage;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -262,6 +262,17 @@ enum TelegramCommands {
     Start,
     /// Test bot connection
     Test,
+    /// Resolve Telegram @username or id to numeric id (using bot token/account)
+    Resolve {
+        /// Username (@name) or numeric id
+        value: String,
+        /// Telegram account tag (bot id prefix). Default: first configured account
+        #[arg(long)]
+        account: Option<String>,
+        /// Output JSON
+        #[arg(short, long)]
+        json: bool,
+    },
 }
 
 #[cfg(feature = "whatsapp")]
@@ -372,6 +383,69 @@ enum ConfigCommands {
         /// Show configured Telegram bots/chats and exit
         #[arg(short, long)]
         list: bool,
+        /// Target account tag (bot id prefix before ':') for non-interactive updates
+        #[arg(long)]
+        account: Option<String>,
+        /// Bot token (creates/updates account in non-interactive mode)
+        #[arg(long)]
+        set_token: Option<String>,
+        /// Bot username without '@' (or with '@') in non-interactive mode
+        #[arg(long)]
+        bot_name: Option<String>,
+        /// Bot profile name in non-interactive mode
+        #[arg(long)]
+        bot_profile: Option<String>,
+        /// Admin IDs or @usernames (comma-separated) in non-interactive mode
+        #[arg(long)]
+        admins: Option<String>,
+        /// Add admins (IDs or @usernames, comma-separated) without replacing existing list
+        #[arg(long)]
+        add_admins: Option<String>,
+        /// Remove admins (IDs or @usernames, comma-separated)
+        #[arg(long)]
+        remove_admins: Option<String>,
+        /// User IDs or @usernames (comma-separated) in non-interactive mode
+        #[arg(long)]
+        users: Option<String>,
+        /// Add users (IDs or @usernames, comma-separated) without replacing existing list
+        #[arg(long)]
+        add_users: Option<String>,
+        /// Remove users (IDs or @usernames, comma-separated)
+        #[arg(long)]
+        remove_users: Option<String>,
+        /// Readonly IDs or @usernames (comma-separated) in non-interactive mode
+        #[arg(long)]
+        readonly: Option<String>,
+        /// Add readonly users (IDs or @usernames, comma-separated) without replacing existing list
+        #[arg(long)]
+        add_readonly: Option<String>,
+        /// Remove readonly users (IDs or @usernames, comma-separated)
+        #[arg(long)]
+        remove_readonly: Option<String>,
+        /// Allowed chat IDs (comma-separated). Empty string clears filter in non-interactive mode
+        #[arg(long)]
+        allowed_chats: Option<String>,
+        /// Group mode: all|users_only|tag_only|users_or_tag|listen_only in non-interactive mode
+        #[arg(long)]
+        group_mode: Option<String>,
+        /// Auto-register users in non-interactive mode
+        #[arg(long, action = clap::ArgAction::Set)]
+        auto_register_users: Option<bool>,
+        /// User tools mode: none|selected in non-interactive mode
+        #[arg(long)]
+        user_tools_mode: Option<String>,
+        /// User allowed tool names (comma-separated) in non-interactive mode
+        #[arg(long)]
+        user_allowed_tools: Option<String>,
+        /// Isolated account mode in non-interactive mode
+        #[arg(long, action = clap::ArgAction::Set)]
+        isolated: Option<bool>,
+        /// Allow self memory edit in non-interactive mode
+        #[arg(long, action = clap::ArgAction::Set)]
+        allow_self_memory_edit: Option<bool>,
+        /// Register-to-file path in non-interactive mode (empty clears)
+        #[arg(long)]
+        register_to_file: Option<String>,
     },
     /// Configure SMS watcher interactively
     #[cfg(feature = "sms")]
@@ -400,6 +474,8 @@ enum ConfigCommands {
 enum ProviderCommands {
     /// List all configured providers
     List,
+    /// List built-in provider presets (name, default URL, type)
+    Known,
     /// Add a new provider
     Add {
         /// Provider name (e.g., openai, xai, groq)
@@ -523,6 +599,16 @@ enum PluginCommands {
         /// Override platform id
         #[arg(long)]
         platform: Option<String>,
+    },
+    /// Enable an installed plugin in local registry
+    Enable {
+        /// Plugin id
+        plugin: String,
+    },
+    /// Disable an installed plugin in local registry
+    Disable {
+        /// Plugin id
+        plugin: String,
     },
     /// Generate or show your device key (auto-registered for free plugins)
     Key {
@@ -804,6 +890,13 @@ async fn main() -> Result<()> {
                 TelegramCommands::Test => {
                     println!("Testing Telegram bot connection...");
                     // TODO: Implement test
+                }
+                TelegramCommands::Resolve {
+                    value,
+                    account,
+                    json,
+                } => {
+                    run_telegram_resolve(cli.config.clone(), account, value, json)?;
                 }
             }
         }
@@ -1114,9 +1207,80 @@ async fn main() -> Result<()> {
                 Ok(_) => println!("Configuration is valid."),
                 Err(e) => eprintln!("Configuration is invalid: {}", e),
             },
-            ConfigCommands::Telegram { list } => {
+            ConfigCommands::Telegram {
+                list,
+                account,
+                set_token,
+                bot_name,
+                bot_profile,
+                admins,
+                add_admins,
+                remove_admins,
+                users,
+                add_users,
+                remove_users,
+                readonly,
+                add_readonly,
+                remove_readonly,
+                allowed_chats,
+                group_mode,
+                auto_register_users,
+                user_tools_mode,
+                user_allowed_tools,
+                isolated,
+                allow_self_memory_edit,
+                register_to_file,
+            } => {
+                let direct_mode = set_token.is_some()
+                    || bot_name.is_some()
+                    || bot_profile.is_some()
+                    || admins.is_some()
+                    || add_admins.is_some()
+                    || remove_admins.is_some()
+                    || users.is_some()
+                    || add_users.is_some()
+                    || remove_users.is_some()
+                    || readonly.is_some()
+                    || add_readonly.is_some()
+                    || remove_readonly.is_some()
+                    || allowed_chats.is_some()
+                    || group_mode.is_some()
+                    || auto_register_users.is_some()
+                    || user_tools_mode.is_some()
+                    || user_allowed_tools.is_some()
+                    || isolated.is_some()
+                    || allow_self_memory_edit.is_some()
+                    || register_to_file.is_some()
+                    || account.is_some();
                 if list {
                     run_telegram_list(cli.config.clone())?;
+                } else if direct_mode {
+                    run_telegram_non_interactive_update(
+                        cli.config.clone(),
+                        TelegramDirectUpdate {
+                            account,
+                            set_token,
+                            bot_name,
+                            bot_profile,
+                            admins,
+                            add_admins,
+                            remove_admins,
+                            users,
+                            add_users,
+                            remove_users,
+                            readonly,
+                            add_readonly,
+                            remove_readonly,
+                            allowed_chats,
+                            group_mode,
+                            auto_register_users,
+                            user_tools_mode,
+                            user_allowed_tools,
+                            isolated,
+                            allow_self_memory_edit,
+                            register_to_file,
+                        },
+                    )?;
                 } else {
                     run_telegram_wizard(cli.config.clone())?;
                 }
@@ -1540,6 +1704,10 @@ fn build_ai_contract(config_path: Option<String>) -> serde_json::Value {
                 "policy decisions outside allowed profile"
             ]
         },
+        "ai_human_bootstrap_hint": {
+            "role": "system",
+            "message": "If you are an AI worker: run `masix ai commands --json`, use only non-interactive commands, request missing secrets from human, avoid direct config file edits unless explicitly approved."
+        },
         "note": "Use JSON outputs as canonical machine-readable interface for AI workers."
     })
 }
@@ -1620,6 +1788,20 @@ fn build_ai_commands_catalog() -> serde_json::Value {
                 "purpose": "List configured providers"
             },
             {
+                "id": "config.providers.known",
+                "command": "masix config providers known",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "List built-in provider presets with default endpoints"
+            },
+            {
+                "id": "config.telegram.direct",
+                "command": "masix config telegram --account <tag> [--set-token <token>] [--admins <csv>|--add-admins <csv>|--remove-admins <csv>] [--users <csv>|--add-users <csv>|--remove-users <csv>] [--readonly <csv>|--add-readonly <csv>|--remove-readonly <csv>] [--group-mode <mode>] [--user-tools-mode <mode>] [--user-allowed-tools <csv>] [--allowed-chats <csv>] [--auto-register-users <bool>] [--isolated <bool>] [--allow-self-memory-edit <bool>] [--register-to-file <path>]",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Configure Telegram/RBAC/tools/group policy non-interactively for AI workers"
+            },
+            {
                 "id": "runtime.start",
                 "command": "masix start",
                 "scope": "core",
@@ -1688,6 +1870,20 @@ fn build_ai_commands_catalog() -> serde_json::Value {
                 "scope": "modules",
                 "interactive": false,
                 "purpose": "Update installed module packages"
+            },
+            {
+                "id": "plugin.enable",
+                "command": "masix plugin enable <plugin>",
+                "scope": "modules",
+                "interactive": false,
+                "purpose": "Enable installed module in local registry"
+            },
+            {
+                "id": "plugin.disable",
+                "command": "masix plugin disable <plugin>",
+                "scope": "modules",
+                "interactive": false,
+                "purpose": "Disable installed module in local registry"
             },
             {
                 "id": "compat.alias",
@@ -1946,14 +2142,14 @@ fn collect_required_human_inputs(
         required.push(json!({
             "id": "telegram_bot_token",
             "reason": "no Telegram accounts configured",
-            "how_to_provide": "run `masix config telegram` and provide bot token/chat bindings"
+            "how_to_provide": "run `masix config telegram --set-token <BOT_TOKEN> --bot-name <BOT_NAME>`; then set admin with `masix config telegram --account <BOT_ID_PREFIX> --admins <TELEGRAM_ID_OR_@USERNAME>`"
         }));
     }
     if providers_count == 0 {
         required.push(json!({
             "id": "llm_provider_api_key",
             "reason": "no providers configured",
-            "how_to_provide": "run `masix config provider` (or `masix config providers add`)"
+            "how_to_provide": "run `masix config providers known`; then `masix config providers add <name> --key <API_KEY> --url <BASE_URL> --model <MODEL> --default`"
         }));
     }
     if let Some(cfg) = config {
@@ -2924,6 +3120,276 @@ fn run_telegram_list(config_path: Option<String>) -> Result<()> {
 
     println!("Config path: {}", config_path.display());
     print_telegram_accounts_and_channels(&config);
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct TelegramDirectUpdate {
+    account: Option<String>,
+    set_token: Option<String>,
+    bot_name: Option<String>,
+    bot_profile: Option<String>,
+    admins: Option<String>,
+    add_admins: Option<String>,
+    remove_admins: Option<String>,
+    users: Option<String>,
+    add_users: Option<String>,
+    remove_users: Option<String>,
+    readonly: Option<String>,
+    add_readonly: Option<String>,
+    remove_readonly: Option<String>,
+    allowed_chats: Option<String>,
+    group_mode: Option<String>,
+    auto_register_users: Option<bool>,
+    user_tools_mode: Option<String>,
+    user_allowed_tools: Option<String>,
+    isolated: Option<bool>,
+    allow_self_memory_edit: Option<bool>,
+    register_to_file: Option<String>,
+}
+
+fn run_telegram_non_interactive_update(
+    config_path: Option<String>,
+    update: TelegramDirectUpdate,
+) -> Result<()> {
+    if update.admins.is_some() && (update.add_admins.is_some() || update.remove_admins.is_some()) {
+        anyhow::bail!("Use either --admins (replace) OR --add-admins/--remove-admins (incremental), not both.");
+    }
+    if update.users.is_some() && (update.add_users.is_some() || update.remove_users.is_some()) {
+        anyhow::bail!("Use either --users (replace) OR --add-users/--remove-users (incremental), not both.");
+    }
+    if update.readonly.is_some()
+        && (update.add_readonly.is_some() || update.remove_readonly.is_some())
+    {
+        anyhow::bail!("Use either --readonly (replace) OR --add-readonly/--remove-readonly (incremental), not both.");
+    }
+
+    let config_path = get_config_path(config_path)?;
+    let mut config = if config_path.exists() {
+        load_config_for_wizard(&config_path)?
+    } else {
+        Config::default()
+    };
+
+    let updated_tag = {
+        let telegram = config.telegram.get_or_insert_with(Default::default);
+
+        let target_tag = if let Some(token) = update.set_token.as_deref() {
+            Some(telegram_account_tag(token))
+        } else {
+            update.account.clone()
+        };
+
+        let account_index = if let Some(tag) = target_tag.as_deref() {
+            telegram
+                .accounts
+                .iter()
+                .position(|a| telegram_account_tag(&a.bot_token) == tag)
+        } else {
+            None
+        };
+
+        let index = if let Some(idx) = account_index {
+            idx
+        } else if let Some(token) = update.set_token.clone() {
+            let account = masix_config::TelegramAccount {
+                bot_token: token,
+                bot_name: None,
+                bot_profile: None,
+                allowed_chats: None,
+                admins: Vec::new(),
+                users: Vec::new(),
+                readonly: Vec::new(),
+                isolated: true,
+                shared_memory_with: Vec::new(),
+                allow_self_memory_edit: true,
+                group_mode: masix_config::GroupMode::All,
+                auto_register_users: false,
+                register_to_file: None,
+                user_tools_mode: masix_config::UserToolsMode::None,
+                user_allowed_tools: Vec::new(),
+            };
+            telegram.accounts.push(account);
+            telegram.accounts.len() - 1
+        } else if !telegram.accounts.is_empty() {
+            0
+        } else {
+            anyhow::bail!(
+                "No Telegram account exists. Provide --set-token to create one non-interactively."
+            );
+        };
+
+        let account = telegram
+            .accounts
+            .get_mut(index)
+            .ok_or_else(|| anyhow!("Internal error: target telegram account not found"))?;
+
+        if let Some(token) = update.set_token {
+            if token.trim().is_empty() {
+                anyhow::bail!("--set-token cannot be empty");
+            }
+            account.bot_token = token.trim().to_string();
+        }
+
+        if let Some(name) = update.bot_name {
+            let trimmed = name.trim().trim_start_matches('@');
+            account.bot_name = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+
+        if let Some(profile) = update.bot_profile {
+            let trimmed = profile.trim();
+            account.bot_profile = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+
+        if let Some(value) = update.allowed_chats {
+            account.allowed_chats = parse_chat_ids_csv(&value);
+        }
+
+        if let Some(mode) = update.group_mode {
+            account.group_mode = parse_group_mode(&mode)?;
+        }
+
+        if let Some(auto) = update.auto_register_users {
+            account.auto_register_users = auto;
+        }
+
+        if let Some(mode) = update.user_tools_mode {
+            account.user_tools_mode = parse_user_tools_mode(&mode)?;
+            if account.user_tools_mode == masix_config::UserToolsMode::None {
+                account.user_allowed_tools.clear();
+            }
+        }
+
+        if let Some(allowed) = update.user_allowed_tools {
+            account.user_allowed_tools = parse_csv_list(&allowed);
+        }
+
+        if let Some(value) = update.isolated {
+            account.isolated = value;
+        }
+
+        if let Some(value) = update.allow_self_memory_edit {
+            account.allow_self_memory_edit = value;
+        }
+
+        if let Some(path) = update.register_to_file {
+            let trimmed = path.trim();
+            account.register_to_file = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+
+        let token_for_resolution = account.bot_token.clone();
+        let account_tag_for_hint = telegram_account_tag(&account.bot_token);
+        if let Some(admins) = update.admins {
+            account.admins = parse_telegram_principals_csv(&admins, &token_for_resolution)
+                .with_context(|| {
+                    format!(
+                        "Invalid --admins value. {}",
+                        telegram_principals_retry_hint(&account_tag_for_hint, "admins")
+                    )
+                })?;
+        }
+        if let Some(admins) = update.add_admins {
+            let ids = parse_telegram_principals_csv(&admins, &token_for_resolution).with_context(
+                || {
+                    format!(
+                        "Invalid --add-admins value. {}",
+                        telegram_principals_retry_hint(&account_tag_for_hint, "add-admins")
+                    )
+                },
+            )?;
+            merge_ids(&mut account.admins, &ids);
+        }
+        if let Some(admins) = update.remove_admins {
+            let ids = parse_telegram_principals_csv(&admins, &token_for_resolution)
+                .with_context(|| {
+                    format!(
+                        "Invalid --remove-admins value. {}",
+                        telegram_principals_retry_hint(&account_tag_for_hint, "remove-admins")
+                    )
+                })?;
+            remove_ids(&mut account.admins, &ids);
+        }
+        if let Some(users) = update.users {
+            account.users = parse_telegram_principals_csv(&users, &token_for_resolution)
+                .with_context(|| {
+                    format!(
+                        "Invalid --users value. {}",
+                        telegram_principals_retry_hint(&account_tag_for_hint, "users")
+                    )
+                })?;
+        }
+        if let Some(users) = update.add_users {
+            let ids = parse_telegram_principals_csv(&users, &token_for_resolution).with_context(
+                || {
+                    format!(
+                        "Invalid --add-users value. {}",
+                        telegram_principals_retry_hint(&account_tag_for_hint, "add-users")
+                    )
+                },
+            )?;
+            merge_ids(&mut account.users, &ids);
+        }
+        if let Some(users) = update.remove_users {
+            let ids = parse_telegram_principals_csv(&users, &token_for_resolution)
+                .with_context(|| {
+                    format!(
+                        "Invalid --remove-users value. {}",
+                        telegram_principals_retry_hint(&account_tag_for_hint, "remove-users")
+                    )
+                })?;
+            remove_ids(&mut account.users, &ids);
+        }
+        if let Some(readonly) = update.readonly {
+            account.readonly = parse_telegram_principals_csv(&readonly, &token_for_resolution)
+                .with_context(|| {
+                    format!(
+                        "Invalid --readonly value. {}",
+                        telegram_principals_retry_hint(&account_tag_for_hint, "readonly")
+                    )
+                })?;
+        }
+        if let Some(readonly) = update.add_readonly {
+            let ids = parse_telegram_principals_csv(&readonly, &token_for_resolution)
+                .with_context(|| {
+                    format!(
+                        "Invalid --add-readonly value. {}",
+                        telegram_principals_retry_hint(&account_tag_for_hint, "add-readonly")
+                    )
+                })?;
+            merge_ids(&mut account.readonly, &ids);
+        }
+        if let Some(readonly) = update.remove_readonly {
+            let ids = parse_telegram_principals_csv(&readonly, &token_for_resolution)
+                .with_context(|| {
+                    format!(
+                        "Invalid --remove-readonly value. {}",
+                        telegram_principals_retry_hint(&account_tag_for_hint, "remove-readonly")
+                    )
+                })?;
+            remove_ids(&mut account.readonly, &ids);
+        }
+
+        telegram_account_tag(&account.bot_token)
+    };
+
+    config.validate()?;
+    let config_toml = toml::to_string_pretty(&config)?;
+    fs::write(&config_path, config_toml)?;
+
+    println!("✅ Telegram account updated (tag: {})", updated_tag);
+    println!("Config saved to: {}", config_path.display());
     Ok(())
 }
 
@@ -4664,6 +5130,13 @@ fn get_known_providers() -> Vec<(
             "openai",
         ),
         (
+            "zai-coding",
+            "z.ai Coding",
+            "https://api.z.ai/api/coding/paas/v4",
+            "glm-4.7",
+            "openai",
+        ),
+        (
             "chutes",
             "Chutes.ai",
             "https://llm.chutes.ai/v1",
@@ -4790,6 +5263,19 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
                 }
             }
         }
+        ProviderCommands::Known => {
+            println!("Known provider presets:\n");
+            for (key, display, url, model, ptype) in get_known_providers() {
+                let model_display = if model.is_empty() { "(choose model)" } else { model };
+                let url_display = if url.is_empty() { "(custom URL required)" } else { url };
+                println!("  {}", key);
+                println!("    Name: {}", display);
+                println!("    URL: {}", url_display);
+                println!("    Model: {}", model_display);
+                println!("    Type: {}", ptype);
+                println!();
+            }
+        }
         ProviderCommands::Add {
             name,
             key,
@@ -4798,13 +5284,17 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
             default,
         } => {
             let providers = get_known_providers();
-            let known = providers.iter().find(|(k, _, _, _, _)| *k == name);
+            let canonical_name = resolve_known_provider_alias_for_add(&name, &providers)
+                .unwrap_or_else(|| name.clone());
+            let known = providers
+                .iter()
+                .find(|(k, _, _, _, _)| *k == canonical_name);
 
             let base_url = url.or_else(|| known.map(|(_, _, url, _, _)| url.to_string()));
             let provider_type = known.map(|(_, _, _, _, ptype)| ptype.to_string());
 
             let provider = masix_config::ProviderConfig {
-                name: name.clone(),
+                name: canonical_name.clone(),
                 api_key: key,
                 base_url,
                 model,
@@ -4824,6 +5314,9 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
                 println!("✅ Provider '{}' updated", stored_name);
             } else {
                 println!("✅ Provider '{}' added", stored_name);
+            }
+            if canonical_name != name {
+                println!("Alias '{}' normalized to '{}'", name, canonical_name);
             }
             if default {
                 println!("Set as default provider");
@@ -4996,6 +5489,38 @@ fn canonical_provider_token(value: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric())
         .map(|c| c.to_ascii_lowercase())
         .collect()
+}
+
+fn resolve_known_provider_alias_for_add(
+    input: &str,
+    known_providers: &[KnownProviderDef],
+) -> Option<String> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let token = canonical_provider_token(raw);
+    let aliases: [(&str, &str); 4] = [
+        ("zaicoding", "zai-coding"),
+        ("zaicodingglm", "zai-coding"),
+        ("zai", "zai"),
+        ("zaiglm", "zai"),
+    ];
+    for (alias, key) in aliases {
+        if token == alias {
+            return Some(key.to_string());
+        }
+    }
+
+    for (key, display_name, _, _, _) in known_providers {
+        if canonical_provider_token(key) == token || canonical_provider_token(display_name) == token
+        {
+            return Some((*key).to_string());
+        }
+    }
+
+    None
 }
 
 fn resolve_provider_reference(
@@ -5352,6 +5877,28 @@ fn parse_provider_list(input: &str) -> Vec<String> {
     parse_csv_list(input)
 }
 
+fn parse_group_mode(input: &str) -> Result<masix_config::GroupMode> {
+    match input.trim().to_lowercase().as_str() {
+        "all" | "1" => Ok(masix_config::GroupMode::All),
+        "users_only" | "2" => Ok(masix_config::GroupMode::UsersOnly),
+        "tag_only" | "3" => Ok(masix_config::GroupMode::TagOnly),
+        "users_or_tag" | "4" => Ok(masix_config::GroupMode::UsersOrTag),
+        "listen_only" | "5" => Ok(masix_config::GroupMode::ListenOnly),
+        value => anyhow::bail!(
+            "Invalid group mode '{}'. Use all|users_only|tag_only|users_or_tag|listen_only",
+            value
+        ),
+    }
+}
+
+fn parse_user_tools_mode(input: &str) -> Result<masix_config::UserToolsMode> {
+    match input.trim().to_lowercase().as_str() {
+        "none" | "1" => Ok(masix_config::UserToolsMode::None),
+        "selected" | "2" => Ok(masix_config::UserToolsMode::Selected),
+        value => anyhow::bail!("Invalid user tools mode '{}'. Use none|selected", value),
+    }
+}
+
 fn parse_chat_ids_csv(input: &str) -> Option<Vec<i64>> {
     let mut values = Vec::new();
     for token in input.split(',') {
@@ -5398,6 +5945,28 @@ fn parse_telegram_principals_csv(input: &str, bot_token: &str) -> Result<Vec<i64
     }
 
     Ok(values)
+}
+
+fn telegram_principals_retry_hint(account_tag: &str, field: &str) -> String {
+    format!(
+        "Retry with numeric IDs: `masix config telegram --account {} --{} <id1,id2>`. \
+If using @username, ensure user opened bot chat first, then retry same command with @username.",
+        account_tag, field
+    )
+}
+
+fn merge_ids(target: &mut Vec<i64>, ids: &[i64]) {
+    let mut seen: HashSet<i64> = target.iter().copied().collect();
+    for id in ids {
+        if seen.insert(*id) {
+            target.push(*id);
+        }
+    }
+}
+
+fn remove_ids(target: &mut Vec<i64>, ids: &[i64]) {
+    let remove_set: HashSet<i64> = ids.iter().copied().collect();
+    target.retain(|id| !remove_set.contains(id));
 }
 
 fn format_telegram_ids_csv(values: &[i64]) -> String {
@@ -5485,6 +6054,9 @@ fn resolve_telegram_chat_identifier(bot_token: &str, value: &str) -> Result<i64>
     if username.is_empty() {
         anyhow::bail!("Invalid Telegram username '{}'", value);
     }
+    if let Some(id) = lookup_telegram_user_mapping(bot_token, username)? {
+        return Ok(id);
+    }
     let handle = format!("@{}", username);
     let url = format!("https://api.telegram.org/bot{}/getChat", bot_token.trim());
     let client = reqwest::blocking::Client::builder()
@@ -5497,31 +6069,171 @@ fn resolve_telegram_chat_identifier(bot_token: &str, value: &str) -> Result<i64>
     let status = response.status();
     let payload: serde_json::Value = response.json()?;
 
-    if !status.is_success() {
-        anyhow::bail!(
-            "Telegram API getChat failed for '{}': HTTP {}",
-            handle,
-            status
-        );
+    if status.is_success() && payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let id = payload
+            .get("result")
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| anyhow!("Telegram getChat returned no numeric id for '{}'", handle));
+        if let Ok(id) = id {
+            let _ = store_telegram_user_mapping(bot_token, username, id);
+            return Ok(id);
+        }
+        return id;
     }
 
-    if !payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let description = payload
+    // Fallback: scan recent updates for a matching username that already interacted with the bot.
+    if let Some(id) = resolve_telegram_identifier_from_updates(bot_token, username)? {
+        let _ = store_telegram_user_mapping(bot_token, username, id);
+        return Ok(id);
+    }
+
+    let reason = if !status.is_success() {
+        format!("Telegram API getChat failed: HTTP {}", status)
+    } else {
+        payload
             .get("description")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown error");
-        anyhow::bail!(
-            "Cannot resolve '{}': {}. Ensure the account exists and use /whoiam after first contact.",
-            handle,
-            description
+            .unwrap_or("unknown error")
+            .to_string()
+    };
+
+    anyhow::bail!(
+        "Cannot resolve '{}': {}. Ask the user to open bot chat and send /whoiam (or any message), then retry with @username or numeric id.",
+        handle,
+        reason
+    );
+}
+
+fn run_telegram_resolve(
+    config_path: Option<String>,
+    account_tag: Option<String>,
+    value: String,
+    json: bool,
+) -> Result<()> {
+    let config = load_config(config_path)?;
+    let telegram = config
+        .telegram
+        .ok_or_else(|| anyhow!("No Telegram accounts configured"))?;
+    let account = if let Some(tag) = account_tag {
+        telegram
+            .accounts
+            .iter()
+            .find(|a| telegram_account_tag(&a.bot_token) == tag)
+            .ok_or_else(|| anyhow!("Telegram account tag '{}' not found", tag))?
+    } else {
+        telegram
+            .accounts
+            .first()
+            .ok_or_else(|| anyhow!("No Telegram accounts configured"))?
+    };
+
+    let id = resolve_telegram_chat_identifier(&account.bot_token, &value)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "input": value,
+                "resolved_id": id,
+                "account_tag": telegram_account_tag(&account.bot_token)
+            }))?
         );
+    } else {
+        println!("{}", id);
+    }
+    Ok(())
+}
+
+fn telegram_user_map_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".masix")
+        .join("accounts")
+        .join("telegram-user-map.json")
+}
+
+fn lookup_telegram_user_mapping(bot_token: &str, username: &str) -> Result<Option<i64>> {
+    let map_path = telegram_user_map_path();
+    if !map_path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&map_path)?;
+    let store: HashMap<String, i64> = serde_json::from_str(&raw)?;
+    let key = telegram_user_map_key(bot_token, username);
+    Ok(store.get(&key).copied())
+}
+
+fn store_telegram_user_mapping(bot_token: &str, username: &str, user_id: i64) -> Result<()> {
+    let map_path = telegram_user_map_path();
+    if let Some(parent) = map_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut store: HashMap<String, i64> = if map_path.exists() {
+        let raw = std::fs::read_to_string(&map_path)?;
+        serde_json::from_str(&raw).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    store.insert(telegram_user_map_key(bot_token, username), user_id);
+    std::fs::write(&map_path, serde_json::to_string_pretty(&store)?)?;
+    Ok(())
+}
+
+fn telegram_user_map_key(bot_token: &str, username: &str) -> String {
+    format!(
+        "{}:{}",
+        telegram_account_tag(bot_token),
+        username.trim_start_matches('@').to_lowercase()
+    )
+}
+
+fn resolve_telegram_identifier_from_updates(bot_token: &str, username: &str) -> Result<Option<i64>> {
+    let url = format!("https://api.telegram.org/bot{}/getUpdates", bot_token.trim());
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let response = client.get(&url).send()?;
+    if !response.status().is_success() {
+        return Ok(None);
     }
 
-    payload
+    let payload: serde_json::Value = response.json()?;
+    if !payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Ok(None);
+    }
+
+    let target = username.trim_start_matches('@').to_lowercase();
+    let updates = payload
         .get("result")
-        .and_then(|v| v.get("id"))
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| anyhow!("Telegram getChat returned no numeric id for '{}'", handle))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    for update in updates.iter().rev() {
+        if let Some(id) = extract_matching_user_id(update.get("message"), &target)
+            .or_else(|| extract_matching_user_id(update.get("edited_message"), &target))
+            .or_else(|| extract_matching_user_id(update.get("callback_query"), &target))
+        {
+            return Ok(Some(id));
+        }
+    }
+
+    Ok(None)
+}
+
+fn extract_matching_user_id(node: Option<&serde_json::Value>, target_username: &str) -> Option<i64> {
+    let value = node?;
+    let from = value.get("from")?;
+
+    let uname = from
+        .get("username")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim_start_matches('@').to_lowercase())?;
+    if uname != target_username {
+        return None;
+    }
+
+    from.get("id").and_then(|v| v.as_i64())
 }
 
 fn telegram_account_tag(bot_token: &str) -> String {

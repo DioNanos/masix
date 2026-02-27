@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const DEFAULT_PLUGIN_SERVER_URL: &str = "http://127.0.0.1:8787";
+const DEFAULT_PLUGIN_SERVER_URL: &str = "https://masix.wellanet.dev";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PluginCatalog {
@@ -300,6 +300,36 @@ pub async fn handle_plugin_command(action: PluginCommands, config_path: Option<S
                 updated,
                 registry.plugins.len()
             );
+        }
+        PluginCommands::Enable { plugin } => {
+            let data_dir = resolve_data_dir(config_path.as_deref());
+            let plugins_dir = plugin_root_dir(&data_dir);
+            let registry_path = plugin_registry_path(&plugins_dir);
+            let mut registry = load_registry(&registry_path)?;
+
+            let entry = registry
+                .plugins
+                .iter_mut()
+                .find(|p| p.plugin_id == plugin)
+                .ok_or_else(|| anyhow!("Plugin '{}' is not installed", plugin))?;
+            entry.enabled = true;
+            save_registry(&registry_path, &registry)?;
+            println!("Enabled plugin '{}'.", plugin);
+        }
+        PluginCommands::Disable { plugin } => {
+            let data_dir = resolve_data_dir(config_path.as_deref());
+            let plugins_dir = plugin_root_dir(&data_dir);
+            let registry_path = plugin_registry_path(&plugins_dir);
+            let mut registry = load_registry(&registry_path)?;
+
+            let entry = registry
+                .plugins
+                .iter_mut()
+                .find(|p| p.plugin_id == plugin)
+                .ok_or_else(|| anyhow!("Plugin '{}' is not installed", plugin))?;
+            entry.enabled = false;
+            save_registry(&registry_path, &registry)?;
+            println!("Disabled plugin '{}'.", plugin);
         }
         PluginCommands::Key { regenerate, server } => {
             let data_dir = resolve_data_dir(config_path.as_deref());
