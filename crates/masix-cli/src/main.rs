@@ -562,6 +562,15 @@ enum AiCommands {
         #[arg(long)]
         platform: Option<String>,
     },
+    /// List all AI-relevant commands (core + modules/plugins) in machine-readable form
+    Commands {
+        /// Output as JSON
+        #[arg(short, long)]
+        json: bool,
+        /// Suppress human-oriented output (useful for AI parsers)
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Generate or apply an AI bootstrap plan (safe baseline setup)
     Bootstrap {
         /// Output as JSON
@@ -1440,6 +1449,15 @@ async fn handle_ai_command(action: AiCommands, config_path: Option<String>) -> R
                 }
             }
         }
+        AiCommands::Commands { json, quiet } => {
+            let commands = build_ai_commands_catalog();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&commands)?);
+            } else if !quiet {
+                println!("MasiX AI Commands");
+                println!("{}", serde_json::to_string_pretty(&commands)?);
+            }
+        }
         AiCommands::Bootstrap {
             json,
             quiet,
@@ -1495,6 +1513,11 @@ fn build_ai_contract(config_path: Option<String>) -> serde_json::Value {
                 "purpose": "Readiness checks and required human inputs"
             },
             {
+                "id": "ai.commands",
+                "command": "masix ai commands --json",
+                "purpose": "Canonical registry of AI-relevant commands (core + modules/plugins)"
+            },
+            {
                 "id": "ai.bootstrap.plan",
                 "command": "masix ai bootstrap --json",
                 "purpose": "Generate safe bootstrap plan"
@@ -1518,6 +1541,182 @@ fn build_ai_contract(config_path: Option<String>) -> serde_json::Value {
             ]
         },
         "note": "Use JSON outputs as canonical machine-readable interface for AI workers."
+    })
+}
+
+fn build_ai_commands_catalog() -> serde_json::Value {
+    json!({
+        "schema_version": AI_CONTRACT_SCHEMA_VERSION,
+        "generated_at": now_unix_secs(),
+        "commands": [
+            {
+                "id": "ai.contract",
+                "command": "masix ai contract --json",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Discover AI-operable contract and guardrails"
+            },
+            {
+                "id": "ai.status",
+                "command": "masix ai status --json",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Readiness checks and required human inputs"
+            },
+            {
+                "id": "ai.commands",
+                "command": "masix ai commands --json",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "List canonical AI-relevant command set"
+            },
+            {
+                "id": "ai.bootstrap.plan",
+                "command": "masix ai bootstrap --json",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Generate safe bootstrap plan"
+            },
+            {
+                "id": "ai.bootstrap.apply",
+                "command": "masix ai bootstrap --apply --json --quiet",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Apply baseline bootstrap actions with parser-safe output"
+            },
+            {
+                "id": "config.init.defaults",
+                "command": "masix config init --defaults",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Create baseline config without wizard prompts"
+            },
+            {
+                "id": "config.validate",
+                "command": "masix config validate",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Validate config schema and types"
+            },
+            {
+                "id": "config.show",
+                "command": "masix config show",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Show current redacted configuration snapshot"
+            },
+            {
+                "id": "config.providers.add",
+                "command": "masix config providers add <name> --key <key> [--url <url>] [--model <model>] [--default]",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Add provider non-interactively"
+            },
+            {
+                "id": "config.providers.list",
+                "command": "masix config providers list",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "List configured providers"
+            },
+            {
+                "id": "runtime.start",
+                "command": "masix start",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Start daemon runtime"
+            },
+            {
+                "id": "runtime.status",
+                "command": "masix status",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Read daemon status and log path"
+            },
+            {
+                "id": "runtime.restart",
+                "command": "masix restart",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Restart daemon runtime"
+            },
+            {
+                "id": "runtime.verify",
+                "command": "masix verify",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Run health verification"
+            },
+            {
+                "id": "runtime.doctor.offline",
+                "command": "masix doctor --offline",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Run offline diagnostics"
+            },
+            {
+                "id": "plugin.key",
+                "command": "masix plugin key [--server <url>]",
+                "scope": "modules",
+                "interactive": false,
+                "purpose": "Generate/reuse device key for module auth"
+            },
+            {
+                "id": "plugin.list",
+                "command": "masix plugin list [--server <url>] [--platform <id>] [--json]",
+                "scope": "modules",
+                "interactive": false,
+                "purpose": "Read module catalog"
+            },
+            {
+                "id": "plugin.auth",
+                "command": "masix plugin auth <plugin> --key <key> [--server <url>] [--platform <id>]",
+                "scope": "modules",
+                "interactive": false,
+                "purpose": "Store/validate access key for protected modules"
+            },
+            {
+                "id": "plugin.install",
+                "command": "masix plugin install <plugin> [--version <v>] [--key <key>] [--server <url>] [--platform <id>]",
+                "scope": "modules",
+                "interactive": false,
+                "purpose": "Install module package from catalog"
+            },
+            {
+                "id": "plugin.update",
+                "command": "masix plugin update [plugin] [--key <key>] [--server <url>] [--platform <id>]",
+                "scope": "modules",
+                "interactive": false,
+                "purpose": "Update installed module packages"
+            },
+            {
+                "id": "compat.alias",
+                "command": "masix ai ifyouareanaithisisyourhelp --json",
+                "scope": "core",
+                "interactive": false,
+                "purpose": "Compatibility alias for AI discovery"
+            }
+        ],
+        "interactive_commands": [
+            {
+                "command": "masix config telegram",
+                "scope": "core",
+                "purpose": "Interactive wizard, avoid in strict AI-run unless human asks for wizard flow"
+            },
+            {
+                "command": "masix config provider",
+                "scope": "core",
+                "purpose": "Interactive wizard, prefer `masix config providers add` for AI runs"
+            },
+            {
+                "command": "masix config stt",
+                "scope": "core",
+                "purpose": "Interactive STT setup wizard"
+            }
+        ],
+        "policy": {
+            "rule": "AI workers MUST prefer non-interactive commands and JSON outputs; direct config file edits are fallback-only with explicit owner approval."
+        }
     })
 }
 
