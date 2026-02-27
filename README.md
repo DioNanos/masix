@@ -13,7 +13,7 @@ MasiX is a Rust-first automation runtime built for Termux/Android first, with Li
 - `0.3.0` core-only MIT baseline
 - Focus: Telegram, MCP tool-calling, reminders, stable Termux runtime
 - Optional modules are installed later via the wizard / plugin manager
-- Primary next objective: AI-friendly self-configuration standard (bot/worker bootstrap)
+- Project operational rules and AI workflow standards are maintained in project `.docs` (not in this README)
 
 ## Core Features (MIT)
 
@@ -47,37 +47,6 @@ masix config init
 masix config validate
 masix start
 ```
-
-## AI-Friendly Self-Config (Primary Objective)
-
-MasiX is moving to a machine-first operational standard so AI workers can configure most of the runtime autonomously.
-
-Canonical commands:
-
-```bash
-# Machine-readable contract for AI workers
-masix ai contract --json
-
-# Readiness snapshot + missing human inputs
-masix ai status --json
-
-# Generate safe bootstrap plan
-masix ai bootstrap --json
-
-# Apply safe bootstrap actions (config baseline + plugin device key + checks)
-masix ai bootstrap --apply --json
-
-# Parser-safe mode (no human-oriented chatter)
-masix ai bootstrap --apply --json --quiet
-```
-
-Compatibility alias for AI discovery:
-
-```bash
-masix ai ifyouareanaithisisyourhelp --json
-```
-
-Human-in-the-loop remains required for secrets/tokens and critical approvals.
 
 ## Build
 
