@@ -114,6 +114,10 @@ mod tests {
     use super::MasixRuntime;
     use masix_config::{Config, GroupMode, TelegramAccount, TelegramConfig};
     use masix_ipc::{Envelope, MessageKind};
+    use masix_storage::Storage;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::{broadcast, Mutex};
 
     fn make_account(token: &str) -> TelegramAccount {
         TelegramAccount {
@@ -133,6 +137,14 @@ mod tests {
             user_tools_mode: masix_config::UserToolsMode::None,
             user_allowed_tools: vec![],
         }
+    }
+
+    fn temp_db_path(name: &str) -> std::path::PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("masix-core-{}-{}.db", name, ts))
     }
 
     #[test]
@@ -266,6 +278,87 @@ mod tests {
         assert!(MasixRuntime::is_rate_limit_error(&err));
         let non_rate = anyhow::anyhow!("HTTP 401 Unauthorized");
         assert!(!MasixRuntime::is_rate_limit_error(&non_rate));
+    }
+
+    #[tokio::test]
+    async fn cron_check_dispatches_due_job_and_disables_one_shot() {
+        let path = temp_db_path("cron-dispatch");
+        let storage = Storage::new(&path).expect("storage");
+        let due = (chrono::Utc::now() - chrono::Duration::seconds(2)).to_rfc3339();
+        storage
+            .create_cron_job(
+                "test",
+                &due,
+                "telegram",
+                "12345",
+                None,
+                "cron ping",
+                "+00:00",
+                false,
+            )
+            .expect("create cron job");
+
+        let storage = Arc::new(Mutex::new(storage));
+        let (tx, mut rx) = broadcast::channel(8);
+
+        MasixRuntime::check_cron_jobs(&storage, &tx, Some("bot_default"))
+            .await
+            .expect("cron check");
+
+        let out = rx.recv().await.expect("outbound");
+        assert_eq!(out.channel, "telegram");
+        assert_eq!(out.chat_id, 12345);
+        assert_eq!(out.text, "cron ping");
+        assert_eq!(out.account_tag.as_deref(), Some("bot_default"));
+
+        let remaining = storage
+            .lock()
+            .await
+            .list_enabled_cron_jobs()
+            .expect("list jobs");
+        assert!(remaining.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn cron_check_skips_non_numeric_recipient_and_disables_job() {
+        let path = temp_db_path("cron-invalid-recipient");
+        let storage = Storage::new(&path).expect("storage");
+        let due = (chrono::Utc::now() - chrono::Duration::seconds(2)).to_rfc3339();
+        storage
+            .create_cron_job(
+                "test",
+                &due,
+                "telegram",
+                "@not_numeric",
+                Some("bot_a"),
+                "should not send",
+                "+00:00",
+                false,
+            )
+            .expect("create cron job");
+
+        let storage = Arc::new(Mutex::new(storage));
+        let (tx, mut rx) = broadcast::channel(8);
+
+        MasixRuntime::check_cron_jobs(&storage, &tx, None)
+            .await
+            .expect("cron check");
+
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        let remaining = storage
+            .lock()
+            .await
+            .list_enabled_cron_jobs()
+            .expect("list jobs");
+        assert!(remaining.is_empty());
+
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -1600,322 +1693,25 @@ impl MasixRuntime {
                 )
                 .await;
 
-                // Show command list when user types just "/"
-                if text == "/" {
-                    if let Some(chat_id) = envelope.chat_id {
-                        let lang = user_languages
-                            .lock()
-                            .await
-                            .get(&user_state_key)
-                            .copied()
-                            .unwrap_or_default();
-                        let cmd_list = masix_telegram::menu::command_list(lang);
-                        let msg = OutboundMessage {
-                            channel: envelope.channel.clone(),
-                            account_tag: account_tag.clone(),
-                            chat_id,
-                            text: cmd_list,
-                            reply_to: None,
-                            edit_message_id: None,
-                            inline_keyboard: None,
-                            chat_action: None,
-                        };
-                        let _ = outbound_sender.send(msg);
-                    }
-                    return Ok(());
-                }
-
-                if text.starts_with("/start") || text.starts_with("/menu") {
-                    info!("Processing menu command");
-                    if let Some(chat_id) = envelope.chat_id {
-                        let lang = user_languages
-                            .lock()
-                            .await
-                            .get(&user_state_key)
-                            .copied()
-                            .unwrap_or_default();
-                        let (menu_text, keyboard) = masix_telegram::menu::home_menu(lang);
-                        info!("Sending home menu to chat_id: {}", chat_id);
-                        let msg = OutboundMessage {
-                            channel: envelope.channel.clone(),
-                            account_tag: account_tag.clone(),
-                            chat_id,
-                            text: menu_text,
-                            reply_to: None,
-                            edit_message_id: None,
-                            inline_keyboard: Some(keyboard),
-                            chat_action: None,
-                        };
-                        if let Err(e) = outbound_sender.send(msg) {
-                            error!("Failed to send menu: {}", e);
-                        }
-                    }
-                    return Ok(());
-                }
-
-                if text.starts_with("/new") {
-                    info!("Processing /new - session reset");
-                    if let Some(chat_id) = envelope.chat_id {
-                        let lang = user_languages
-                            .lock()
-                            .await
-                            .get(&user_state_key)
-                            .copied()
-                            .unwrap_or_default();
-                        let reset_text = masix_telegram::menu::session_reset_text(lang);
-                        Self::clear_chat_memory(
-                            &bot_context,
-                            account_tag.as_deref(),
-                            user_scope_id.as_deref(),
-                            Some(chat_id),
-                        )
-                        .await;
-                        let msg = OutboundMessage {
-                            channel: envelope.channel.clone(),
-                            account_tag: account_tag.clone(),
-                            chat_id,
-                            text: reset_text,
-                            reply_to: None,
-                            edit_message_id: None,
-                            inline_keyboard: None,
-                            chat_action: None,
-                        };
-                        let _ = outbound_sender.send(msg);
-                    }
-                    return Ok(());
-                }
-
-                if text.starts_with("/help") {
-                    info!("Processing /help");
-                    if let Some(chat_id) = envelope.chat_id {
-                        let lang = user_languages
-                            .lock()
-                            .await
-                            .get(&user_state_key)
-                            .copied()
-                            .unwrap_or_default();
-                        let help_text = masix_telegram::menu::help_text(lang);
-                        let msg = OutboundMessage {
-                            channel: envelope.channel.clone(),
-                            account_tag: account_tag.clone(),
-                            chat_id,
-                            text: help_text,
-                            reply_to: None,
-                            edit_message_id: None,
-                            inline_keyboard: None,
-                            chat_action: None,
-                        };
-                        let _ = outbound_sender.send(msg);
-                    }
-                    return Ok(());
-                }
-
-                if text.starts_with("/whoiam") {
-                    info!("Processing /whoiam");
-                    if let Some(chat_id) = envelope.chat_id {
-                        let chat_type = envelope
-                            .payload
-                            .get("chat_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
-                        let scope = if envelope.channel == "telegram" {
-                            if from_user_id == chat_id {
-                                "private"
-                            } else {
-                                "group_or_channel"
-                            }
-                        } else {
-                            "n/a"
-                        };
-                        let message = format!(
-                            "👤 Identity\nChannel: {}\nAccount tag: {}\nSender: {}\nUser ID: {}\nChat ID: {}\nChat type: {}\nScope: {}\nPermission: {:?}",
-                            envelope.channel,
-                            account_tag.as_deref().unwrap_or("__default__"),
-                            from,
-                            from_user_id,
-                            chat_id,
-                            chat_type,
-                            scope,
-                            permission
-                        );
-                        let msg = OutboundMessage {
-                            channel: envelope.channel.clone(),
-                            account_tag: account_tag.clone(),
-                            chat_id,
-                            text: message,
-                            reply_to: envelope.message_id,
-                            edit_message_id: None,
-                            inline_keyboard: None,
-                            chat_action: None,
-                        };
-                        let _ = outbound_sender.send(msg);
-                    }
-                    return Ok(());
-                }
-
-                if text.starts_with("/language") {
-                    info!("Processing /language");
-                    if let Some(chat_id) = envelope.chat_id {
-                        let lang = user_languages
-                            .lock()
-                            .await
-                            .get(&user_state_key)
-                            .copied()
-                            .unwrap_or_default();
-                        let (menu_text, keyboard) = masix_telegram::menu::language_menu(lang);
-                        let msg = OutboundMessage {
-                            channel: envelope.channel.clone(),
-                            account_tag: account_tag.clone(),
-                            chat_id,
-                            text: menu_text,
-                            reply_to: None,
-                            edit_message_id: None,
-                            inline_keyboard: Some(keyboard),
-                            chat_action: None,
-                        };
-                        let _ = outbound_sender.send(msg);
-                    }
-                    return Ok(());
-                }
-
-                if text.starts_with("/provider") {
-                    info!("Processing /provider");
-                    if let Some(chat_id) = envelope.chat_id {
-                        let response = Self::handle_provider_chat_command(
-                            text,
-                            &user_state_key,
-                            config,
-                            user_providers,
-                        )
-                        .await;
-                        let msg = OutboundMessage {
-                            channel: envelope.channel.clone(),
-                            account_tag: account_tag.clone(),
-                            chat_id,
-                            text: response,
-                            reply_to: None,
-                            edit_message_id: None,
-                            inline_keyboard: None,
-                            chat_action: None,
-                        };
-                        let _ = outbound_sender.send(msg);
-                    }
-                    return Ok(());
-                }
-
-                if text.starts_with("/model") {
-                    info!("Processing /model");
-                    if let Some(chat_id) = envelope.chat_id {
-                        let response = Self::handle_model_chat_command(
-                            text,
-                            &user_state_key,
-                            config,
-                            user_providers,
-                            user_models,
-                        )
-                        .await;
-                        let msg = OutboundMessage {
-                            channel: envelope.channel.clone(),
-                            account_tag: account_tag.clone(),
-                            chat_id,
-                            text: response,
-                            reply_to: None,
-                            edit_message_id: None,
-                            inline_keyboard: None,
-                            chat_action: None,
-                        };
-                        let _ = outbound_sender.send(msg);
-                    }
-                    return Ok(());
-                }
-
-                if text.starts_with("/admin") {
-                    info!("Processing /admin");
-                    if let Some(chat_id) = envelope.chat_id {
-                        let response = Self::handle_admin_command(
-                            text,
-                            config,
-                            account_tag.as_deref(),
-                            from_user_id,
-                            permission,
-                        )
-                        .await;
-                        let msg = OutboundMessage {
-                            channel: envelope.channel.clone(),
-                            account_tag: account_tag.clone(),
-                            chat_id,
-                            text: response,
-                            reply_to: None,
-                            edit_message_id: None,
-                            inline_keyboard: None,
-                            chat_action: None,
-                        };
-                        let _ = outbound_sender.send(msg);
-                    }
-                    return Ok(());
-                }
-
-                if text.starts_with("/mcp") {
-                    if permission != PermissionLevel::Admin {
-                        if let Some(chat_id) = envelope.chat_id {
-                            Self::send_outbound_text(
-                                &outbound_sender,
-                                &envelope.channel,
-                                account_tag.clone(),
-                                chat_id,
-                                "Admin only command.",
-                                None,
-                            );
-                        }
-                        return Ok(());
-                    }
-                    info!("Processing /mcp");
-                    if let Some(chat_id) = envelope.chat_id {
-                        let response = Self::handle_mcp_chat_command(text, config).await;
-                        let msg = OutboundMessage {
-                            channel: envelope.channel.clone(),
-                            account_tag: account_tag.clone(),
-                            chat_id,
-                            text: response,
-                            reply_to: None,
-                            edit_message_id: None,
-                            inline_keyboard: None,
-                            chat_action: None,
-                        };
-                        let _ = outbound_sender.send(msg);
-                    }
-                    return Ok(());
-                }
-
-                if text.starts_with("/tools") {
-                    if permission != PermissionLevel::Admin {
-                        if let Some(chat_id) = envelope.chat_id {
-                            Self::send_outbound_text(
-                                &outbound_sender,
-                                &envelope.channel,
-                                account_tag.clone(),
-                                chat_id,
-                                "Admin only command.",
-                                None,
-                            );
-                        }
-                        return Ok(());
-                    }
-                    info!("Processing /tools");
-                    if let Some(chat_id) = envelope.chat_id {
-                        let response = Self::handle_tools_chat_command(mcp_client).await;
-                        let msg = OutboundMessage {
-                            channel: envelope.channel.clone(),
-                            account_tag: account_tag.clone(),
-                            chat_id,
-                            text: response,
-                            reply_to: None,
-                            edit_message_id: None,
-                            inline_keyboard: None,
-                            chat_action: None,
-                        };
-                        let _ = outbound_sender.send(msg);
-                    }
+                if Self::handle_chat_commands(
+                    text,
+                    &envelope,
+                    &outbound_sender,
+                    account_tag.as_deref(),
+                    &user_state_key,
+                    user_languages,
+                    user_providers,
+                    user_models,
+                    &bot_context,
+                    user_scope_id.as_deref(),
+                    config,
+                    from,
+                    from_user_id,
+                    permission,
+                    mcp_client,
+                )
+                .await?
+                {
                     return Ok(());
                 }
 
@@ -3261,6 +3057,281 @@ impl MasixRuntime {
             "Reminder creato.\nID: {}\nSchedule: {}\nRecurring: {}\nMessage: {}",
             id, parsed.schedule, parsed.recurring, parsed.message
         ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_chat_commands(
+        text: &str,
+        envelope: &Envelope,
+        outbound_sender: &broadcast::Sender<OutboundMessage>,
+        account_tag: Option<&str>,
+        user_state_key: &str,
+        user_languages: &Arc<Mutex<HashMap<String, Language>>>,
+        user_providers: &Arc<Mutex<HashMap<String, String>>>,
+        user_models: &Arc<Mutex<HashMap<String, String>>>,
+        bot_context: &BotContext,
+        user_scope_id: Option<&str>,
+        config: &Config,
+        from: &str,
+        from_user_id: i64,
+        permission: PermissionLevel,
+        mcp_client: &Option<Arc<Mutex<McpClient>>>,
+    ) -> Result<bool> {
+        let Some(chat_id) = envelope.chat_id else {
+            return Ok(false);
+        };
+        let account_tag_owned = account_tag.map(|value| value.to_string());
+
+        if text == "/" {
+            let lang = user_languages
+                .lock()
+                .await
+                .get(user_state_key)
+                .copied()
+                .unwrap_or_default();
+            let cmd_list = masix_telegram::menu::command_list(lang);
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &cmd_list,
+                None,
+            );
+            return Ok(true);
+        }
+
+        if text.starts_with("/start") || text.starts_with("/menu") {
+            info!("Processing menu command");
+            let lang = user_languages
+                .lock()
+                .await
+                .get(user_state_key)
+                .copied()
+                .unwrap_or_default();
+            let (menu_text, keyboard) = masix_telegram::menu::home_menu(lang);
+            let msg = OutboundMessage {
+                channel: envelope.channel.clone(),
+                account_tag: account_tag_owned.clone(),
+                chat_id,
+                text: menu_text,
+                reply_to: None,
+                edit_message_id: None,
+                inline_keyboard: Some(keyboard),
+                chat_action: None,
+            };
+            if let Err(e) = outbound_sender.send(msg) {
+                error!("Failed to send menu: {}", e);
+            }
+            return Ok(true);
+        }
+
+        if text.starts_with("/new") {
+            info!("Processing /new - session reset");
+            let lang = user_languages
+                .lock()
+                .await
+                .get(user_state_key)
+                .copied()
+                .unwrap_or_default();
+            let reset_text = masix_telegram::menu::session_reset_text(lang);
+            Self::clear_chat_memory(bot_context, account_tag, user_scope_id, Some(chat_id)).await;
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &reset_text,
+                None,
+            );
+            return Ok(true);
+        }
+
+        if text.starts_with("/help") {
+            info!("Processing /help");
+            let lang = user_languages
+                .lock()
+                .await
+                .get(user_state_key)
+                .copied()
+                .unwrap_or_default();
+            let help_text = masix_telegram::menu::help_text(lang);
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &help_text,
+                None,
+            );
+            return Ok(true);
+        }
+
+        if text.starts_with("/whoiam") {
+            info!("Processing /whoiam");
+            let chat_type = envelope
+                .payload
+                .get("chat_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let scope = if envelope.channel == "telegram" {
+                if from_user_id == chat_id {
+                    "private"
+                } else {
+                    "group_or_channel"
+                }
+            } else {
+                "n/a"
+            };
+            let message = format!(
+                "👤 Identity\nChannel: {}\nAccount tag: {}\nSender: {}\nUser ID: {}\nChat ID: {}\nChat type: {}\nScope: {}\nPermission: {:?}",
+                envelope.channel,
+                account_tag.unwrap_or("__default__"),
+                from,
+                from_user_id,
+                chat_id,
+                chat_type,
+                scope,
+                permission
+            );
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &message,
+                envelope.message_id,
+            );
+            return Ok(true);
+        }
+
+        if text.starts_with("/language") {
+            info!("Processing /language");
+            let lang = user_languages
+                .lock()
+                .await
+                .get(user_state_key)
+                .copied()
+                .unwrap_or_default();
+            let (menu_text, keyboard) = masix_telegram::menu::language_menu(lang);
+            let msg = OutboundMessage {
+                channel: envelope.channel.clone(),
+                account_tag: account_tag_owned.clone(),
+                chat_id,
+                text: menu_text,
+                reply_to: None,
+                edit_message_id: None,
+                inline_keyboard: Some(keyboard),
+                chat_action: None,
+            };
+            let _ = outbound_sender.send(msg);
+            return Ok(true);
+        }
+
+        if text.starts_with("/provider") {
+            info!("Processing /provider");
+            let response =
+                Self::handle_provider_chat_command(text, user_state_key, config, user_providers)
+                    .await;
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &response,
+                None,
+            );
+            return Ok(true);
+        }
+
+        if text.starts_with("/model") {
+            info!("Processing /model");
+            let response = Self::handle_model_chat_command(
+                text,
+                user_state_key,
+                config,
+                user_providers,
+                user_models,
+            )
+            .await;
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &response,
+                None,
+            );
+            return Ok(true);
+        }
+
+        if text.starts_with("/admin") {
+            info!("Processing /admin");
+            let response =
+                Self::handle_admin_command(text, config, account_tag, from_user_id, permission)
+                    .await;
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &response,
+                None,
+            );
+            return Ok(true);
+        }
+
+        if text.starts_with("/mcp") {
+            if permission != PermissionLevel::Admin {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag_owned.clone(),
+                    chat_id,
+                    "Admin only command.",
+                    None,
+                );
+                return Ok(true);
+            }
+            info!("Processing /mcp");
+            let response = Self::handle_mcp_chat_command(text, config).await;
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &response,
+                None,
+            );
+            return Ok(true);
+        }
+
+        if text.starts_with("/tools") {
+            if permission != PermissionLevel::Admin {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag_owned.clone(),
+                    chat_id,
+                    "Admin only command.",
+                    None,
+                );
+                return Ok(true);
+            }
+            info!("Processing /tools");
+            let response = Self::handle_tools_chat_command(mcp_client).await;
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &response,
+                None,
+            );
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     async fn handle_cron_command(
