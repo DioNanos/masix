@@ -718,7 +718,7 @@ fn render_linux_systemd_service(
     home: &Path,
     user_scope: bool,
 ) -> String {
-    let mut exec = format!("{} start", masix_bin.display());
+    let mut exec = format!("{} start --foreground", masix_bin.display());
     if let Some(path) = config_path {
         exec.push_str(&format!(" -c {}", path.display()));
     }
@@ -756,6 +756,7 @@ fn render_macos_launch_plist(
             xml_escape(&masix_bin.display().to_string())
         ),
         "<string>start</string>".to_string(),
+        "<string>--foreground</string>".to_string(),
     ];
     if let Some(path) = config_path {
         args.push("<string>-c</string>".to_string());
@@ -1077,7 +1078,9 @@ mod tests {
             Path::new("/home/test"),
             false,
         );
-        assert!(service.contains("ExecStart=/usr/local/bin/masix start -c /tmp/masix.toml"));
+        assert!(
+            service.contains("ExecStart=/usr/local/bin/masix start --foreground -c /tmp/masix.toml")
+        );
         assert!(service.contains("WantedBy=multi-user.target"));
     }
 
@@ -1090,6 +1093,7 @@ mod tests {
             Path::new("/tmp/masix&boot.log"),
         );
         assert!(plist.contains("<string>/usr/local/bin/masix</string>"));
+        assert!(plist.contains("<string>--foreground</string>"));
         assert!(plist.contains("<string>-c</string>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(plist.contains("/tmp/masix&amp;boot.log"));
