@@ -1431,6 +1431,57 @@ impl MasixRuntime {
         format!("{}::{}", tool_call.function.name, canonical_args)
     }
 
+    fn build_relaxed_web_search_args(arguments: &serde_json::Value) -> Option<serde_json::Value> {
+        let query = arguments.get("query").and_then(|v| v.as_str())?;
+        let relaxed = Self::relax_search_query(query)?;
+        if relaxed == query {
+            return None;
+        }
+
+        let mut out = arguments.clone();
+        if let serde_json::Value::Object(map) = &mut out {
+            map.insert("query".to_string(), serde_json::Value::String(relaxed));
+            map.remove("endpoint");
+        } else {
+            out = serde_json::json!({ "query": relaxed });
+        }
+        Some(out)
+    }
+
+    fn relax_search_query(query: &str) -> Option<String> {
+        let stopwords: HashSet<&'static str> = [
+            "fai", "ricerca", "ricercare", "cerca", "cercare", "correlate", "correlato",
+            "analizza", "analisi", "eventuali", "possibili", "breve", "riassunto", "sintesi",
+            "su", "sul", "sulla", "sulle", "con", "per", "tra", "fra", "del", "della", "delle",
+            "degli", "dei", "e", "ed", "in", "di", "da", "a", "il", "lo", "la", "gli", "le",
+            "the", "and", "for", "with", "from", "into",
+        ]
+        .into_iter()
+        .collect();
+
+        let mut keywords = Vec::new();
+        for raw in query.split_whitespace() {
+            let cleaned = raw
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+                .to_lowercase();
+            if cleaned.len() < 3 || stopwords.contains(cleaned.as_str()) {
+                continue;
+            }
+            if !keywords.iter().any(|k| k == &cleaned) {
+                keywords.push(cleaned);
+            }
+            if keywords.len() >= 10 {
+                break;
+            }
+        }
+
+        if keywords.is_empty() {
+            None
+        } else {
+            Some(keywords.join(" "))
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn execute_tool_call(
         mcp_client: &Option<Arc<Mutex<McpClient>>>,
@@ -1472,7 +1523,46 @@ impl MasixRuntime {
 
         if let Some(client) = mcp_client {
             let mcp = client.lock().await;
-            let result = mcp.call_tool(server_name, mcp_tool_name, arguments).await?;
+            let mut result =
+                match mcp
+                    .call_tool(server_name, mcp_tool_name, arguments.clone())
+                    .await
+                {
+                    Ok(res) => res,
+                    Err(e) => {
+                        if mcp_tool_name == "web_search" {
+                            if let Some(relaxed_args) =
+                                Self::build_relaxed_web_search_args(&arguments)
+                            {
+                                warn!(
+                                    "MCP web_search failed on first attempt (server='{}'): {}. Retrying with relaxed query.",
+                                    server_name, e
+                                );
+                                mcp.call_tool(server_name, mcp_tool_name, relaxed_args).await?
+                            } else {
+                                return Err(e.into());
+                            }
+                        } else {
+                            return Err(e.into());
+                        }
+                    }
+                };
+
+            if result.is_error && mcp_tool_name == "web_search" {
+                if let Some(relaxed_args) = Self::build_relaxed_web_search_args(&arguments) {
+                    warn!(
+                        "MCP web_search returned error payload (server='{}'), retrying with relaxed query.",
+                        server_name
+                    );
+                    if let Ok(retry_result) =
+                        mcp.call_tool(server_name, mcp_tool_name, relaxed_args).await
+                    {
+                        if !retry_result.is_error {
+                            result = retry_result;
+                        }
+                    }
+                }
+            }
 
             let mut content_parts = Vec::new();
             for item in &result.content {
@@ -1490,6 +1580,11 @@ impl MasixRuntime {
 
             let joined = content_parts.join("\n");
             if result.is_error {
+                warn!(
+                    "MCP tool '{}' error payload (first 320 chars): {}",
+                    tool_call.function.name,
+                    joined.chars().take(320).collect::<String>()
+                );
                 Ok(format!("Tool error: {}", joined))
             } else {
                 Ok(joined)
