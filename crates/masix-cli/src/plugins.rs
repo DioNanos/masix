@@ -103,7 +103,10 @@ fn default_visibility() -> String {
     "free".to_string()
 }
 
-pub async fn handle_plugin_command(action: PluginCommands, config_path: Option<String>) -> Result<()> {
+pub async fn handle_plugin_command(
+    action: PluginCommands,
+    config_path: Option<String>,
+) -> Result<()> {
     match action {
         PluginCommands::List {
             server,
@@ -219,7 +222,10 @@ pub async fn handle_plugin_command(action: PluginCommands, config_path: Option<S
             )
             .await?;
             save_auth_store(&auth_path, &auth_store)?;
-            println!("Installed plugin '{}' {}", install_result.plugin_id, install_result.version);
+            println!(
+                "Installed plugin '{}' {}",
+                install_result.plugin_id, install_result.version
+            );
             println!("Package: {}", install_result.install_path);
         }
         PluginCommands::Update {
@@ -246,8 +252,11 @@ pub async fn handle_plugin_command(action: PluginCommands, config_path: Option<S
             let targets: Vec<String> = if let Some(id) = plugin {
                 vec![id]
             } else {
-                let mut ids: Vec<String> =
-                    registry.plugins.iter().map(|p| p.plugin_id.clone()).collect();
+                let mut ids: Vec<String> = registry
+                    .plugins
+                    .iter()
+                    .map(|p| p.plugin_id.clone())
+                    .collect();
                 ids.sort();
                 ids.dedup();
                 ids
@@ -348,9 +357,9 @@ pub async fn handle_plugin_command(action: PluginCommands, config_path: Option<S
 
             let device_id = plugin_device_id();
             let new_key = generate_device_key(&device_id);
-            
+
             let registered = register_device_key(&server_url, &new_key, &device_id).await?;
-            
+
             auth_store.device_key = Some(new_key.clone());
             auth_store.server_url = Some(server_url.clone());
             auth_store.updated_at = Some(now_unix_secs());
@@ -433,7 +442,8 @@ async fn install_plugin_from_catalog(
         None
     };
 
-    let package_bytes = download_plugin_package(server_url, &entry, platform, auth_resp.as_ref()).await?;
+    let package_bytes =
+        download_plugin_package(server_url, &entry, platform, auth_resp.as_ref()).await?;
     verify_download_hash(&package_bytes, entry.sha256.as_deref())?;
 
     let file_name = format!(
@@ -441,7 +451,8 @@ async fn install_plugin_from_catalog(
         entry.id,
         entry.version,
         sanitize_file_component(
-            entry.entrypoint
+            entry
+                .entrypoint
                 .as_deref()
                 .unwrap_or_else(|| entry.package_type.as_deref().unwrap_or("module"))
         )
@@ -474,13 +485,18 @@ async fn install_plugin_from_catalog(
         enabled: false,
     };
     registry.plugins.push(record.clone());
-    registry.plugins.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
+    registry
+        .plugins
+        .sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
     save_registry(&registry_path, &registry)?;
 
     Ok(record)
 }
 
-fn ensure_plugin_package_permissions(package_path: &Path, entry: &PluginCatalogEntry) -> Result<()> {
+fn ensure_plugin_package_permissions(
+    package_path: &Path,
+    entry: &PluginCatalogEntry,
+) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -551,7 +567,11 @@ async fn fetch_catalog(server_url: &str, platform: &str) -> Result<PluginCatalog
         .await
         .with_context(|| format!("Failed to fetch plugin catalog from {}", url))?;
     if !response.status().is_success() {
-        anyhow::bail!("Plugin catalog request failed: HTTP {} ({})", response.status(), url);
+        anyhow::bail!(
+            "Plugin catalog request failed: HTTP {} ({})",
+            response.status(),
+            url
+        );
     }
     let catalog: PluginCatalog = response
         .json()
@@ -767,7 +787,11 @@ fn plugin_device_id() -> String {
         host,
         std::env::consts::OS,
         std::env::consts::ARCH,
-        if is_termux_environment() { "termux" } else { "std" }
+        if is_termux_environment() {
+            "termux"
+        } else {
+            "std"
+        }
     );
     let digest = sha256_hex(raw.as_bytes());
     format!("mx-{}", &digest[..16.min(digest.len())])
@@ -889,7 +913,10 @@ async fn register_device_key(
     device_key: &str,
     device_id: &str,
 ) -> Result<Option<String>> {
-    let url = format!("{}/v1/plugins/register-key", server_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/v1/plugins/register-key",
+        server_url.trim_end_matches('/')
+    );
     let req = RegisterKeyRequest {
         device_key: device_key.to_string(),
         device_id: device_id.to_string(),

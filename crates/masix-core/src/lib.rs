@@ -7,9 +7,9 @@ mod builtin_tools;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use builtin_tools::{execute_builtin_tool, get_builtin_tool_definitions, is_builtin_tool};
-use masix_config::{Config, GroupMode, PermissionLevel, RetryPolicyConfig, UserToolsMode};
 #[cfg(feature = "stt")]
 use masix_config::SttConfig;
+use masix_config::{Config, GroupMode, PermissionLevel, RetryPolicyConfig, UserToolsMode};
 use masix_exec::{
     is_termux_environment, manage_termux_boot, manage_termux_wake_lock, run_command, BootAction,
     ExecMode, ExecPolicy, WakeLockAction,
@@ -279,6 +279,19 @@ struct BotContext {
     vision_provider: Option<String>,
     retry_policy: RetryPolicy,
     exec_policy: ExecPolicy,
+}
+
+/// Result of the LLM tool execution loop
+struct LlmLoopResult {
+    final_response: String,
+    used_tools: Vec<String>,
+}
+
+/// Context for LLM message building
+struct LlmMessagesResult {
+    messages: Vec<ChatMessage>,
+    user_message: String,
+    vision_analysis: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -1039,6 +1052,110 @@ impl MasixRuntime {
             })
     }
 
+    /// Build LLM messages including system context, memory, media analysis, and history.
+    #[allow(clippy::too_many_arguments)]
+    async fn build_llm_messages(
+        system_prompt: &str,
+        bot_context: &BotContext,
+        account_tag: Option<&str>,
+        user_scope_id: Option<&str>,
+        chat_id: Option<i64>,
+        text: &str,
+        payload: &serde_json::Value,
+        tools: &[ToolDefinition],
+        has_tools: bool,
+        config: &Config,
+    ) -> Result<LlmMessagesResult> {
+        // Build system context
+        let mut system_context = system_prompt.to_string();
+        if let Some(memory) = Self::load_bot_memory_file(bot_context).await {
+            if !memory.trim().is_empty() {
+                system_context.push_str("\n\n# Bot Memory\n");
+                system_context.push_str(&memory);
+            }
+        }
+        if has_tools {
+            system_context.push_str(&Self::build_tool_call_guidance(tools));
+        }
+
+        let mut messages = vec![ChatMessage {
+            role: "system".to_string(),
+            content: Some(system_context),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+
+        // Build user message with media enrichment
+        let mut user_message = Self::enrich_user_message_with_media(text, payload);
+
+        // STT transcription
+        let stt_transcript =
+            match Self::transcribe_media_with_local_stt(config, account_tag, payload).await {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!(
+                        "Local STT failed for profile '{}': {}",
+                        bot_context.profile_name, e
+                    );
+                    None
+                }
+            };
+        if let Some(transcript) = &stt_transcript {
+            user_message.push_str("\n\n[STT Transcript]\n");
+            user_message.push_str(transcript);
+        }
+
+        // Vision analysis
+        let vision_analysis = match Self::analyze_media_with_vision_provider(
+            config,
+            bot_context,
+            account_tag,
+            payload,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                warn!(
+                    "Vision analysis failed for profile '{}': {}",
+                    bot_context.profile_name, e
+                );
+                None
+            }
+        };
+        if let Some(analysis) = &vision_analysis {
+            user_message.push_str("\n\n[Vision Analysis]\n");
+            user_message.push_str(analysis);
+        }
+
+        // Load history
+        let history = Self::load_chat_memory_history(
+            bot_context,
+            account_tag,
+            user_scope_id,
+            chat_id,
+            MEMORY_MAX_CONTEXT_ENTRIES,
+        )
+        .await;
+        messages.extend(history);
+
+        // Add user message
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: Some(user_message.clone()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        });
+
+        Ok(LlmMessagesResult {
+            messages,
+            user_message,
+            vision_analysis,
+        })
+    }
+
     async fn get_mcp_tools(mcp_client: &Option<Arc<Mutex<McpClient>>>) -> Vec<ToolDefinition> {
         let mut tools = get_builtin_tool_definitions();
 
@@ -1174,6 +1291,154 @@ impl MasixRuntime {
         } else {
             Err(anyhow::anyhow!("No MCP client available"))
         }
+    }
+
+    /// Execute LLM chat loop with optional tool calling.
+    /// Handles tool call deduplication, policy gates, and iteration limits.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_llm_tool_loop(
+        provider_router: &ProviderRouter,
+        messages: &mut Vec<ChatMessage>,
+        tools: Option<Vec<ToolDefinition>>,
+        provider_chain: &[String],
+        preferred_provider: Option<String>,
+        preferred_model: Option<String>,
+        retry_policy: &RetryPolicy,
+        profile_name: &str,
+        runtime_tool_access: &RuntimeToolAccess,
+        sender_id: &str,
+        mcp_client: &Option<Arc<Mutex<McpClient>>>,
+        exec_policy: &ExecPolicy,
+        workdir: &Path,
+        storage: &Arc<Mutex<Storage>>,
+        envelope: &Envelope,
+        account_tag: Option<&str>,
+        vision_analysis: Option<&str>,
+    ) -> Result<LlmLoopResult> {
+        let mut final_response = String::new();
+        let mut iterations = 0;
+        let mut selected_provider = preferred_provider;
+        let mut used_tools: Vec<String> = Vec::new();
+        let mut used_tool_signatures: HashSet<String> = HashSet::new();
+        let has_tools = tools.is_some();
+
+        loop {
+            iterations += 1;
+            if iterations > MAX_TOOL_ITERATIONS {
+                warn!("Max tool iterations reached");
+                break;
+            }
+
+            let (response, provider_used) = Self::chat_with_fallback_chain(
+                provider_router,
+                messages.clone(),
+                tools.clone(),
+                provider_chain,
+                selected_provider.as_deref(),
+                preferred_model.as_deref(),
+                retry_policy,
+                profile_name,
+            )
+            .await?;
+            selected_provider = Some(provider_used);
+
+            if let Some(content) = &response.content {
+                if !content.is_empty() {
+                    final_response = content.clone();
+                }
+            }
+
+            if let Some(tool_calls) = &response.tool_calls {
+                if tool_calls.is_empty() {
+                    break;
+                }
+
+                let assistant_message = ChatMessage {
+                    role: "assistant".to_string(),
+                    content: response.content.clone(),
+                    tool_calls: Some(tool_calls.clone()),
+                    tool_call_id: None,
+                    name: None,
+                };
+                messages.push(assistant_message);
+
+                for tool_call in tool_calls {
+                    info!("Executing tool: {}", tool_call.function.name);
+                    if !used_tools
+                        .iter()
+                        .any(|name| name == &tool_call.function.name)
+                    {
+                        used_tools.push(tool_call.function.name.clone());
+                    }
+
+                    let signature = Self::tool_call_signature(tool_call);
+                    if !used_tool_signatures.insert(signature) {
+                        warn!(
+                            "Skipping duplicate tool call within same turn: {}",
+                            tool_call.function.name
+                        );
+                        messages.push(ChatMessage {
+                            role: "tool".to_string(),
+                            content: Some(
+                                "Skipped duplicate tool call in same turn to prevent loops."
+                                    .to_string(),
+                            ),
+                            tool_calls: None,
+                            tool_call_id: Some(tool_call.id.clone()),
+                            name: Some(tool_call.function.name.clone()),
+                        });
+                        continue;
+                    }
+
+                    if !runtime_tool_access.allows_tool(&tool_call.function.name) {
+                        warn!(
+                            "Tool execution denied for sender '{}' (tool='{}')",
+                            sender_id, tool_call.function.name
+                        );
+                        messages.push(ChatMessage {
+                            role: "tool".to_string(),
+                            content: Some("Tool execution denied by role/tool policy.".to_string()),
+                            tool_calls: None,
+                            tool_call_id: Some(tool_call.id.clone()),
+                            name: Some(tool_call.function.name.clone()),
+                        });
+                        continue;
+                    }
+
+                    let tool_result = match Self::execute_tool_call(
+                        mcp_client,
+                        tool_call,
+                        exec_policy,
+                        workdir,
+                        storage,
+                        envelope,
+                        account_tag,
+                        vision_analysis,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(e) => format!("Error: {}", e),
+                    };
+
+                    let tool_message = ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(tool_result),
+                        tool_calls: None,
+                        tool_call_id: Some(tool_call.id.clone()),
+                        name: Some(tool_call.function.name.clone()),
+                    };
+                    messages.push(tool_message);
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(LlmLoopResult {
+            final_response,
+            used_tools,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1721,226 +1986,57 @@ impl MasixRuntime {
                     envelope.chat_id,
                 );
 
-                let mut system_context = system_prompt.to_string();
-                if let Some(memory) = Self::load_bot_memory_file(&bot_context).await {
-                    if !memory.trim().is_empty() {
-                        system_context.push_str("\n\n# Bot Memory\n");
-                        system_context.push_str(&memory);
-                    }
-                }
-                if has_tools {
-                    system_context.push_str(&Self::build_tool_call_guidance(&tools));
-                }
-
-                let mut messages = vec![ChatMessage {
-                    role: "system".to_string(),
-                    content: Some(system_context),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    name: None,
-                }];
-                let mut user_message =
-                    Self::enrich_user_message_with_media(text, &envelope.payload);
-                let stt_transcript = match Self::transcribe_media_with_local_stt(
-                    config,
-                    account_tag.as_deref(),
-                    &envelope.payload,
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(e) => {
-                        warn!(
-                            "Local STT failed for profile '{}': {}",
-                            bot_context.profile_name, e
-                        );
-                        None
-                    }
-                };
-                if let Some(transcript) = &stt_transcript {
-                    user_message.push_str("\n\n[STT Transcript]\n");
-                    user_message.push_str(transcript);
-                }
-                let vision_analysis = match Self::analyze_media_with_vision_provider(
-                    config,
-                    &bot_context,
-                    account_tag.as_deref(),
-                    &envelope.payload,
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(e) => {
-                        warn!(
-                            "Vision analysis failed for profile '{}': {}",
-                            bot_context.profile_name, e
-                        );
-                        None
-                    }
-                };
-                if let Some(analysis) = &vision_analysis {
-                    user_message.push_str("\n\n[Vision Analysis]\n");
-                    user_message.push_str(analysis);
-                }
-                let history = Self::load_chat_memory_history(
+                // Build LLM messages (system, memory, media, history)
+                let llm_msgs = Self::build_llm_messages(
+                    system_prompt,
                     &bot_context,
                     account_tag.as_deref(),
                     user_scope_id.as_deref(),
                     envelope.chat_id,
-                    MEMORY_MAX_CONTEXT_ENTRIES,
+                    text,
+                    &envelope.payload,
+                    &tools,
+                    has_tools,
+                    config,
                 )
-                .await;
-                messages.extend(history);
-                messages.push(ChatMessage {
-                    role: "user".to_string(),
-                    content: Some(user_message.clone()),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    name: None,
-                });
+                .await?;
+
+                let mut messages = llm_msgs.messages;
+                let user_message = llm_msgs.user_message;
+                let vision_analysis = llm_msgs.vision_analysis;
 
                 let preferred_provider = user_providers.lock().await.get(&user_state_key).cloned();
                 let preferred_model = user_models.lock().await.get(&user_state_key).cloned();
 
-                let mut final_response = String::new();
-                let mut iterations = 0;
-                let mut selected_provider = preferred_provider;
-                let selected_model = preferred_model;
-                let mut used_tools: Vec<String> = Vec::new();
-                let mut used_tool_signatures: HashSet<String> = HashSet::new();
+                // Execute LLM loop with tool calling
+                let llm_result = Self::run_llm_tool_loop(
+                    provider_router,
+                    &mut messages,
+                    if has_tools { Some(tools.clone()) } else { None },
+                    &bot_context.provider_chain,
+                    preferred_provider,
+                    preferred_model,
+                    &bot_context.retry_policy,
+                    &bot_context.profile_name,
+                    &runtime_tool_access,
+                    from,
+                    mcp_client,
+                    &bot_context.exec_policy,
+                    &bot_context.workdir,
+                    storage,
+                    &envelope,
+                    account_tag.as_deref(),
+                    vision_analysis.as_deref(),
+                )
+                .await?;
 
-                loop {
-                    iterations += 1;
-                    if iterations > MAX_TOOL_ITERATIONS {
-                        warn!("Max tool iterations reached");
-                        break;
-                    }
-
-                    let (response, provider_used) = if has_tools {
-                        Self::chat_with_fallback_chain(
-                            provider_router,
-                            messages.clone(),
-                            Some(tools.clone()),
-                            &bot_context.provider_chain,
-                            selected_provider.as_deref(),
-                            selected_model.as_deref(),
-                            &bot_context.retry_policy,
-                            &bot_context.profile_name,
-                        )
-                        .await?
-                    } else {
-                        Self::chat_with_fallback_chain(
-                            provider_router,
-                            messages.clone(),
-                            None,
-                            &bot_context.provider_chain,
-                            selected_provider.as_deref(),
-                            selected_model.as_deref(),
-                            &bot_context.retry_policy,
-                            &bot_context.profile_name,
-                        )
-                        .await?
-                    };
-                    selected_provider = Some(provider_used);
-
-                    if let Some(content) = &response.content {
-                        if !content.is_empty() {
-                            final_response = content.clone();
-                        }
-                    }
-
-                    if let Some(tool_calls) = &response.tool_calls {
-                        if tool_calls.is_empty() {
-                            break;
-                        }
-
-                        let assistant_message = ChatMessage {
-                            role: "assistant".to_string(),
-                            content: response.content.clone(),
-                            tool_calls: Some(tool_calls.clone()),
-                            tool_call_id: None,
-                            name: None,
-                        };
-                        messages.push(assistant_message);
-
-                        for tool_call in tool_calls {
-                            info!("Executing tool: {}", tool_call.function.name);
-                            if !used_tools
-                                .iter()
-                                .any(|name| name == &tool_call.function.name)
-                            {
-                                used_tools.push(tool_call.function.name.clone());
-                            }
-
-                            let signature = Self::tool_call_signature(tool_call);
-                            if !used_tool_signatures.insert(signature) {
-                                warn!(
-                                    "Skipping duplicate tool call within same turn: {}",
-                                    tool_call.function.name
-                                );
-                                messages.push(ChatMessage {
-                                    role: "tool".to_string(),
-                                    content: Some("Skipped duplicate tool call in same turn to prevent loops.".to_string()),
-                                    tool_calls: None,
-                                    tool_call_id: Some(tool_call.id.clone()),
-                                    name: Some(tool_call.function.name.clone()),
-                                });
-                                continue;
-                            }
-
-                            if !runtime_tool_access.allows_tool(&tool_call.function.name) {
-                                warn!(
-                                    "Tool execution denied for sender '{}' (tool='{}')",
-                                    from, tool_call.function.name
-                                );
-                                messages.push(ChatMessage {
-                                    role: "tool".to_string(),
-                                    content: Some(
-                                        "Tool execution denied by role/tool policy.".to_string(),
-                                    ),
-                                    tool_calls: None,
-                                    tool_call_id: Some(tool_call.id.clone()),
-                                    name: Some(tool_call.function.name.clone()),
-                                });
-                                continue;
-                            }
-
-                            let tool_result = match Self::execute_tool_call(
-                                mcp_client,
-                                tool_call,
-                                &bot_context.exec_policy,
-                                &bot_context.workdir,
-                                storage,
-                                &envelope,
-                                account_tag.as_deref(),
-                                vision_analysis.as_deref(),
-                            )
-                            .await
-                            {
-                                Ok(result) => result,
-                                Err(e) => format!("Error: {}", e),
-                            };
-
-                            let tool_message = ChatMessage {
-                                role: "tool".to_string(),
-                                content: Some(tool_result),
-                                tool_calls: None,
-                                tool_call_id: Some(tool_call.id.clone()),
-                                name: Some(tool_call.function.name.clone()),
-                            };
-                            messages.push(tool_message);
-                        }
-                    } else {
-                        break;
-                    }
-                }
-
+                let mut final_response = llm_result.final_response;
                 if final_response.is_empty() {
                     final_response = "Non ho potuto generare una risposta.".to_string();
                 }
-                if !used_tools.is_empty() {
+                if !llm_result.used_tools.is_empty() {
                     final_response.push_str("\n\n🧰 Tool usati: ");
-                    final_response.push_str(&used_tools.join(", "));
+                    final_response.push_str(&llm_result.used_tools.join(", "));
                 }
 
                 let _ = Self::append_chat_memory(
