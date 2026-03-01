@@ -174,6 +174,7 @@ mod tests {
     use super::{is_admin_only_tool, load_admin_only_modules, MasixRuntime};
     use masix_config::{Config, GroupMode, TelegramAccount, TelegramConfig};
     use masix_ipc::{Envelope, MessageKind};
+    use masix_providers::ChatMessage;
     use masix_storage::Storage;
     use std::collections::HashSet;
     use std::sync::Arc;
@@ -492,6 +493,30 @@ mod tests {
         assert!(!sanitized.to_lowercase().contains("server non trovato"));
         assert!(sanitized.contains("Ecco i risultati trovati."));
         assert!(sanitized.contains("Web search succeeded in this turn"));
+    }
+
+    #[test]
+    fn synthesize_from_tool_messages_extracts_non_error_payloads() {
+        let messages = vec![
+            ChatMessage {
+                role: "tool".to_string(),
+                content: Some("Error: timeout".to_string()),
+                tool_calls: None,
+                tool_call_id: Some("1".to_string()),
+                name: Some("plugin_discovery_web_search".to_string()),
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: Some("1. Result A\n2. Result B".to_string()),
+                tool_calls: None,
+                tool_call_id: Some("2".to_string()),
+                name: Some("plugin_discovery_web_search".to_string()),
+            },
+        ];
+
+        let out = MasixRuntime::synthesize_from_tool_messages(&messages).unwrap();
+        assert!(out.contains("Raw findings"));
+        assert!(out.contains("Result A"));
     }
 }
 
@@ -1626,6 +1651,52 @@ impl MasixRuntime {
         (sanitized, true)
     }
 
+    fn synthesize_from_tool_messages(messages: &[ChatMessage]) -> Option<String> {
+        let mut snippets: Vec<String> = Vec::new();
+
+        for msg in messages.iter().rev() {
+            if msg.role != "tool" {
+                continue;
+            }
+            let Some(content) = &msg.content else {
+                continue;
+            };
+            let trimmed = content.trim();
+            if trimmed.is_empty()
+                || trimmed.starts_with("Error:")
+                || trimmed.starts_with("Tool error:")
+            {
+                continue;
+            }
+
+            let preview = trimmed
+                .lines()
+                .take(8)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string();
+            if preview.is_empty() {
+                continue;
+            }
+
+            snippets.push(preview);
+            if snippets.len() >= 2 {
+                break;
+            }
+        }
+
+        if snippets.is_empty() {
+            return None;
+        }
+
+        snippets.reverse();
+        Some(format!(
+            "Tool execution completed but the model did not finalize in time.\n\nRaw findings:\n\n{}",
+            snippets.join("\n\n---\n\n")
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn execute_tool_call(
         mcp_client: &Option<Arc<Mutex<McpClient>>>,
@@ -1768,11 +1839,13 @@ impl MasixRuntime {
         let mut used_tools: Vec<String> = Vec::new();
         let mut used_tool_signatures: HashSet<String> = HashSet::new();
         let mut successful_discovery_search_calls = 0usize;
+        let mut hit_tool_iteration_limit = false;
 
         loop {
             iterations += 1;
             if iterations > MAX_TOOL_ITERATIONS {
                 warn!("Max tool iterations reached");
+                hit_tool_iteration_limit = true;
                 break;
             }
 
@@ -1907,6 +1980,54 @@ impl MasixRuntime {
             } else {
                 break;
             }
+        }
+
+        if final_response.trim().is_empty() && !used_tools.is_empty() {
+            let mut finalize_messages = messages.clone();
+            finalize_messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: Some(
+                    "Finalize now using only gathered tool outputs. Do not call tools. Return the final user-facing answer."
+                        .to_string(),
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            });
+
+            match Self::chat_with_fallback_chain(
+                provider_router,
+                finalize_messages,
+                None,
+                provider_chain,
+                selected_provider.as_deref(),
+                preferred_model.as_deref(),
+                retry_policy,
+                profile_name,
+            )
+            .await
+            {
+                Ok((resp, _provider_used)) => {
+                    if let Some(content) = resp.content {
+                        if !content.trim().is_empty() {
+                            final_response = content;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Finalization pass after tool loop failed: {}", e);
+                }
+            }
+        }
+
+        if final_response.trim().is_empty() && !used_tools.is_empty() {
+            if let Some(synthesized) = Self::synthesize_from_tool_messages(&messages) {
+                final_response = synthesized;
+            }
+        }
+
+        if hit_tool_iteration_limit && final_response.trim().is_empty() {
+            final_response = "Tool execution reached iteration limit before completion. Please retry with a narrower request.".to_string();
         }
 
         Ok(LlmLoopResult {
