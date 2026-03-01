@@ -461,6 +461,38 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn discovery_payload_count_detects_json_and_numbered_lists() {
+        let json_payload = r#"[{"title":"A"},{"title":"B"}]"#;
+        assert_eq!(
+            MasixRuntime::count_search_results_from_tool_payload(json_payload),
+            2
+        );
+
+        let list_payload = "1. First result\n2. Second result\n3. Third result";
+        assert_eq!(
+            MasixRuntime::count_search_results_from_tool_payload(list_payload),
+            3
+        );
+
+        let error_payload = "Tool error: Server not found";
+        assert_eq!(
+            MasixRuntime::count_search_results_from_tool_payload(error_payload),
+            0
+        );
+    }
+
+    #[test]
+    fn sanitize_false_search_unavailable_claims_removes_wrong_outage_lines() {
+        let response = "## Ricerca\n⚠️ Ricerca web non disponibile (server non trovato).\nEcco i risultati trovati.";
+        let (sanitized, changed) = MasixRuntime::sanitize_false_search_unavailable_claims(response);
+
+        assert!(changed);
+        assert!(!sanitized.to_lowercase().contains("server non trovato"));
+        assert!(sanitized.contains("Ecco i risultati trovati."));
+        assert!(sanitized.contains("Web search succeeded in this turn"));
+    }
 }
 
 #[derive(Debug, Clone)]
