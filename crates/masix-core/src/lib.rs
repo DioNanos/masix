@@ -1908,12 +1908,31 @@ impl MasixRuntime {
                         .get(&user_state_key)
                         .copied()
                         .unwrap_or_default();
+                    let callback_user_id = envelope
+                        .payload
+                        .get("from_user_id")
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or_default();
+                    let callback_is_admin = if envelope.channel == "telegram" {
+                        if let Some(account) =
+                            Self::get_telegram_account(config, account_tag.as_deref())
+                        {
+                            let dynamic_acl = Self::load_dynamic_acl_for_account(account);
+                            Self::telegram_user_permission(account, &dynamic_acl, callback_user_id)
+                                == PermissionLevel::Admin
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
                     if let Some(msg) = masix_telegram::menu::handle_callback(
                         data,
                         chat_id,
                         envelope.message_id,
                         account_tag.clone(),
                         lang,
+                        callback_is_admin,
                     ) {
                         let _ = outbound_sender.send(msg);
                     }
@@ -3089,7 +3108,8 @@ impl MasixRuntime {
                 .get(user_state_key)
                 .copied()
                 .unwrap_or_default();
-            let cmd_list = masix_telegram::menu::command_list(lang);
+            let cmd_list =
+                masix_telegram::menu::command_list(lang, permission == PermissionLevel::Admin);
             Self::send_outbound_text(
                 outbound_sender,
                 &envelope.channel,
@@ -3109,7 +3129,8 @@ impl MasixRuntime {
                 .get(user_state_key)
                 .copied()
                 .unwrap_or_default();
-            let (menu_text, keyboard) = masix_telegram::menu::home_menu(lang);
+            let (menu_text, keyboard) =
+                masix_telegram::menu::home_menu(lang, permission == PermissionLevel::Admin);
             let msg = OutboundMessage {
                 channel: envelope.channel.clone(),
                 account_tag: account_tag_owned.clone(),
@@ -3155,7 +3176,8 @@ impl MasixRuntime {
                 .get(user_state_key)
                 .copied()
                 .unwrap_or_default();
-            let help_text = masix_telegram::menu::help_text(lang);
+            let help_text =
+                masix_telegram::menu::help_text(lang, permission == PermissionLevel::Admin);
             Self::send_outbound_text(
                 outbound_sender,
                 &envelope.channel,
@@ -3649,7 +3671,19 @@ impl MasixRuntime {
 
         let parts: Vec<&str> = text.split_whitespace().collect();
         if parts.len() < 2 {
-            return "Usage: /admin <add|remove|promote|demote|list|tools> [args]".to_string();
+            return "🛡️ Admin commands\n\
+/admin list\n\
+/admin add <user_id>\n\
+/admin remove <user_id>\n\
+/admin promote <user_id>\n\
+/admin demote <user_id>\n\
+/admin tools user list\n\
+/admin tools user available\n\
+/admin tools user mode <none|selected>\n\
+/admin tools user allow <tool_name>\n\
+/admin tools user deny <tool_name>\n\
+/admin tools user clear"
+                .to_string();
         }
 
         let account = match Self::get_telegram_account(config, account_tag) {

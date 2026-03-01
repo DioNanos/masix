@@ -608,6 +608,7 @@ impl TelegramAdapter {
             { "command": "language", "description": "Set language" },
             { "command": "provider", "description": "Manage provider" },
             { "command": "model", "description": "Set model" },
+            { "command": "admin", "description": "Manage ACL and user tools" },
             { "command": "mcp", "description": "Show MCP status" },
             { "command": "tools", "description": "List runtime tools" },
             { "command": "cron", "description": "Manage reminders" },

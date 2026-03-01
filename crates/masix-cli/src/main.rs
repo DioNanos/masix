@@ -848,59 +848,57 @@ async fn main() -> Result<()> {
             start_daemon(&data_dir, cli.config, cli.log_level)?;
         }
 
-        Commands::Telegram { action } => {
-            match action {
-                TelegramCommands::Start => {
-                    println!("Starting Telegram adapter...");
-                    let config = load_config(cli.config)?;
-                    if let Some(telegram_config) = &config.telegram {
-                        if telegram_config.accounts.is_empty() {
-                            eprintln!("No Telegram accounts configured");
-                            return Ok(());
-                        }
+        Commands::Telegram { action } => match action {
+            TelegramCommands::Start => {
+                println!("Starting Telegram adapter...");
+                let config = load_config(cli.config)?;
+                if let Some(telegram_config) = &config.telegram {
+                    if telegram_config.accounts.is_empty() {
+                        eprintln!("No Telegram accounts configured");
+                        return Ok(());
+                    }
 
-                        let mut tasks = tokio::task::JoinSet::new();
+                    let mut tasks = tokio::task::JoinSet::new();
 
-                        for account in telegram_config.accounts.clone() {
-                            let data_dir = get_data_dir(&config);
-                            let poll_timeout = telegram_config.poll_timeout_secs;
-                            let recreate_interval = telegram_config.client_recreate_interval_secs;
+                    for account in telegram_config.accounts.clone() {
+                        let data_dir = get_data_dir(&config);
+                        let poll_timeout = telegram_config.poll_timeout_secs;
+                        let recreate_interval = telegram_config.client_recreate_interval_secs;
 
-                            tasks.spawn(async move {
-                                let adapter = masix_telegram::TelegramAdapter::new(
-                                    &account,
-                                    data_dir,
-                                    poll_timeout,
-                                    recreate_interval,
-                                );
+                        tasks.spawn(async move {
+                            let adapter = masix_telegram::TelegramAdapter::new(
+                                &account,
+                                data_dir,
+                                poll_timeout,
+                                recreate_interval,
+                            );
 
-                                adapter.poll().await
-                            });
-                        }
+                            adapter.poll().await
+                        });
+                    }
 
-                        while let Some(result) = tasks.join_next().await {
-                            match result {
-                                Ok(Err(e)) => eprintln!("Telegram adapter error: {}", e),
-                                Err(e) => eprintln!("Telegram adapter task failed: {}", e),
-                                Ok(Ok(())) => {}
-                            }
+                    while let Some(result) = tasks.join_next().await {
+                        match result {
+                            Ok(Err(e)) => eprintln!("Telegram adapter error: {}", e),
+                            Err(e) => eprintln!("Telegram adapter task failed: {}", e),
+                            Ok(Ok(())) => {}
                         }
                     }
                 }
-                TelegramCommands::Test => {
-                    println!("Testing Telegram bot connection...");
-                    let config = load_config(cli.config.clone())?;
-                    test_telegram_bots(&config).await?;
-                }
-                TelegramCommands::Resolve {
-                    value,
-                    account,
-                    json,
-                } => {
-                    run_telegram_resolve(cli.config.clone(), account, value, json)?;
-                }
             }
-        }
+            TelegramCommands::Test => {
+                println!("Testing Telegram bot connection...");
+                let config = load_config(cli.config.clone())?;
+                test_telegram_bots(&config).await?;
+            }
+            TelegramCommands::Resolve {
+                value,
+                account,
+                json,
+            } => {
+                run_telegram_resolve(cli.config.clone(), account, value, json)?;
+            }
+        },
 
         #[cfg(feature = "whatsapp")]
         Commands::Whatsapp { action } => {
@@ -1631,7 +1629,8 @@ async fn handle_ai_command(action: AiCommands, config_path: Option<String>) -> R
             platform,
         } => {
             if apply {
-                let result = run_ai_bootstrap_apply(config_path, server, platform, quiet || json).await?;
+                let result =
+                    run_ai_bootstrap_apply(config_path, server, platform, quiet || json).await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 } else if !quiet {
@@ -1926,10 +1925,11 @@ fn build_ai_status(
     let config_exists = config_path_resolved.exists();
     let config = load_config(config_path.clone()).ok();
     let config_valid = config.is_some();
-    let data_dir = config
-        .as_ref()
-        .map(get_data_dir)
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".masix"));
+    let data_dir = config.as_ref().map(get_data_dir).unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".masix")
+    });
     let data_dir_exists = data_dir.exists();
     let data_dir_writable = check_dir_writable(&data_dir);
     let db_path = data_dir.join("masix.db");
@@ -1952,8 +1952,12 @@ fn build_ai_status(
         .unwrap_or(0);
     let plugin_server = resolve_ai_plugin_server(server_override);
     let platform = platform_override.unwrap_or_else(ai_platform_id);
-    let required_human_inputs =
-        collect_required_human_inputs(config_exists, config.as_ref(), telegram_accounts, providers_count);
+    let required_human_inputs = collect_required_human_inputs(
+        config_exists,
+        config.as_ref(),
+        telegram_accounts,
+        providers_count,
+    );
 
     let ready_for_runtime = config_valid && telegram_accounts > 0 && providers_count > 0;
     let ready_for_module_ops = plugin_auth_exists && config_valid;
@@ -2004,7 +2008,11 @@ fn build_ai_bootstrap_plan(
     server_override: Option<String>,
     platform_override: Option<String>,
 ) -> Result<serde_json::Value> {
-    let status = build_ai_status(config_path.clone(), server_override.clone(), platform_override.clone())?;
+    let status = build_ai_status(
+        config_path.clone(),
+        server_override.clone(),
+        platform_override.clone(),
+    )?;
     let plugin_server = resolve_ai_plugin_server(server_override);
     let platform = platform_override.unwrap_or_else(ai_platform_id);
     let cfg_path = config_path_for_diagnostics(config_path);
@@ -2063,16 +2071,20 @@ async fn run_ai_bootstrap_apply(
         applied_actions.push("created_default_config");
     }
 
-    let config = load_config(config_path.clone())
-        .with_context(|| "Unable to load config after bootstrap init. Provide required values and retry.")?;
+    let config = load_config(config_path.clone()).with_context(|| {
+        "Unable to load config after bootstrap init. Provide required values and retry."
+    })?;
     let data_dir = get_data_dir(&config);
     std::fs::create_dir_all(&data_dir)?;
     applied_actions.push("ensured_data_dir");
 
     let plugin_server = resolve_ai_plugin_server(server_override.clone());
-    let _device_key =
-        plugins::ensure_device_key_quiet(config_path.as_deref(), Some(plugin_server.clone()), false)
-            .await?;
+    let _device_key = plugins::ensure_device_key_quiet(
+        config_path.as_deref(),
+        Some(plugin_server.clone()),
+        false,
+    )
+    .await?;
     applied_actions.push("ensured_plugin_device_key");
 
     let status = build_ai_status(config_path, Some(plugin_server), platform_override)?;
@@ -2170,7 +2182,9 @@ fn ai_verify_exit_code(status: &serde_json::Value) -> i32 {
     let config_ok = checks["config_path"]["exists"].as_bool().unwrap_or(false)
         && checks["config_path"]["valid"].as_bool().unwrap_or(false);
     let data_writable = checks["data_dir"]["writable"].as_bool().unwrap_or(false);
-    let db_ok = checks["storage"]["db_accessible"].as_bool().unwrap_or(false);
+    let db_ok = checks["storage"]["db_accessible"]
+        .as_bool()
+        .unwrap_or(false);
     if config_ok && data_writable && db_ok {
         0
     } else {
@@ -3157,7 +3171,9 @@ fn run_telegram_non_interactive_update(
         anyhow::bail!("Use either --admins (replace) OR --add-admins/--remove-admins (incremental), not both.");
     }
     if update.users.is_some() && (update.add_users.is_some() || update.remove_users.is_some()) {
-        anyhow::bail!("Use either --users (replace) OR --add-users/--remove-users (incremental), not both.");
+        anyhow::bail!(
+            "Use either --users (replace) OR --add-users/--remove-users (incremental), not both."
+        );
     }
     if update.readonly.is_some()
         && (update.add_readonly.is_some() || update.remove_readonly.is_some())
@@ -3313,13 +3329,14 @@ fn run_telegram_non_interactive_update(
             merge_ids(&mut account.admins, &ids);
         }
         if let Some(admins) = update.remove_admins {
-            let ids = parse_telegram_principals_csv(&admins, &token_for_resolution)
-                .with_context(|| {
+            let ids = parse_telegram_principals_csv(&admins, &token_for_resolution).with_context(
+                || {
                     format!(
                         "Invalid --remove-admins value. {}",
                         telegram_principals_retry_hint(&account_tag_for_hint, "remove-admins")
                     )
-                })?;
+                },
+            )?;
             remove_ids(&mut account.admins, &ids);
         }
         if let Some(users) = update.users {
@@ -3343,13 +3360,14 @@ fn run_telegram_non_interactive_update(
             merge_ids(&mut account.users, &ids);
         }
         if let Some(users) = update.remove_users {
-            let ids = parse_telegram_principals_csv(&users, &token_for_resolution)
-                .with_context(|| {
+            let ids = parse_telegram_principals_csv(&users, &token_for_resolution).with_context(
+                || {
                     format!(
                         "Invalid --remove-users value. {}",
                         telegram_principals_retry_hint(&account_tag_for_hint, "remove-users")
                     )
-                })?;
+                },
+            )?;
             remove_ids(&mut account.users, &ids);
         }
         if let Some(readonly) = update.readonly {
@@ -5267,8 +5285,16 @@ fn handle_provider_command(action: ProviderCommands, config_path: Option<String>
         ProviderCommands::Known => {
             println!("Known provider presets:\n");
             for (key, display, url, model, ptype) in get_known_providers() {
-                let model_display = if model.is_empty() { "(choose model)" } else { model };
-                let url_display = if url.is_empty() { "(custom URL required)" } else { url };
+                let model_display = if model.is_empty() {
+                    "(choose model)"
+                } else {
+                    model
+                };
+                let url_display = if url.is_empty() {
+                    "(custom URL required)"
+                } else {
+                    url
+                };
                 println!("  {}", key);
                 println!("    Name: {}", display);
                 println!("    URL: {}", url_display);
@@ -6188,8 +6214,14 @@ fn telegram_user_map_key(bot_token: &str, username: &str) -> String {
     )
 }
 
-fn resolve_telegram_identifier_from_updates(bot_token: &str, username: &str) -> Result<Option<i64>> {
-    let url = format!("https://api.telegram.org/bot{}/getUpdates", bot_token.trim());
+fn resolve_telegram_identifier_from_updates(
+    bot_token: &str,
+    username: &str,
+) -> Result<Option<i64>> {
+    let url = format!(
+        "https://api.telegram.org/bot{}/getUpdates",
+        bot_token.trim()
+    );
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
@@ -6222,7 +6254,10 @@ fn resolve_telegram_identifier_from_updates(bot_token: &str, username: &str) -> 
     Ok(None)
 }
 
-fn extract_matching_user_id(node: Option<&serde_json::Value>, target_username: &str) -> Option<i64> {
+fn extract_matching_user_id(
+    node: Option<&serde_json::Value>,
+    target_username: &str,
+) -> Option<i64> {
     let value = node?;
     let from = value.get("from")?;
 
