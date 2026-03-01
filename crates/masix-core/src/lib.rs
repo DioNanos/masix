@@ -299,7 +299,8 @@ mod tests {
                 {"plugin_id": "admin-module-disabled", "version": "1.0.0", "enabled": false, "admin_only": true, "visibility": "free", "platform": "linux-x86_64", "source_server": "https://test", "install_path": "/tmp", "installed_at": 0}
             ]
         }"#;
-        let mut file = std::fs::File::create(temp_dir.join("plugins").join("installed.json")).unwrap();
+        let mut file =
+            std::fs::File::create(temp_dir.join("plugins").join("installed.json")).unwrap();
         file.write_all(registry_content.as_bytes()).unwrap();
 
         let modules = load_admin_only_modules(&temp_dir);
@@ -478,6 +479,7 @@ struct BotContext {
 struct LlmLoopResult {
     final_response: String,
     used_tools: Vec<String>,
+    successful_discovery_search_calls: usize,
 }
 
 /// Context for LLM message building
@@ -1416,7 +1418,7 @@ impl MasixRuntime {
         };
 
         format!(
-            "\n\n# Tool Calling Protocol\nHai accesso a tool runtime.\nQuando una richiesta richiede azioni su shell/file/web/device/termux, usa un tool-call e non limitarti a descrivere i tool.\nPreferisci sempre il tool-calling nativo del provider.\nSe il provider non supporta tool-calling nativo, usa questo formato esatto:\n### TOOL_CALL\ncall <tool_name>\n{{\"arg\":\"value\"}}\n### TOOL_CALL\nBuilt-in tools sempre disponibili: {}\nMCP/extra tools disponibili: {}\nTotale tools disponibili: {}",
+            "\n\n# Tool Calling Protocol\nHai accesso a tool runtime.\nQuando una richiesta richiede azioni su shell/file/web/device/termux, usa un tool-call e non limitarti a descrivere i tool.\nPreferisci sempre il tool-calling nativo del provider.\nSe il provider non supporta tool-calling nativo, usa questo formato esatto:\n### TOOL_CALL\ncall <tool_name>\n{{\"arg\":\"value\"}}\n### TOOL_CALL\nIf a search tool returns results, do not claim search is unavailable or 'Server not found'.\nBuilt-in tools sempre disponibili: {}\nMCP/extra tools disponibili: {}\nTotale tools disponibili: {}",
             builtin_names.join(", "),
             extra_preview,
             builtin_names.len() + extra_names.len()
@@ -1450,11 +1452,50 @@ impl MasixRuntime {
 
     fn relax_search_query(query: &str) -> Option<String> {
         let stopwords: HashSet<&'static str> = [
-            "fai", "ricerca", "ricercare", "cerca", "cercare", "correlate", "correlato",
-            "analizza", "analisi", "eventuali", "possibili", "breve", "riassunto", "sintesi",
-            "su", "sul", "sulla", "sulle", "con", "per", "tra", "fra", "del", "della", "delle",
-            "degli", "dei", "e", "ed", "in", "di", "da", "a", "il", "lo", "la", "gli", "le",
-            "the", "and", "for", "with", "from", "into",
+            "fai",
+            "ricerca",
+            "ricercare",
+            "cerca",
+            "cercare",
+            "correlate",
+            "correlato",
+            "analizza",
+            "analisi",
+            "eventuali",
+            "possibili",
+            "breve",
+            "riassunto",
+            "sintesi",
+            "su",
+            "sul",
+            "sulla",
+            "sulle",
+            "con",
+            "per",
+            "tra",
+            "fra",
+            "del",
+            "della",
+            "delle",
+            "degli",
+            "dei",
+            "e",
+            "ed",
+            "in",
+            "di",
+            "da",
+            "a",
+            "il",
+            "lo",
+            "la",
+            "gli",
+            "le",
+            "the",
+            "and",
+            "for",
+            "with",
+            "from",
+            "into",
         ]
         .into_iter()
         .collect();
@@ -1480,6 +1521,77 @@ impl MasixRuntime {
         } else {
             Some(keywords.join(" "))
         }
+    }
+
+    fn count_search_results_from_tool_payload(payload: &str) -> usize {
+        let trimmed = payload.trim();
+        if trimmed.is_empty() || trimmed.starts_with("Tool error:") || trimmed.starts_with("Error:")
+        {
+            return 0;
+        }
+
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(arr) = value.as_array() {
+                return arr.len();
+            }
+            if let Some(arr) = value.get("results").and_then(|v| v.as_array()) {
+                return arr.len();
+            }
+        }
+
+        trimmed
+            .lines()
+            .filter(|line| {
+                let l = line.trim_start();
+                let mut chars = l.chars().peekable();
+                let mut saw_digit = false;
+                while matches!(chars.peek(), Some(c) if c.is_ascii_digit()) {
+                    saw_digit = true;
+                    let _ = chars.next();
+                }
+                saw_digit && matches!(chars.next(), Some('.'))
+            })
+            .count()
+    }
+
+    fn sanitize_false_search_unavailable_claims(response: &str) -> (String, bool) {
+        let mut changed = false;
+        let mut kept = Vec::new();
+
+        for line in response.lines() {
+            let low = line.to_lowercase();
+            let says_server_not_found =
+                low.contains("server not found") || low.contains("server non trovato");
+            let says_unavailable = (low.contains("non disponibile")
+                || low.contains("unavailable")
+                || low.contains("not available"))
+                && (low.contains("ricerca")
+                    || low.contains("search")
+                    || low.contains("plugin_discovery")
+                    || low.contains("tool di ricerca web")
+                    || low.contains("web tool"));
+
+            if says_server_not_found || says_unavailable {
+                changed = true;
+                continue;
+            }
+
+            kept.push(line);
+        }
+
+        if !changed {
+            return (response.to_string(), false);
+        }
+
+        let mut sanitized = kept.join("\n").trim().to_string();
+        let note = "✅ Web search succeeded in this turn via discovery tools.";
+        if sanitized.is_empty() {
+            sanitized = note.to_string();
+        } else {
+            sanitized.push_str("\n\n");
+            sanitized.push_str(note);
+        }
+        (sanitized, true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1523,30 +1635,29 @@ impl MasixRuntime {
 
         if let Some(client) = mcp_client {
             let mcp = client.lock().await;
-            let mut result =
-                match mcp
-                    .call_tool(server_name, mcp_tool_name, arguments.clone())
-                    .await
-                {
-                    Ok(res) => res,
-                    Err(e) => {
-                        if mcp_tool_name == "web_search" {
-                            if let Some(relaxed_args) =
-                                Self::build_relaxed_web_search_args(&arguments)
-                            {
-                                warn!(
+            let mut result = match mcp
+                .call_tool(server_name, mcp_tool_name, arguments.clone())
+                .await
+            {
+                Ok(res) => res,
+                Err(e) => {
+                    if mcp_tool_name == "web_search" {
+                        if let Some(relaxed_args) = Self::build_relaxed_web_search_args(&arguments)
+                        {
+                            warn!(
                                     "MCP web_search failed on first attempt (server='{}'): {}. Retrying with relaxed query.",
                                     server_name, e
                                 );
-                                mcp.call_tool(server_name, mcp_tool_name, relaxed_args).await?
-                            } else {
-                                return Err(e.into());
-                            }
+                            mcp.call_tool(server_name, mcp_tool_name, relaxed_args)
+                                .await?
                         } else {
                             return Err(e.into());
                         }
+                    } else {
+                        return Err(e.into());
                     }
-                };
+                }
+            };
 
             if result.is_error && mcp_tool_name == "web_search" {
                 if let Some(relaxed_args) = Self::build_relaxed_web_search_args(&arguments) {
@@ -1554,8 +1665,9 @@ impl MasixRuntime {
                         "MCP web_search returned error payload (server='{}'), retrying with relaxed query.",
                         server_name
                     );
-                    if let Ok(retry_result) =
-                        mcp.call_tool(server_name, mcp_tool_name, relaxed_args).await
+                    if let Ok(retry_result) = mcp
+                        .call_tool(server_name, mcp_tool_name, relaxed_args)
+                        .await
                     {
                         if !retry_result.is_error {
                             result = retry_result;
@@ -1623,6 +1735,7 @@ impl MasixRuntime {
         let mut selected_provider = preferred_provider;
         let mut used_tools: Vec<String> = Vec::new();
         let mut used_tool_signatures: HashSet<String> = HashSet::new();
+        let mut successful_discovery_search_calls = 0usize;
 
         loop {
             iterations += 1;
@@ -1744,6 +1857,12 @@ impl MasixRuntime {
                         Err(e) => format!("Error: {}", e),
                     };
 
+                    if tool_call.function.name == "plugin_discovery_web_search"
+                        && Self::count_search_results_from_tool_payload(&tool_result) > 0
+                    {
+                        successful_discovery_search_calls += 1;
+                    }
+
                     let tool_message = ChatMessage {
                         role: "tool".to_string(),
                         content: Some(tool_result),
@@ -1761,6 +1880,7 @@ impl MasixRuntime {
         Ok(LlmLoopResult {
             final_response,
             used_tools,
+            successful_discovery_search_calls,
         })
     }
 
@@ -2062,6 +2182,17 @@ impl MasixRuntime {
                 let mut final_response = llm_result.final_response;
                 if final_response.is_empty() {
                     final_response = "Non ho potuto generare una risposta.".to_string();
+                }
+                if llm_result.successful_discovery_search_calls > 0 {
+                    let (sanitized, changed) =
+                        Self::sanitize_false_search_unavailable_claims(&final_response);
+                    if changed {
+                        warn!(
+                            "Sanitized false search-unavailable claim from LLM response (successful discovery searches: {}).",
+                            llm_result.successful_discovery_search_calls
+                        );
+                    }
+                    final_response = sanitized;
                 }
                 if !llm_result.used_tools.is_empty() {
                     final_response.push_str("\n\n🧰 Tool usati: ");
