@@ -1320,7 +1320,6 @@ impl MasixRuntime {
         let mut selected_provider = preferred_provider;
         let mut used_tools: Vec<String> = Vec::new();
         let mut used_tool_signatures: HashSet<String> = HashSet::new();
-        let has_tools = tools.is_some();
 
         loop {
             iterations += 1;
@@ -2065,33 +2064,13 @@ impl MasixRuntime {
                 )
                 .await;
 
-                if envelope.channel == "telegram" {
-                    if let Some(chat_id) = envelope.chat_id {
-                        let msg = OutboundMessage {
-                            channel: envelope.channel.clone(),
-                            account_tag: account_tag.clone(),
-                            chat_id,
-                            text: final_response,
-                            reply_to: envelope.message_id,
-                            edit_message_id: None,
-                            inline_keyboard: None,
-                            chat_action: None,
-                        };
-                        let _ = outbound_sender.send(msg);
-                    }
-                } else if envelope.channel == "whatsapp" {
-                    if let Some(msg) =
-                        Self::build_whatsapp_forward_message(config, &envelope, &final_response)
-                    {
-                        let _ = outbound_sender.send(msg);
-                    }
-                } else if envelope.channel == "sms" {
-                    if let Some(msg) =
-                        Self::build_sms_forward_message(config, &envelope, &final_response)
-                    {
-                        let _ = outbound_sender.send(msg);
-                    }
-                }
+                Self::dispatch_final_response(
+                    &outbound_sender,
+                    &envelope,
+                    account_tag.clone(),
+                    &final_response,
+                    config,
+                );
             }
             MessageKind::Callback { query_id, data } => {
                 info!("Processing callback {}: {}", query_id, data);
@@ -2155,6 +2134,41 @@ impl MasixRuntime {
         }
 
         Ok(())
+    }
+
+    fn dispatch_final_response(
+        outbound_sender: &broadcast::Sender<OutboundMessage>,
+        envelope: &Envelope,
+        account_tag: Option<String>,
+        response: &str,
+        config: &Config,
+    ) {
+        if envelope.channel == "telegram" {
+            if let Some(chat_id) = envelope.chat_id {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag,
+                    chat_id,
+                    response,
+                    envelope.message_id,
+                );
+            }
+            return;
+        }
+
+        if envelope.channel == "whatsapp" {
+            if let Some(msg) = Self::build_whatsapp_forward_message(config, envelope, response) {
+                let _ = outbound_sender.send(msg);
+            }
+            return;
+        }
+
+        if envelope.channel == "sms" {
+            if let Some(msg) = Self::build_sms_forward_message(config, envelope, response) {
+                let _ = outbound_sender.send(msg);
+            }
+        }
     }
 
     fn message_sender_id(envelope: &Envelope) -> &str {
