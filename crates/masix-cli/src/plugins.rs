@@ -1,6 +1,6 @@
 use crate::PluginCommands;
 use anyhow::{anyhow, Context, Result};
-use masix_config::Config;
+use masix_config::{Config, McpServer};
 use masix_exec::is_termux_environment;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -101,6 +101,8 @@ struct InstalledPluginRecord {
     enabled: bool,
     #[serde(default)]
     admin_only: bool,
+    #[serde(default)]
+    package_type: Option<String>,
 }
 
 fn default_visibility() -> String {
@@ -226,6 +228,9 @@ pub async fn handle_plugin_command(
             )
             .await?;
             save_auth_store(&auth_path, &auth_store)?;
+            let registry_path = plugin_registry_path(&plugins_dir);
+            let registry = load_registry(&registry_path)?;
+            sync_plugin_mcp_servers_in_config(config_path.as_deref(), &registry)?;
             println!(
                 "Installed plugin '{}' {}",
                 install_result.plugin_id, install_result.version
@@ -306,6 +311,7 @@ pub async fn handle_plugin_command(
 
             // Refresh registry from disk after install(s)
             registry = load_registry(&registry_path)?;
+            sync_plugin_mcp_servers_in_config(config_path.as_deref(), &registry)?;
             save_auth_store(&auth_path, &auth_store)?;
             println!(
                 "Update check complete: {} checked, {} updated, {} installed total.",
@@ -327,6 +333,7 @@ pub async fn handle_plugin_command(
                 .ok_or_else(|| anyhow!("Plugin '{}' is not installed", plugin))?;
             entry.enabled = true;
             save_registry(&registry_path, &registry)?;
+            sync_plugin_mcp_servers_in_config(config_path.as_deref(), &registry)?;
             println!("Enabled plugin '{}'.", plugin);
         }
         PluginCommands::Disable { plugin } => {
@@ -342,6 +349,7 @@ pub async fn handle_plugin_command(
                 .ok_or_else(|| anyhow!("Plugin '{}' is not installed", plugin))?;
             entry.enabled = false;
             save_registry(&registry_path, &registry)?;
+            sync_plugin_mcp_servers_in_config(config_path.as_deref(), &registry)?;
             println!("Disabled plugin '{}'.", plugin);
         }
         PluginCommands::Key { regenerate, server } => {
@@ -474,6 +482,11 @@ async fn install_plugin_from_catalog(
 
     let registry_path = plugin_registry_path(plugins_dir);
     let mut registry = load_registry(&registry_path)?;
+    let previous = registry
+        .plugins
+        .iter()
+        .find(|p| p.plugin_id == entry.id && p.platform == platform)
+        .cloned();
     registry
         .plugins
         .retain(|p| !(p.plugin_id == entry.id && p.platform == platform));
@@ -486,8 +499,9 @@ async fn install_plugin_from_catalog(
         install_path: package_path.display().to_string(),
         entrypoint: entry.entrypoint.clone(),
         installed_at: now_unix_secs(),
-        enabled: false,
+        enabled: previous.as_ref().map(|p| p.enabled).unwrap_or(false),
         admin_only: entry.admin_only,
+        package_type: entry.package_type.clone(),
     };
     registry.plugins.push(record.clone());
     registry
@@ -496,6 +510,94 @@ async fn install_plugin_from_catalog(
     save_registry(&registry_path, &registry)?;
 
     Ok(record)
+}
+
+fn sync_plugin_mcp_servers_in_config(
+    config_path: Option<&str>,
+    registry: &InstalledPluginsRegistry,
+) -> Result<()> {
+    let Some(config_path) = resolve_effective_config_path(config_path) else {
+        return Ok(());
+    };
+    if !config_path.exists() {
+        return Ok(());
+    }
+
+    let mut config = Config::load(&config_path)
+        .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
+
+    let mcp_cfg = config.mcp.get_or_insert_with(Default::default);
+    let managed_names: HashSet<String> = registry
+        .plugins
+        .iter()
+        .filter(|p| plugin_record_is_mcp_binary(p))
+        .map(|p| plugin_server_name(&p.plugin_id))
+        .collect();
+
+    let desired: BTreeMap<String, McpServer> = registry
+        .plugins
+        .iter()
+        .filter_map(build_plugin_mcp_server)
+        .map(|srv| (srv.name.clone(), srv))
+        .collect();
+
+    let mut merged = Vec::new();
+    let mut seen = HashSet::new();
+
+    for existing in &mcp_cfg.servers {
+        if let Some(next) = desired.get(&existing.name) {
+            merged.push(next.clone());
+            seen.insert(existing.name.clone());
+        } else if managed_names.contains(&existing.name) {
+            continue;
+        } else {
+            merged.push(existing.clone());
+        }
+    }
+
+    for (name, server) in desired {
+        if !seen.contains(&name) {
+            merged.push(server);
+        }
+    }
+
+    mcp_cfg.servers = merged;
+    let config_toml = toml::to_string_pretty(&config)?;
+    std::fs::write(&config_path, config_toml)?;
+    Ok(())
+}
+
+fn build_plugin_mcp_server(record: &InstalledPluginRecord) -> Option<McpServer> {
+    if !(record.enabled && plugin_record_is_mcp_binary(record)) {
+        return None;
+    }
+    Some(McpServer {
+        name: plugin_server_name(&record.plugin_id),
+        command: record.install_path.clone(),
+        args: vec!["serve-mcp".to_string()],
+    })
+}
+
+fn plugin_record_is_mcp_binary(record: &InstalledPluginRecord) -> bool {
+    if record.package_type.as_deref() == Some("mcp_binary") {
+        return true;
+    }
+    record
+        .entrypoint
+        .as_deref()
+        .map(|entry| entry.starts_with("masix-plugin-"))
+        .unwrap_or(false)
+}
+
+fn plugin_server_name(plugin_id: &str) -> String {
+    format!("plugin_{}", plugin_id.replace('-', "_"))
+}
+
+fn resolve_effective_config_path(config_path: Option<&str>) -> Option<PathBuf> {
+    if let Some(path) = config_path {
+        return Some(PathBuf::from(path));
+    }
+    Config::default_path()
 }
 
 fn ensure_plugin_package_permissions(
