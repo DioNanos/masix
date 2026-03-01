@@ -327,6 +327,7 @@ struct TelegramGetFileResult {
 struct MediaFileReference {
     file_id: String,
     mime_type: String,
+    #[cfg_attr(not(feature = "stt"), allow(dead_code))]
     file_name: Option<String>,
     caption: Option<String>,
 }
@@ -3116,6 +3117,7 @@ impl MasixRuntime {
         path.to_str().is_some_and(Self::is_command_available)
     }
 
+    #[cfg_attr(not(feature = "stt"), allow(dead_code))]
     fn data_dir_from_config(config: &Config) -> Result<PathBuf> {
         if let Some(data_dir) = &config.core.data_dir {
             if data_dir == "~" || data_dir.starts_with("~/") {
