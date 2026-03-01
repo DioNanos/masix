@@ -24,11 +24,11 @@ use masix_providers::{
 use masix_storage::Storage;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
-#[cfg(feature = "stt")]
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{broadcast, Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
@@ -89,6 +89,24 @@ struct PluginAuthResponse {
     expires_at: Option<String>,
     #[serde(default)]
     quota_remaining: Option<u32>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+struct InstalledPluginsRegistry {
+    #[serde(default)]
+    plugins: Vec<InstalledPluginRecord>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+struct InstalledPluginRecord {
+    plugin_id: String,
+    version: String,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    visibility: String,
+    #[serde(default)]
+    platform: String,
 }
 
 fn default_plugin_visibility() -> String {
@@ -5779,6 +5797,11 @@ impl MasixRuntime {
                 "🧩 *Plugin Commands*".to_string(),
                 String::new(),
                 "/plugin list".to_string(),
+                "/plugin installed".to_string(),
+                "/plugin install <plugin> [version]".to_string(),
+                "/plugin update [plugin]".to_string(),
+                "/plugin enable <plugin>".to_string(),
+                "/plugin disable <plugin>".to_string(),
                 "/plugin server".to_string(),
                 "/plugin server set <url>".to_string(),
                 "/plugin key".to_string(),
@@ -5807,7 +5830,8 @@ impl MasixRuntime {
 
         let parts: Vec<&str> = rest.split_whitespace().collect();
         if parts.is_empty() {
-            return "Usage: /plugin <list|server|key ...>".to_string();
+            return "Usage: /plugin <list|installed|install|update|enable|disable|server|key ...>"
+                .to_string();
         }
 
         match parts[0] {
@@ -5842,6 +5866,92 @@ impl MasixRuntime {
                 }
                 Err(err) => format!("Failed to fetch plugin catalog: {}", err),
             },
+            "installed" => match Self::load_plugin_registry(&data_dir) {
+                Ok(registry) => {
+                    if registry.plugins.is_empty() {
+                        return "No installed plugins.".to_string();
+                    }
+                    let mut lines = vec![
+                        format!("Installed plugins ({})", registry.plugins.len()),
+                        String::new(),
+                    ];
+                    for plugin in registry.plugins {
+                        lines.push(format!(
+                            "• {} {} [{}] {} ({})",
+                            plugin.plugin_id,
+                            plugin.version,
+                            if plugin.visibility.trim().is_empty() {
+                                "unknown"
+                            } else {
+                                plugin.visibility.as_str()
+                            },
+                            if plugin.enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            },
+                            if plugin.platform.trim().is_empty() {
+                                "any"
+                            } else {
+                                plugin.platform.as_str()
+                            }
+                        ));
+                    }
+                    lines.join("\n")
+                }
+                Err(err) => format!("Failed to read installed plugins: {}", err),
+            },
+            "install" => {
+                if parts.len() < 2 {
+                    return "Usage: /plugin install <plugin> [version]".to_string();
+                }
+                let mut args = vec![
+                    "plugin".to_string(),
+                    "install".to_string(),
+                    parts[1].to_string(),
+                    "--server".to_string(),
+                    server_url.clone(),
+                ];
+                if parts.len() >= 3 {
+                    args.push("--version".to_string());
+                    args.push(parts[2].to_string());
+                }
+                Self::execute_plugin_cli_command(config, &args).await
+            }
+            "update" => {
+                let mut args = vec![
+                    "plugin".to_string(),
+                    "update".to_string(),
+                    "--server".to_string(),
+                    server_url.clone(),
+                ];
+                if parts.len() >= 2 {
+                    args.insert(2, parts[1].to_string());
+                }
+                Self::execute_plugin_cli_command(config, &args).await
+            }
+            "enable" => {
+                if parts.len() < 2 {
+                    return "Usage: /plugin enable <plugin>".to_string();
+                }
+                let args = vec![
+                    "plugin".to_string(),
+                    "enable".to_string(),
+                    parts[1].to_string(),
+                ];
+                Self::execute_plugin_cli_command(config, &args).await
+            }
+            "disable" => {
+                if parts.len() < 2 {
+                    return "Usage: /plugin disable <plugin>".to_string();
+                }
+                let args = vec![
+                    "plugin".to_string(),
+                    "disable".to_string(),
+                    parts[1].to_string(),
+                ];
+                Self::execute_plugin_cli_command(config, &args).await
+            }
             "server" => {
                 if parts.len() == 1 || parts[1].eq_ignore_ascii_case("show") {
                     format!("Plugin server: {}", server_url)
@@ -6131,6 +6241,66 @@ impl MasixRuntime {
         let body = serde_json::to_string_pretty(store)?;
         std::fs::write(path, body)?;
         Ok(())
+    }
+
+    fn load_plugin_registry(data_dir: &Path) -> Result<InstalledPluginsRegistry> {
+        let path = data_dir.join("plugins").join("installed.json");
+        if !path.exists() {
+            return Ok(InstalledPluginsRegistry::default());
+        }
+        let raw = std::fs::read_to_string(path)?;
+        Ok(serde_json::from_str::<InstalledPluginsRegistry>(&raw)?)
+    }
+
+    async fn execute_plugin_cli_command(config: &Config, args: &[String]) -> String {
+        let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("masix"));
+        let mut cmd = TokioCommand::new(binary);
+
+        if let Some(config_path) = Self::runtime_config_path(config) {
+            cmd.arg("-c").arg(config_path);
+        }
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let output =
+            match tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output()).await {
+                Ok(result) => match result {
+                    Ok(output) => output,
+                    Err(err) => return format!("Failed to execute plugin command: {}", err),
+                },
+                Err(_) => return "Plugin command timeout (>120s).".to_string(),
+            };
+
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let mut lines = Vec::new();
+        lines.push(format!("Exit: {}", output.status));
+        if !stdout.is_empty() {
+            lines.push("stdout:".to_string());
+            lines.extend(Self::limit_text_lines(&stdout, 40));
+        }
+        if !stderr.is_empty() {
+            lines.push("stderr:".to_string());
+            lines.extend(Self::limit_text_lines(&stderr, 20));
+        }
+        lines.join("\n")
+    }
+
+    fn runtime_config_path(_config: &Config) -> Option<PathBuf> {
+        Config::default_path().filter(|path| path.exists())
+    }
+
+    fn limit_text_lines(text: &str, max_lines: usize) -> Vec<String> {
+        let mut lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+        if lines.len() > max_lines {
+            lines.truncate(max_lines);
+            lines.push("... (truncated)".to_string());
+        }
+        lines
     }
 
     fn resolve_plugin_server_url(stored: Option<String>) -> String {
