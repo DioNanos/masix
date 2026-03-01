@@ -22,7 +22,7 @@ use masix_providers::{
     RetryPolicy, ToolCall, ToolDefinition,
 };
 use masix_storage::Storage;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -41,6 +41,59 @@ use std::hash::{Hash, Hasher};
 const MAX_TOOL_ITERATIONS: usize = 5;
 const MEMORY_MAX_CONTEXT_ENTRIES: usize = 12;
 const MAX_INBOUND_CONCURRENCY: usize = 8;
+const DEFAULT_PLUGIN_SERVER_URL: &str = "https://masix.wellanet.dev";
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+struct PluginCatalog {
+    #[serde(default)]
+    plugins: Vec<PluginCatalogEntry>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+struct PluginCatalogEntry {
+    id: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default = "default_plugin_visibility")]
+    visibility: String,
+    #[serde(default)]
+    platforms: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct PluginAuthStore {
+    #[serde(default)]
+    server_url: Option<String>,
+    #[serde(default)]
+    device_key: Option<String>,
+    #[serde(default)]
+    plugin_keys: BTreeMap<String, String>,
+    #[serde(default)]
+    updated_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct PluginAuthRequest {
+    plugin_id: String,
+    license_key: String,
+    device_id: String,
+    masix_version: String,
+    platform: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+struct PluginAuthResponse {
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    expires_at: Option<String>,
+    #[serde(default)]
+    quota_remaining: Option<u32>,
+}
+
+fn default_plugin_visibility() -> String {
+    "free".to_string()
+}
 
 /// Check if a tool belongs to an admin-only MCP server.
 /// Tool names are formatted as `{server_name}_{tool_name}`.
@@ -3820,6 +3873,20 @@ impl MasixRuntime {
             return Ok(true);
         }
 
+        if text.starts_with("/plugin") {
+            info!("Processing /plugin");
+            let response = Self::handle_plugin_chat_command(text, config, permission).await;
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &response,
+                None,
+            );
+            return Ok(true);
+        }
+
         if text.starts_with("/mcp") {
             if permission != PermissionLevel::Admin {
                 Self::send_outbound_text(
@@ -5695,6 +5762,464 @@ impl MasixRuntime {
                 .insert(user_state_key.to_string(), model.to_string());
             format!("✅ Model set to '{}' for this user.", model)
         }
+    }
+
+    async fn handle_plugin_chat_command(
+        text: &str,
+        config: &Config,
+        permission: PermissionLevel,
+    ) -> String {
+        if permission != PermissionLevel::Admin {
+            return "Admin only command.".to_string();
+        }
+
+        let rest = text.strip_prefix("/plugin").unwrap_or("").trim();
+        if rest.is_empty() || rest.eq_ignore_ascii_case("help") {
+            return [
+                "🧩 *Plugin Commands*".to_string(),
+                String::new(),
+                "/plugin list".to_string(),
+                "/plugin server".to_string(),
+                "/plugin server set <url>".to_string(),
+                "/plugin key".to_string(),
+                "/plugin key show [plugin|*]".to_string(),
+                "/plugin key set <plugin|*> <key>".to_string(),
+                "/plugin key clear <plugin|*>".to_string(),
+                "/plugin key <key>  (shortcut = set * <key>)".to_string(),
+                String::new(),
+                "Flow: register key on official registration bot, then paste here with `/plugin key <KEY>`."
+                    .to_string(),
+            ]
+            .join("\n");
+        }
+
+        let data_dir = match Self::data_dir_from_config(config) {
+            Ok(v) => v,
+            Err(err) => return format!("Failed to resolve data dir: {}", err),
+        };
+        let auth_path = data_dir.join("plugins").join("auth.json");
+        let mut auth_store = match Self::load_plugin_auth_store(&auth_path) {
+            Ok(v) => v,
+            Err(err) => return format!("Failed to read plugin auth store: {}", err),
+        };
+        let platform = Self::plugin_platform_id();
+        let server_url = Self::resolve_plugin_server_url(auth_store.server_url.clone());
+
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        if parts.is_empty() {
+            return "Usage: /plugin <list|server|key ...>".to_string();
+        }
+
+        match parts[0] {
+            "list" => match Self::fetch_plugin_catalog(&server_url, &platform).await {
+                Ok(catalog) => {
+                    let mut entries: Vec<&PluginCatalogEntry> = catalog
+                        .plugins
+                        .iter()
+                        .filter(|p| {
+                            p.platforms.is_empty() || p.platforms.iter().any(|x| x == &platform)
+                        })
+                        .collect();
+                    entries.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| b.version.cmp(&a.version)));
+                    if entries.is_empty() {
+                        return format!(
+                            "No plugins available for platform '{}'. Server: {}",
+                            platform, server_url
+                        );
+                    }
+                    let mut lines = vec![
+                        format!("Plugin server: {}", server_url),
+                        format!("Platform: {}", platform),
+                        String::new(),
+                    ];
+                    for entry in entries {
+                        lines.push(format!(
+                            "• {} {} [{}]",
+                            entry.id, entry.version, entry.visibility
+                        ));
+                    }
+                    lines.join("\n")
+                }
+                Err(err) => format!("Failed to fetch plugin catalog: {}", err),
+            },
+            "server" => {
+                if parts.len() == 1 || parts[1].eq_ignore_ascii_case("show") {
+                    format!("Plugin server: {}", server_url)
+                } else if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("set") {
+                    let next = parts[2].trim().trim_end_matches('/');
+                    if next.is_empty() {
+                        return "Usage: /plugin server set <url>".to_string();
+                    }
+                    auth_store.server_url = Some(next.to_string());
+                    auth_store.updated_at = Some(Self::plugin_now_unix_secs());
+                    match Self::save_plugin_auth_store(&auth_path, &auth_store) {
+                        Ok(()) => format!("Plugin server set to: {}", next),
+                        Err(err) => format!("Failed to persist plugin server: {}", err),
+                    }
+                } else {
+                    "Usage: /plugin server OR /plugin server set <url>".to_string()
+                }
+            }
+            "key" => {
+                if parts.len() == 1 || parts[1].eq_ignore_ascii_case("help") {
+                    return [
+                        "🔑 *Plugin Key Commands*".to_string(),
+                        String::new(),
+                        "/plugin key show [plugin|*]".to_string(),
+                        "/plugin key set <plugin|*> <key>".to_string(),
+                        "/plugin key clear <plugin|*>".to_string(),
+                        "/plugin key <key>  (shortcut = set * <key>)".to_string(),
+                    ]
+                    .join("\n");
+                }
+
+                if parts.len() == 2 && !matches!(parts[1], "show" | "set" | "clear") {
+                    let key = parts[1].trim();
+                    return Self::plugin_store_key(
+                        &mut auth_store,
+                        &auth_path,
+                        &server_url,
+                        &platform,
+                        "*",
+                        key,
+                    )
+                    .await;
+                }
+
+                match parts[1] {
+                    "show" => {
+                        if parts.len() >= 3 {
+                            let selector = parts[2];
+                            if selector == "*" {
+                                let value = auth_store
+                                    .device_key
+                                    .as_deref()
+                                    .map(Self::mask_key)
+                                    .unwrap_or_else(|| "<not set>".to_string());
+                                return format!("Global key (*): {}", value);
+                            }
+                            let value = auth_store
+                                .plugin_keys
+                                .get(selector)
+                                .map(|v| Self::mask_key(v))
+                                .unwrap_or_else(|| "<not set>".to_string());
+                            return format!("Key for '{}': {}", selector, value);
+                        }
+
+                        let global = auth_store
+                            .device_key
+                            .as_deref()
+                            .map(Self::mask_key)
+                            .unwrap_or_else(|| "<not set>".to_string());
+                        let mut lines = vec![format!("Global key (*): {}", global)];
+                        if auth_store.plugin_keys.is_empty() {
+                            lines.push("Plugin-specific keys: <none>".to_string());
+                        } else {
+                            lines.push("Plugin-specific keys:".to_string());
+                            for (plugin, key) in &auth_store.plugin_keys {
+                                lines.push(format!("• {} -> {}", plugin, Self::mask_key(key)));
+                            }
+                        }
+                        lines.join("\n")
+                    }
+                    "set" => {
+                        if parts.len() < 4 {
+                            return "Usage: /plugin key set <plugin|*> <key>".to_string();
+                        }
+                        Self::plugin_store_key(
+                            &mut auth_store,
+                            &auth_path,
+                            &server_url,
+                            &platform,
+                            parts[2],
+                            parts[3],
+                        )
+                        .await
+                    }
+                    "clear" => {
+                        if parts.len() < 3 {
+                            return "Usage: /plugin key clear <plugin|*>".to_string();
+                        }
+                        let selector = parts[2];
+                        if selector == "*" {
+                            auth_store.device_key = None;
+                        } else {
+                            auth_store.plugin_keys.remove(selector);
+                        }
+                        auth_store.updated_at = Some(Self::plugin_now_unix_secs());
+                        match Self::save_plugin_auth_store(&auth_path, &auth_store) {
+                            Ok(()) => format!("Key cleared for '{}'.", selector),
+                            Err(err) => format!("Failed to persist key removal: {}", err),
+                        }
+                    }
+                    _ => "Usage: /plugin key <key> OR /plugin key set <plugin|*> <key>".to_string(),
+                }
+            }
+            _ => "Unknown command. Use /plugin help.".to_string(),
+        }
+    }
+
+    async fn plugin_store_key(
+        auth_store: &mut PluginAuthStore,
+        auth_path: &Path,
+        server_url: &str,
+        platform: &str,
+        plugin_selector: &str,
+        key: &str,
+    ) -> String {
+        let key = key.trim();
+        if key.is_empty() {
+            return "Key cannot be empty.".to_string();
+        }
+        let plugin_selector = plugin_selector.trim();
+        if plugin_selector.is_empty() {
+            return "Plugin selector cannot be empty.".to_string();
+        }
+
+        let catalog = match Self::fetch_plugin_catalog(server_url, platform).await {
+            Ok(v) => v,
+            Err(err) => return format!("Failed to fetch plugin catalog: {}", err),
+        };
+
+        let validation_plugin = if plugin_selector == "*" {
+            catalog
+                .plugins
+                .iter()
+                .find(|p| {
+                    (p.platforms.is_empty() || p.platforms.iter().any(|x| x == platform))
+                        && Self::plugin_requires_key(&p.visibility)
+                })
+                .map(|p| p.id.clone())
+                .or_else(|| {
+                    catalog
+                        .plugins
+                        .iter()
+                        .find(|p| {
+                            p.platforms.is_empty() || p.platforms.iter().any(|x| x == platform)
+                        })
+                        .map(|p| p.id.clone())
+                })
+        } else {
+            let found = catalog.plugins.iter().find(|p| {
+                p.id == plugin_selector
+                    && (p.platforms.is_empty() || p.platforms.iter().any(|x| x == platform))
+            });
+            if found.is_none() {
+                return format!(
+                    "Plugin '{}' not found in catalog for platform '{}'.",
+                    plugin_selector, platform
+                );
+            }
+            Some(plugin_selector.to_string())
+        };
+
+        if let Some(plugin_id) = validation_plugin {
+            match Self::request_plugin_auth(
+                server_url,
+                &plugin_id,
+                key,
+                platform,
+                &Self::plugin_device_id(),
+            )
+            .await
+            {
+                Ok(auth) => {
+                    if plugin_selector == "*" {
+                        auth_store.device_key = Some(key.to_string());
+                    } else {
+                        auth_store
+                            .plugin_keys
+                            .insert(plugin_selector.to_string(), key.to_string());
+                    }
+                    auth_store.server_url = Some(server_url.to_string());
+                    auth_store.updated_at = Some(Self::plugin_now_unix_secs());
+                    if let Err(err) = Self::save_plugin_auth_store(auth_path, auth_store) {
+                        return format!("Key validated but failed to save locally: {}", err);
+                    }
+                    let mut lines = vec![format!(
+                        "✅ Key stored for '{}' (validated on server).",
+                        plugin_selector
+                    )];
+                    if let Some(q) = auth.quota_remaining {
+                        lines.push(format!("quota_remaining: {}", q));
+                    }
+                    if let Some(exp) = auth.expires_at {
+                        lines.push(format!("token_expires: {}", exp));
+                    }
+                    if let Some(msg) = auth.message {
+                        lines.push(format!("server: {}", msg));
+                    }
+                    lines.join("\n")
+                }
+                Err(err) => format!("❌ Key validation failed for '{}': {}", plugin_id, err),
+            }
+        } else {
+            "No suitable plugin found for key validation.".to_string()
+        }
+    }
+
+    async fn fetch_plugin_catalog(server_url: &str, platform: &str) -> Result<PluginCatalog> {
+        let url = format!(
+            "{}/v1/plugins/catalog?platform={}&masix_version={}",
+            server_url.trim_end_matches('/'),
+            Self::plugin_url_encode(platform),
+            env!("CARGO_PKG_VERSION")
+        );
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()?;
+        let response = client.get(&url).send().await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("HTTP {}: {}", status, body.trim());
+        }
+        Ok(response.json::<PluginCatalog>().await?)
+    }
+
+    async fn request_plugin_auth(
+        server_url: &str,
+        plugin_id: &str,
+        key: &str,
+        platform: &str,
+        device_id: &str,
+    ) -> Result<PluginAuthResponse> {
+        let url = format!("{}/v1/plugins/auth", server_url.trim_end_matches('/'));
+        let request = PluginAuthRequest {
+            plugin_id: plugin_id.to_string(),
+            license_key: key.to_string(),
+            device_id: device_id.to_string(),
+            masix_version: env!("CARGO_PKG_VERSION").to_string(),
+            platform: platform.to_string(),
+        };
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()?;
+        let response = client.post(&url).json(&request).send().await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("HTTP {}: {}", status, body.trim());
+        }
+        Ok(response.json::<PluginAuthResponse>().await?)
+    }
+
+    fn load_plugin_auth_store(path: &Path) -> Result<PluginAuthStore> {
+        if !path.exists() {
+            return Ok(PluginAuthStore::default());
+        }
+        let raw = std::fs::read_to_string(path)?;
+        Ok(serde_json::from_str::<PluginAuthStore>(&raw)?)
+    }
+
+    fn save_plugin_auth_store(path: &Path, store: &PluginAuthStore) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = serde_json::to_string_pretty(store)?;
+        std::fs::write(path, body)?;
+        Ok(())
+    }
+
+    fn resolve_plugin_server_url(stored: Option<String>) -> String {
+        std::env::var("MASIX_PLUGIN_SERVER_URL")
+            .ok()
+            .or(stored)
+            .unwrap_or_else(|| DEFAULT_PLUGIN_SERVER_URL.to_string())
+    }
+
+    fn plugin_requires_key(visibility: &str) -> bool {
+        visibility.eq_ignore_ascii_case("key_required")
+            || visibility.eq_ignore_ascii_case("private")
+    }
+
+    fn plugin_platform_id() -> String {
+        let arch = std::env::consts::ARCH;
+        let os = std::env::consts::OS;
+        if is_termux_environment() && os == "android" {
+            return format!("{}-{}-termux", os, arch);
+        }
+        format!("{}-{}", os, arch)
+    }
+
+    fn plugin_device_id() -> String {
+        let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+        let host = std::env::var("HOSTNAME")
+            .ok()
+            .or_else(Self::read_hostname_fallback)
+            .unwrap_or_else(|| "unknown-host".to_string());
+        let raw = format!(
+            "{}-{}-{}-{}-{}",
+            user,
+            host,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            if is_termux_environment() {
+                "termux"
+            } else {
+                "std"
+            }
+        );
+        let sanitized = raw
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' {
+                    ch
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+        let mut collapsed = sanitized;
+        while collapsed.contains("--") {
+            collapsed = collapsed.replace("--", "-");
+        }
+        let trimmed = collapsed.trim_matches('-');
+        let shortened: String = trimmed.chars().take(64).collect();
+        format!("mx-{}", shortened)
+    }
+
+    fn read_hostname_fallback() -> Option<String> {
+        std::fs::read_to_string("/etc/hostname")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn plugin_now_unix_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn plugin_url_encode(value: &str) -> String {
+        value
+            .as_bytes()
+            .iter()
+            .flat_map(|b| {
+                let is_unreserved = matches!(
+                    *b,
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'
+                );
+                if is_unreserved {
+                    vec![*b as char]
+                } else {
+                    let mut out = String::new();
+                    use std::fmt::Write as _;
+                    let _ = write!(&mut out, "%{:02X}", b);
+                    out.chars().collect()
+                }
+            })
+            .collect()
+    }
+
+    fn mask_key(value: &str) -> String {
+        let trimmed = value.trim();
+        if trimmed.len() <= 8 {
+            return "***".to_string();
+        }
+        format!("{}***{}", &trimmed[..4], &trimmed[trimmed.len() - 4..])
     }
 
     async fn handle_mcp_chat_command(text: &str, config: &Config) -> String {

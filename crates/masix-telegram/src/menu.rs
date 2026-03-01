@@ -185,11 +185,11 @@ pub fn help_text(lang: Language, is_admin: bool) -> String {
 
     if is_admin {
         let admin_block = match lang {
-            Language::English => "\n\n🛡️ *Admin commands*\n/admin - ACL and user tools\n/mcp - MCP status\n/tools - Runtime tools list\n/exec - Run allowlisted shell command",
-            Language::Spanish => "\n\n🛡️ *Comandos admin*\n/admin - ACL y tools de usuario\n/mcp - Estado MCP\n/tools - Lista tools runtime\n/exec - Ejecutar comando allowlist",
-            Language::Chinese => "\n\n🛡️ *管理员命令*\n/admin - ACL与用户工具\n/mcp - MCP状态\n/tools - 运行时工具列表\n/exec - 执行白名单命令",
-            Language::Russian => "\n\n🛡️ *Команды администратора*\n/admin - ACL и инструменты пользователей\n/mcp - Статус MCP\n/tools - Список инструментов runtime\n/exec - Выполнить команду из allowlist",
-            Language::Italian => "\n\n🛡️ *Comandi admin*\n/admin - ACL e tool utenti\n/mcp - Stato MCP\n/tools - Lista tool runtime\n/exec - Esegui comando allowlist",
+            Language::English => "\n\n🛡️ *Admin commands*\n/admin - ACL and user tools\n/plugin - Module keys and catalog\n/mcp - MCP status\n/tools - Runtime tools list\n/exec - Run allowlisted shell command",
+            Language::Spanish => "\n\n🛡️ *Comandos admin*\n/admin - ACL y tools de usuario\n/plugin - Claves de módulos y catálogo\n/mcp - Estado MCP\n/tools - Lista tools runtime\n/exec - Ejecutar comando allowlist",
+            Language::Chinese => "\n\n🛡️ *管理员命令*\n/admin - ACL与用户工具\n/plugin - 模块密钥与目录\n/mcp - MCP状态\n/tools - 运行时工具列表\n/exec - 执行白名单命令",
+            Language::Russian => "\n\n🛡️ *Команды администратора*\n/admin - ACL и инструменты пользователей\n/plugin - Ключи модулей и каталог\n/mcp - Статус MCP\n/tools - Список инструментов runtime\n/exec - Выполнить команду из allowlist",
+            Language::Italian => "\n\n🛡️ *Comandi admin*\n/admin - ACL e tool utenti\n/plugin - Chiavi moduli e catalogo\n/mcp - Stato MCP\n/tools - Lista tool runtime\n/exec - Esegui comando allowlist",
         };
         text.push_str(admin_block);
     }
@@ -209,11 +209,11 @@ pub fn command_list(lang: Language, is_admin: bool) -> String {
 
     if is_admin {
         let admin_block = match lang {
-            Language::English => "\n/admin - ACL and user tools\n/mcp - MCP status\n/tools - Runtime tools list\n/exec - Run commands",
-            Language::Spanish => "\n/admin - ACL y tools de usuario\n/mcp - Estado MCP\n/tools - Lista tools runtime\n/exec - Ejecutar comandos",
-            Language::Chinese => "\n/admin - ACL与用户工具\n/mcp - MCP状态\n/tools - 运行时工具列表\n/exec - 执行命令",
-            Language::Russian => "\n/admin - ACL и инструменты пользователей\n/mcp - Статус MCP\n/tools - Список инструментов runtime\n/exec - Выполнить команды",
-            Language::Italian => "\n/admin - ACL e tool utenti\n/mcp - Stato MCP\n/tools - Lista tool runtime\n/exec - Esegui comandi",
+            Language::English => "\n/admin - ACL and user tools\n/plugin - Module keys and catalog\n/mcp - MCP status\n/tools - Runtime tools list\n/exec - Run commands",
+            Language::Spanish => "\n/admin - ACL y tools de usuario\n/plugin - Claves de módulos y catálogo\n/mcp - Estado MCP\n/tools - Lista tools runtime\n/exec - Ejecutar comandos",
+            Language::Chinese => "\n/admin - ACL与用户工具\n/plugin - 模块密钥与目录\n/mcp - MCP状态\n/tools - 运行时工具列表\n/exec - 执行命令",
+            Language::Russian => "\n/admin - ACL и инструменты пользователей\n/plugin - Ключи модулей и каталог\n/mcp - Статус MCP\n/tools - Список инструментов runtime\n/exec - Выполнить команды",
+            Language::Italian => "\n/admin - ACL e tool utenti\n/plugin - Chiavi moduli e catalogo\n/mcp - Stato MCP\n/tools - Lista tool runtime\n/exec - Esegui comandi",
         };
         text.push_str(admin_block);
     }
@@ -635,7 +635,7 @@ pub fn handle_callback(
             let msg = match parts.get(1).copied() {
                 Some("acl") => "👥 *ACL*\n\n`/admin list`\n`/admin add <user_id>`\n`/admin remove <user_id>`\n`/admin promote <user_id>`\n`/admin demote <user_id>`",
                 Some("user_tools") => "🧰 *User Tools Policy*\n\n`/admin tools user list`\n`/admin tools user available`\n`/admin tools user mode <none|selected>`\n`/admin tools user allow <tool_name>`\n`/admin tools user deny <tool_name>`\n`/admin tools user clear`",
-                Some("runtime") => "🔌 *Runtime*\n\n`/mcp` - MCP status\n`/tools` - runtime tool list",
+                Some("runtime") => "🔌 *Runtime*\n\n`/plugin` - module catalog + key management\n`/mcp` - MCP status\n`/tools` - runtime tool list",
                 Some("exec") => "🖥️ *Exec*\n\n`/exec <command>`\nRuns only allowlisted commands.",
                 _ => return None,
             };
