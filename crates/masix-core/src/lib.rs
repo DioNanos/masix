@@ -5981,47 +5981,48 @@ impl MasixRuntime {
             Err(err) => return format!("Failed to fetch plugin catalog: {}", err),
         };
 
-        let validation_plugin = if plugin_selector == "*" {
-            catalog
+        let validation_plugins: Vec<String> = if plugin_selector == "*" {
+            let mut seen = std::collections::HashSet::new();
+            let mut preferred = Vec::new();
+            let mut others = Vec::new();
+            for plugin in catalog
                 .plugins
                 .iter()
-                .find(|p| {
-                    (p.platforms.is_empty() || p.platforms.iter().any(|x| x == platform))
-                        && Self::plugin_requires_key(&p.visibility)
-                })
-                .map(|p| p.id.clone())
-                .or_else(|| {
-                    catalog
-                        .plugins
-                        .iter()
-                        .find(|p| {
-                            p.platforms.is_empty() || p.platforms.iter().any(|x| x == platform)
-                        })
-                        .map(|p| p.id.clone())
-                })
+                .filter(|p| p.platforms.is_empty() || p.platforms.iter().any(|x| x == platform))
+            {
+                if !seen.insert(plugin.id.clone()) {
+                    continue;
+                }
+                if Self::plugin_requires_key(&plugin.visibility) {
+                    preferred.push(plugin.id.clone());
+                } else {
+                    others.push(plugin.id.clone());
+                }
+            }
+            preferred.extend(others);
+            preferred
         } else {
-            let found = catalog.plugins.iter().find(|p| {
+            let found = catalog.plugins.iter().any(|p| {
                 p.id == plugin_selector
                     && (p.platforms.is_empty() || p.platforms.iter().any(|x| x == platform))
             });
-            if found.is_none() {
+            if !found {
                 return format!(
                     "Plugin '{}' not found in catalog for platform '{}'.",
                     plugin_selector, platform
                 );
             }
-            Some(plugin_selector.to_string())
+            vec![plugin_selector.to_string()]
         };
 
-        if let Some(plugin_id) = validation_plugin {
-            match Self::request_plugin_auth(
-                server_url,
-                &plugin_id,
-                key,
-                platform,
-                &Self::plugin_device_id(),
-            )
-            .await
+        if validation_plugins.is_empty() {
+            return "No suitable plugin found for key validation.".to_string();
+        }
+
+        let device_id = Self::plugin_device_id();
+        let mut last_error: Option<(String, String)> = None;
+        for plugin_id in &validation_plugins {
+            match Self::request_plugin_auth(server_url, plugin_id, key, platform, &device_id).await
             {
                 Ok(auth) => {
                     if plugin_selector == "*" {
@@ -6037,8 +6038,8 @@ impl MasixRuntime {
                         return format!("Key validated but failed to save locally: {}", err);
                     }
                     let mut lines = vec![format!(
-                        "✅ Key stored for '{}' (validated on server).",
-                        plugin_selector
+                        "✅ Key stored for '{}' (validated on server via '{}').",
+                        plugin_selector, plugin_id
                     )];
                     if let Some(q) = auth.quota_remaining {
                         lines.push(format!("quota_remaining: {}", q));
@@ -6049,12 +6050,23 @@ impl MasixRuntime {
                     if let Some(msg) = auth.message {
                         lines.push(format!("server: {}", msg));
                     }
-                    lines.join("\n")
+                    return lines.join("\n");
                 }
-                Err(err) => format!("❌ Key validation failed for '{}': {}", plugin_id, err),
+                Err(err) => {
+                    last_error = Some((plugin_id.clone(), err.to_string()));
+                }
             }
+        }
+
+        if let Some((plugin_id, err)) = last_error {
+            format!(
+                "❌ Key validation failed on {} candidate plugins. Last error on '{}': {}",
+                validation_plugins.len(),
+                plugin_id,
+                err
+            )
         } else {
-            "No suitable plugin found for key validation.".to_string()
+            "❌ Key validation failed: no compatible plugins.".to_string()
         }
     }
 
