@@ -222,11 +222,9 @@ impl CronExecutor {
     }
 
     pub async fn run(&self) -> Result<()> {
-        info!("Cron executor started (no storage - placeholder mode)");
-
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(self.check_interval_secs)).await;
-        }
+        anyhow::bail!(
+            "CronExecutor::run requires storage and outbound sender; use run_with_storage()"
+        );
     }
 
     pub async fn run_with_storage(
@@ -310,7 +308,7 @@ impl Default for CronExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::CronParser;
+    use super::{CronExecutor, CronParser};
 
     #[test]
     fn parse_invalid_calendar_date_returns_error() {
@@ -331,5 +329,19 @@ mod tests {
             .expect("expected valid schedule");
         assert!(!result.recurring);
         assert_eq!(result.channel, "telegram");
+    }
+
+    #[tokio::test]
+    async fn run_without_storage_returns_error() {
+        let executor = CronExecutor::new();
+        let err = executor
+            .run()
+            .await
+            .expect_err("run() must fail without storage");
+        assert!(
+            err.to_string().contains("use run_with_storage"),
+            "unexpected error: {}",
+            err
+        );
     }
 }

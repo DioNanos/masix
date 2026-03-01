@@ -889,7 +889,8 @@ async fn main() -> Result<()> {
                 }
                 TelegramCommands::Test => {
                     println!("Testing Telegram bot connection...");
-                    // TODO: Implement test
+                    let config = load_config(cli.config.clone())?;
+                    test_telegram_bots(&config).await?;
                 }
                 TelegramCommands::Resolve {
                     value,
