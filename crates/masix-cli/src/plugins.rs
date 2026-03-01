@@ -4,7 +4,7 @@ use masix_config::Config;
 use masix_exec::is_termux_environment;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,6 +44,8 @@ struct PluginCatalogEntry {
     signature: Option<String>,
     #[serde(default)]
     size_bytes: Option<u64>,
+    #[serde(default)]
+    admin_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -97,6 +99,8 @@ struct InstalledPluginRecord {
     entrypoint: Option<String>,
     installed_at: u64,
     enabled: bool,
+    #[serde(default)]
+    admin_only: bool,
 }
 
 fn default_visibility() -> String {
@@ -483,6 +487,7 @@ async fn install_plugin_from_catalog(
         entrypoint: entry.entrypoint.clone(),
         installed_at: now_unix_secs(),
         enabled: false,
+        admin_only: entry.admin_only,
     };
     registry.plugins.push(record.clone());
     registry
@@ -942,4 +947,21 @@ async fn register_device_key(
         .await
         .with_context(|| format!("Invalid registration response JSON from {}", url))?;
     Ok(parsed.message)
+}
+
+/// Returns the set of plugin IDs that are marked as admin-only in the installed registry.
+pub fn get_admin_only_plugins(config_path: Option<&str>) -> Result<HashSet<String>> {
+    let data_dir = resolve_data_dir(config_path);
+    let plugins_dir = plugin_root_dir(&data_dir);
+    let registry_path = plugin_registry_path(&plugins_dir);
+    let registry = load_registry(&registry_path)?;
+
+    let admin_only_plugins: HashSet<String> = registry
+        .plugins
+        .iter()
+        .filter(|p| p.enabled && p.admin_only)
+        .map(|p| p.plugin_id.clone())
+        .collect();
+
+    Ok(admin_only_plugins)
 }

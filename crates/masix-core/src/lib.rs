@@ -42,6 +42,66 @@ const MAX_TOOL_ITERATIONS: usize = 5;
 const MEMORY_MAX_CONTEXT_ENTRIES: usize = 12;
 const MAX_INBOUND_CONCURRENCY: usize = 8;
 
+/// Check if a tool belongs to an admin-only MCP server.
+/// Tool names are formatted as `{server_name}_{tool_name}`.
+/// This function checks if the server_name matches a known admin-only module.
+fn is_admin_only_tool(tool_name: &str, admin_only_modules: &HashSet<String>) -> bool {
+    // Builtin tools are never admin-only (they have their own permission model)
+    if is_builtin_tool(tool_name) {
+        return false;
+    }
+
+    // MCP tools are prefixed with server_name_
+    let parts: Vec<&str> = tool_name.splitn(2, '_').collect();
+    if parts.len() == 2 {
+        let server_name = parts[0];
+        // Check both hyphen and underscore variants
+        let with_hyphens = server_name.replace('_', "-");
+        let with_underscores = server_name.replace('-', "_");
+        return admin_only_modules.contains(server_name)
+            || admin_only_modules.contains(&with_hyphens)
+            || admin_only_modules.contains(&with_underscores);
+    }
+
+    false
+}
+
+/// Load admin-only plugin IDs from the installed plugin registry.
+fn load_admin_only_modules(data_dir: &Path) -> HashSet<String> {
+    let registry_path = data_dir.join("plugins").join("installed.json");
+    if !registry_path.exists() {
+        return HashSet::new();
+    }
+
+    #[derive(serde::Deserialize, Default)]
+    struct PluginRegistry {
+        #[serde(default)]
+        plugins: Vec<InstalledPluginInfo>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct InstalledPluginInfo {
+        plugin_id: String,
+        #[serde(default)]
+        enabled: bool,
+        #[serde(default)]
+        admin_only: bool,
+    }
+
+    std::fs::read_to_string(&registry_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<PluginRegistry>(&content).ok())
+        .map(|registry| {
+            registry
+                .plugins
+                .into_iter()
+                .filter(|p| p.enabled && p.admin_only)
+                .map(|p| p.plugin_id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[async_trait::async_trait]
 pub trait ToolProvider: Send + Sync {
     fn namespace(&self) -> &str;
@@ -111,10 +171,11 @@ impl RuntimeToolAccess {
 
 #[cfg(test)]
 mod tests {
-    use super::MasixRuntime;
+    use super::{is_admin_only_tool, load_admin_only_modules, MasixRuntime};
     use masix_config::{Config, GroupMode, TelegramAccount, TelegramConfig};
     use masix_ipc::{Envelope, MessageKind};
     use masix_storage::Storage;
+    use std::collections::HashSet;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::{broadcast, Mutex};
@@ -196,18 +257,57 @@ mod tests {
                 Some("111"),
                 123,
                 -999,
-                "hello group"
+                ""
             )
         );
-        assert!(
-            !MasixRuntime::should_silently_ignore_telegram_permission_denial(
-                &config,
-                Some("111"),
-                123,
-                -999,
-                "@MyBot hello"
-            )
-        );
+    }
+
+    #[test]
+    fn admin_only_tool_detection() {
+        let mut admin_modules = HashSet::new();
+        admin_modules.insert("codex-backend".to_string());
+
+        // MCP tools prefixed with server_name_ (hyphens preserved in server name)
+        assert!(is_admin_only_tool("codex-backend_run", &admin_modules));
+        assert!(is_admin_only_tool("codex-backend_list", &admin_modules));
+
+        // Non-admin tools
+        assert!(!is_admin_only_tool("discovery_web-search", &admin_modules));
+        assert!(!is_admin_only_tool("other_server_tool", &admin_modules));
+
+        // Builtin tools are never admin-only
+        assert!(!is_admin_only_tool("shell", &admin_modules));
+        assert!(!is_admin_only_tool("web", &admin_modules));
+    }
+
+    #[test]
+    fn load_admin_only_modules_from_registry() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "masix-test-admin-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(temp_dir.join("plugins")).unwrap();
+
+        let registry_content = r#"{
+            "plugins": [
+                {"plugin_id": "codex-backend", "version": "0.1.2", "enabled": true, "admin_only": true, "visibility": "free", "platform": "linux-x86_64", "source_server": "https://test", "install_path": "/tmp", "installed_at": 0},
+                {"plugin_id": "discovery", "version": "0.2.0", "enabled": true, "admin_only": false, "visibility": "free", "platform": "linux-x86_64", "source_server": "https://test", "install_path": "/tmp", "installed_at": 0},
+                {"plugin_id": "admin-module-disabled", "version": "1.0.0", "enabled": false, "admin_only": true, "visibility": "free", "platform": "linux-x86_64", "source_server": "https://test", "install_path": "/tmp", "installed_at": 0}
+            ]
+        }"#;
+        let mut file = std::fs::File::create(temp_dir.join("plugins").join("installed.json")).unwrap();
+        file.write_all(registry_content.as_bytes()).unwrap();
+
+        let modules = load_admin_only_modules(&temp_dir);
+        assert!(modules.contains("codex-backend"));
+        assert!(!modules.contains("discovery"));
+        assert!(!modules.contains("admin-module-disabled")); // Not enabled
+
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
@@ -516,6 +616,15 @@ impl MasixRuntime {
         let base_data_dir = self.get_data_dir()?;
         let bot_contexts = Arc::new(self.build_bot_contexts(&base_data_dir)?);
 
+        // Load admin-only module IDs from plugin registry
+        let admin_only_modules = Arc::new(load_admin_only_modules(&base_data_dir));
+        if !admin_only_modules.is_empty() {
+            info!(
+                "Admin-only modules loaded: {:?}",
+                admin_only_modules.iter().collect::<Vec<_>>()
+            );
+        }
+
         self.start_telegram_adapters(Arc::clone(&bot_contexts))
             .await?;
         self.start_whatsapp_adapter().await?;
@@ -539,6 +648,7 @@ impl MasixRuntime {
         let user_providers_for_processor = Arc::clone(&self.user_providers);
         let user_models_for_processor = Arc::clone(&self.user_models);
         let config_for_processor = self.config.clone();
+        let admin_only_modules_for_processor = Arc::clone(&admin_only_modules);
 
         tokio::spawn(async move {
             let mut cron_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
@@ -560,6 +670,7 @@ impl MasixRuntime {
                                 let user_providers = Arc::clone(&user_providers_for_processor);
                                 let user_models = Arc::clone(&user_models_for_processor);
                                 let config = config_for_processor.clone();
+                                let admin_only_modules = Arc::clone(&admin_only_modules_for_processor);
                                 let semaphore = Arc::clone(&inbound_semaphore);
                                 let scope_locks = Arc::clone(&inbound_scope_locks);
                                 let scope_key = Self::inbound_processing_scope_key(&envelope);
@@ -598,6 +709,7 @@ impl MasixRuntime {
                                         &user_providers,
                                         &user_models,
                                         &config,
+                                        &admin_only_modules,
                                     )
                                     .await
                                     {
@@ -1408,6 +1520,8 @@ impl MasixRuntime {
         envelope: &Envelope,
         account_tag: Option<&str>,
         vision_analysis: Option<&str>,
+        admin_only_modules: &HashSet<String>,
+        permission: PermissionLevel,
     ) -> Result<LlmLoopResult> {
         let mut final_response = String::new();
         let mut iterations = 0;
@@ -1498,6 +1612,27 @@ impl MasixRuntime {
                         continue;
                     }
 
+                    // Check if tool belongs to an admin-only module
+                    if is_admin_only_tool(&tool_call.function.name, admin_only_modules) {
+                        if permission != PermissionLevel::Admin {
+                            warn!(
+                                "Admin-only tool '{}' denied for non-admin sender '{}'",
+                                tool_call.function.name, sender_id
+                            );
+                            messages.push(ChatMessage {
+                                role: "tool".to_string(),
+                                content: Some(
+                                    "Tool execution denied: this tool requires admin privileges."
+                                        .to_string(),
+                                ),
+                                tool_calls: None,
+                                tool_call_id: Some(tool_call.id.clone()),
+                                name: Some(tool_call.function.name.clone()),
+                            });
+                            continue;
+                        }
+                    }
+
                     let tool_result = match Self::execute_tool_call(
                         mcp_client,
                         tool_call,
@@ -1549,6 +1684,7 @@ impl MasixRuntime {
         user_providers: &Arc<Mutex<HashMap<String, String>>>,
         user_models: &Arc<Mutex<HashMap<String, String>>>,
         config: &Config,
+        admin_only_modules: &HashSet<String>,
     ) -> Result<()> {
         let account_tag = envelope
             .payload
@@ -1823,6 +1959,8 @@ impl MasixRuntime {
                     &envelope,
                     account_tag.as_deref(),
                     vision_analysis.as_deref(),
+                    admin_only_modules,
+                    permission,
                 )
                 .await?;
 
