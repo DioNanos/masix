@@ -30,11 +30,11 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/DioNanos/masix"
-homepage = "https://github.com/DioNanos/masix"
+repository = "https://github.com/DioNanos/MasiX"
+homepage = "https://github.com/DioNanos/MasiX"
 keywords = ["messaging", "telegram", "termux", "ai", "cron"]
 categories = ["command-line-utilities"]
 

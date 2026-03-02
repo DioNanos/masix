@@ -1078,9 +1078,8 @@ mod tests {
             Path::new("/home/test"),
             false,
         );
-        assert!(
-            service.contains("ExecStart=/usr/local/bin/masix start --foreground -c /tmp/masix.toml")
-        );
+        assert!(service
+            .contains("ExecStart=/usr/local/bin/masix start --foreground -c /tmp/masix.toml"));
         assert!(service.contains("WantedBy=multi-user.target"));
     }
 

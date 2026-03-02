@@ -31,7 +31,7 @@ const NPM_PACKAGE_NAME: &str = "@mmmbuto/masix";
 const UPDATE_CACHE_FILE: &str = ".masix/.update-check";
 const UPDATE_CACHE_DURATION_SECS: u64 = 24 * 60 * 60;
 const WHISPER_MODEL_URL_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
-const MASIX_GITHUB_RELEASES_BASE_URL: &str = "https://github.com/DioNanos/masix/releases/download";
+const MASIX_GITHUB_RELEASES_BASE_URL: &str = "https://github.com/DioNanos/MasiX/releases/download";
 const MASIX_STT_PREBUILT_ASSET_PREFIX: &str = "masix-stt-whisper-cli";
 const AI_CONTRACT_SCHEMA_VERSION: &str = "masix.ai.contract.v1";
 const AI_DEFAULT_PLUGIN_SERVER_URL: &str = "https://masix.wellanet.dev";
@@ -639,6 +639,21 @@ enum PluginCommands {
         /// Override plugin server base URL
         #[arg(long)]
         server: Option<String>,
+    },
+    /// Register device via Telegram bot approval flow
+    Register {
+        /// Override plugin server base URL
+        #[arg(long)]
+        server: Option<String>,
+        /// Override platform id
+        #[arg(long)]
+        platform: Option<String>,
+        /// Polling timeout in seconds (default: 300)
+        #[arg(long, default_value = "300")]
+        wait_secs: u64,
+        /// Open the Telegram link automatically (if possible)
+        #[arg(long)]
+        open: bool,
     },
 }
 

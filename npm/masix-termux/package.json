@@ -1,6 +1,6 @@
 {
   "name": "@mmmbuto/masix",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Termux-first MIT automation runtime (Telegram, MCP, Cron) with optional in-core STT",
   "main": "check-update.js",
   "files": [
@@ -32,9 +32,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/DioNanos/masix.git"
+    "url": "git+https://github.com/DioNanos/MasiX.git"
   },
-  "homepage": "https://github.com/DioNanos/masix#readme",
+  "homepage": "https://github.com/DioNanos/MasiX#readme",
   "publishConfig": {
     "access": "public"
   },

@@ -414,6 +414,137 @@ pub async fn handle_plugin_command(
                 println!("\nServer: {}", msg);
             }
         }
+        PluginCommands::Register {
+            server,
+            platform,
+            wait_secs,
+            open,
+        } => {
+            let platform = platform.unwrap_or_else(plugin_platform_id);
+            let data_dir = resolve_data_dir(config_path.as_deref());
+            let plugins_dir = plugin_root_dir(&data_dir);
+            let auth_path = plugin_auth_store_path(&plugins_dir);
+            let global_key_path = plugin_global_key_path(&plugins_dir);
+            let mut auth_store = load_auth_store(&auth_path)?;
+            let server_url = resolve_plugin_server_url(server, auth_store.server_url.clone());
+
+            // Ensure we have a device key
+            let device_key = if let Some(existing) = &auth_store.device_key {
+                existing.clone()
+            } else {
+                let device_id = plugin_device_id();
+                let new_key = generate_device_key(&device_id);
+                auth_store.device_key = Some(new_key.clone());
+                auth_store.server_url = Some(server_url.clone());
+                auth_store.updated_at = Some(now_unix_secs());
+                save_auth_store(&auth_path, &auth_store)?;
+                new_key
+            };
+
+            let device_id = plugin_device_id();
+            let masix_version = env!("CARGO_PKG_VERSION").to_string();
+
+            // Start registration request
+            println!("Starting registration...");
+            let start_resp = start_registration(
+                &server_url,
+                &device_key,
+                &device_id,
+                &platform,
+                &masix_version,
+            )
+            .await?;
+
+            println!("\n📱 Telegram Registration Link:");
+            println!("   {}", start_resp.telegram_start_link);
+            println!("\n⏳ Request ID: {}", start_resp.request_id);
+            println!("   Expires in {} seconds", wait_secs);
+
+            // Try to open the link
+            if open {
+                if let Err(e) = open_url(&start_resp.telegram_start_link) {
+                    println!("\n(Note: Could not auto-open URL: {})", e);
+                }
+            }
+
+            // Poll for status
+            println!("\nWaiting for approval (polling every 3 seconds)...");
+            let poll_start = std::time::Instant::now();
+            let poll_interval = std::time::Duration::from_secs(3);
+            let timeout = std::time::Duration::from_secs(wait_secs);
+
+            let (global_key, key_type) = loop {
+                if poll_start.elapsed() >= timeout {
+                    println!("\n⏰ Registration timed out after {} seconds.", wait_secs);
+                    println!(
+                        "You can try again or use the link above within {} seconds.",
+                        start_resp.expires_at - now_unix_secs()
+                    );
+                    return Ok(());
+                }
+
+                tokio::time::sleep(poll_interval).await;
+
+                match check_registration_status(&server_url, &start_resp.request_id).await {
+                    Ok(status) => {
+                        match status.state.as_str() {
+                            "pending" => {
+                                // Still waiting
+                            }
+                            "approved" => {
+                                if let Some(key) = status.license_key {
+                                    break (
+                                        key,
+                                        status
+                                            .key_type
+                                            .unwrap_or_else(|| "free_manual".to_string()),
+                                    );
+                                } else {
+                                    println!("\n✅ Registration approved, but no key returned.");
+                                    println!("The key may have already been retrieved.");
+                                    return Ok(());
+                                }
+                            }
+                            "rejected" => {
+                                println!("\n❌ Registration rejected.");
+                                if let Some(reason) = status.message {
+                                    println!("Reason: {}", reason);
+                                }
+                                return Ok(());
+                            }
+                            "expired" => {
+                                println!("\n⏰ Registration request expired.");
+                                return Ok(());
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(e) => {
+                        println!("Warning: status check failed: {}", e);
+                    }
+                }
+            };
+
+            // Save global key
+            let global_key_store = GlobalKeyStore {
+                key: global_key.clone(),
+                key_type: key_type.clone(),
+                issued_at: now_unix_secs(),
+                source: "register_bot".to_string(),
+            };
+            save_global_key(&global_key_path, &global_key_store)?;
+
+            // Update auth store
+            auth_store.device_key = Some(device_key);
+            auth_store.server_url = Some(server_url);
+            auth_store.updated_at = Some(now_unix_secs());
+            save_auth_store(&auth_path, &auth_store)?;
+
+            println!("\n✅ Registration complete!");
+            println!("🔑 Global key: {}", global_key);
+            println!("📦 Key type: {}", key_type);
+            println!("\nYou can now install plugins without per-plugin authentication.");
+        }
     }
 
     Ok(())
@@ -463,13 +594,18 @@ async fn install_plugin_from_catalog(
         || entry.visibility.eq_ignore_ascii_case("key_required");
 
     let auth_resp = if requires_auth {
+        // Try key sources in order: override > plugin-specific > global key > device key
         let key = key_override
             .map(str::to_string)
             .or_else(|| auth_store.plugin_keys.get(plugin_id).cloned())
+            .or_else(|| {
+                // Try global key first
+                load_global_key(plugins_dir).ok().flatten().map(|g| g.key)
+            })
             .or_else(|| auth_store.device_key.clone())
             .ok_or_else(|| {
                 anyhow!(
-                    "Plugin '{}' requires a key. Run `masix plugin key` to generate one.",
+                    "Plugin '{}' requires a key. Run `masix plugin register` to get one.",
                     plugin_id
                 )
             })?;
@@ -1218,4 +1354,179 @@ pub fn get_admin_only_plugins(config_path: Option<&str>) -> Result<HashSet<Strin
         .collect();
 
     Ok(admin_only_plugins)
+}
+
+// Global key storage structures and functions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GlobalKeyStore {
+    key: String,
+    key_type: String,
+    issued_at: u64,
+    source: String,
+}
+
+fn plugin_global_key_path(plugins_dir: &Path) -> PathBuf {
+    plugins_dir.join("global_key.json")
+}
+
+fn load_global_key(plugins_dir: &Path) -> Result<Option<GlobalKeyStore>> {
+    let path = plugin_global_key_path(plugins_dir);
+    if path.exists() {
+        let raw = std::fs::read_to_string(&path)?;
+        let store: GlobalKeyStore = serde_json::from_str(&raw)?;
+        return Ok(Some(store));
+    }
+    Ok(None)
+}
+
+fn save_global_key(path: &Path, store: &GlobalKeyStore) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_string_pretty(store)?;
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
+// Registration API structures
+#[derive(Debug, Clone, Serialize)]
+struct RegisterStartRequest {
+    device_key: String,
+    device_id: String,
+    platform: String,
+    masix_version: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RegisterStartResponse {
+    request_id: String,
+    nonce: String,
+    telegram_start_link: String,
+    expires_at: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RegisterStatusResponse {
+    request_id: String,
+    state: String,
+    expires_at: u64,
+    #[serde(default)]
+    license_key: Option<String>,
+    #[serde(default)]
+    key_type: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+async fn start_registration(
+    server_url: &str,
+    device_key: &str,
+    device_id: &str,
+    platform: &str,
+    masix_version: &str,
+) -> Result<RegisterStartResponse> {
+    let url = format!(
+        "{}/v1/plugins/register/start",
+        server_url.trim_end_matches('/')
+    );
+    let req = RegisterStartRequest {
+        device_key: device_key.to_string(),
+        device_id: device_id.to_string(),
+        platform: platform.to_string(),
+        masix_version: masix_version.to_string(),
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let response = client
+        .post(&url)
+        .json(&req)
+        .send()
+        .await
+        .with_context(|| format!("Failed to reach registration endpoint {}", url))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "Registration start failed (HTTP {}): {}",
+            status,
+            body.trim()
+        );
+    }
+    response
+        .json()
+        .await
+        .with_context(|| format!("Invalid registration response JSON from {}", url))
+}
+
+async fn check_registration_status(
+    server_url: &str,
+    request_id: &str,
+) -> Result<RegisterStatusResponse> {
+    let url = format!(
+        "{}/v1/plugins/register/status/{}",
+        server_url.trim_end_matches('/'),
+        request_id
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to reach registration status endpoint {}", url))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "Registration status check failed (HTTP {}): {}",
+            status,
+            body.trim()
+        );
+    }
+    response
+        .json()
+        .await
+        .with_context(|| format!("Invalid registration status JSON from {}", url))
+}
+
+fn open_url(url: &str) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .context("Failed to open URL with xdg-open")?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .context("Failed to open URL with open")?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", url])
+            .spawn()
+            .context("Failed to open URL with start")?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = url;
+        anyhow::bail!("URL opening not supported on this platform");
+    }
+}
+
+/// Get the global key if available (for auto-auth in install/update)
+pub fn get_global_key(config_path: Option<&str>) -> Result<Option<String>> {
+    let data_dir = resolve_data_dir(config_path);
+    let plugins_dir = plugin_root_dir(&data_dir);
+    let global_key = load_global_key(&plugins_dir)?;
+    Ok(global_key.map(|g| g.key))
 }
