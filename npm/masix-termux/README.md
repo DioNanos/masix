@@ -2,8 +2,6 @@
 
 Official Termux package for MasiX (MIT).
 
-Official site: WellaNet.Dev
-
 MasiX is an AI-friendly modular assistant runtime in Rust, optimized for smartphone (Termux/Android) and compatible with Linux/macOS.
 
 ## Function Summary

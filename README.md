@@ -7,7 +7,6 @@
 [![npm](https://img.shields.io/npm/v/@mmmbuto/masix?style=flat-square&logo=npm)](https://www.npmjs.com/package/@mmmbuto/masix)
 
 MasiX is a Rust runtime for AI-assisted automation with chat adapters, tool execution, and modular extension paths.
-Official site: WellaNet.Dev
 
 Core capabilities:
 - Single runtime with deterministic CLI surfaces for operators and AI workers
