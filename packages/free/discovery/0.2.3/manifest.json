@@ -1,0 +1,25 @@
+{
+  "plugin_id": "discovery",
+  "version": "0.2.3",
+  "visibility": "free",
+  "license": "MIT",
+  "platforms": [
+    {
+      "id": "android-aarch64-termux",
+      "file": "discovery-android-aarch64-termux.pkg",
+      "sha256": "5e1003add02608f6765cf529810997a0a194adfa327c45cc18d925d484d15688"
+    },
+    {
+      "id": "linux-x86_64",
+      "file": "discovery-linux-x86_64.pkg",
+      "sha256": "c5abe335f053156b5a990ac74190e9ce69e5b4eeb49e57d2dd1fb8813037c337"
+    }
+  ],
+  "install": {
+    "command": "masix plugin install-file --file <path-to-pkg> --plugin discovery --version 0.2.3 --package-type mcp_binary"
+  },
+  "notes": [
+    "Package usable without plugin server.",
+    "After install-file, plugin is registered in ~/.masix/plugins/installed.json and MCP config is synced."
+  ]
+}

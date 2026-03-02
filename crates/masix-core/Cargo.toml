@@ -1,0 +1,54 @@
+# Masix Core
+
+[package]
+name = "masix-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+stt = []
+sms = []
+whatsapp = []
+whatsapp-ro = ["whatsapp"]
+
+[dependencies]
+# Internal
+masix-config = { path = "../masix-config" }
+masix-storage = { path = "../masix-storage" }
+masix-policy = { path = "../masix-policy" }
+masix-exec = { path = "../masix-exec" }
+masix-intent = { path = "../masix-intent" }
+masix-ipc = { path = "../masix-ipc" }
+masix-providers = { path = "../masix-providers" }
+masix-mcp = { path = "../masix-mcp" }
+masix-cron = { path = "../masix-cron" }
+masix-telegram = { path = "../masix-telegram" }
+
+# Async
+tokio.workspace = true
+async-trait.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# HTTP
+reqwest.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Time
+chrono.workspace = true
+
+# Utils
+dirs.workspace = true
+url.workspace = true
+base64.workspace = true
+scraper = "0.21"

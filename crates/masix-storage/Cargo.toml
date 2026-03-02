@@ -1,0 +1,18 @@
+# Masix Storage
+
+[package]
+name = "masix-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+chacha20poly1305.workspace = true
+rand.workspace = true
+sha2.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+chrono.workspace = true
+cron.workspace = true

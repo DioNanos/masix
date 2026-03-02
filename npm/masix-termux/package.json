@@ -1,0 +1,48 @@
+{
+  "name": "@mmmbuto/masix",
+  "version": "0.3.1",
+  "description": "Termux-first MIT automation runtime (Telegram, MCP, Cron) with optional in-core STT",
+  "main": "check-update.js",
+  "files": [
+    "README.md",
+    "install.js",
+    "check-update.js",
+    "prebuilt/"
+  ],
+  "bin": {
+    "masix": "prebuilt/masix",
+    "masix-check-update": "check-update.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js",
+    "check-update": "node check-update.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "termux",
+    "telegram",
+    "mcp",
+    "cron",
+    "ai",
+    "messaging",
+    "android",
+    "stt"
+  ],
+  "author": "Davide A. Guglielmi <dev@mmmbuto.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DioNanos/masix.git"
+  },
+  "homepage": "https://github.com/DioNanos/masix#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "linux",
+    "android"
+  ],
+  "cpu": [
+    "arm64"
+  ]
+}
