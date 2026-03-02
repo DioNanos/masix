@@ -5,6 +5,7 @@ use masix_exec::is_termux_environment;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -642,7 +643,7 @@ async fn install_plugin_from_catalog(
     if let Some(parent) = package_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&package_path, &package_bytes)?;
+    write_package_atomically(&package_path, &package_bytes)?;
     ensure_plugin_package_permissions(&package_path, &entry)?;
 
     let registry_path = plugin_registry_path(plugins_dir);
@@ -743,13 +744,7 @@ fn install_plugin_from_local_file(
     if let Some(parent) = package_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::copy(&resolved_local_file, &package_path).with_context(|| {
-        format!(
-            "Failed to copy package from '{}' to '{}'",
-            resolved_local_file.display(),
-            package_path.display()
-        )
-    })?;
+    copy_package_atomically(&resolved_local_file, &package_path)?;
 
     let permission_entry = PluginCatalogEntry {
         id: plugin_id.to_string(),
@@ -1233,6 +1228,78 @@ fn now_unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn package_temp_path(destination: &Path) -> Result<PathBuf> {
+    let parent = destination.parent().ok_or_else(|| {
+        anyhow!(
+            "Invalid package destination without parent directory: {}",
+            destination.display()
+        )
+    })?;
+    let file_name = destination
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("plugin.pkg");
+    let stamp = now_unix_secs();
+    let pid = std::process::id();
+    let tmp = parent.join(format!(".{}.tmp.{}.{}", file_name, pid, stamp));
+    Ok(tmp)
+}
+
+fn write_package_atomically(destination: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = package_temp_path(destination)?;
+    std::fs::write(&tmp, bytes).with_context(|| {
+        format!(
+            "Failed to write temporary package file '{}'",
+            tmp.display()
+        )
+    })?;
+    match std::fs::rename(&tmp, destination) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(err).with_context(|| {
+                format!(
+                    "Failed to atomically replace package '{}'",
+                    destination.display()
+                )
+            })
+        }
+    }
+}
+
+fn copy_package_atomically(source: &Path, destination: &Path) -> Result<()> {
+    let tmp = package_temp_path(destination)?;
+    std::fs::copy(source, &tmp).with_context(|| {
+        format!(
+            "Failed to copy package from '{}' to temporary file '{}'",
+            source.display(),
+            tmp.display()
+        )
+    })?;
+    match std::fs::rename(&tmp, destination) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp);
+            if err.kind() == ErrorKind::CrossesDevices {
+                std::fs::copy(source, destination).with_context(|| {
+                    format!(
+                        "Failed to copy package from '{}' to '{}'",
+                        source.display(),
+                        destination.display()
+                    )
+                })?;
+                return Ok(());
+            }
+            Err(err).with_context(|| {
+                format!(
+                    "Failed to atomically replace package '{}'",
+                    destination.display()
+                )
+            })
+        }
+    }
 }
 
 fn url_encode(value: &str) -> String {

@@ -13,6 +13,11 @@
       "id": "linux-x86_64",
       "file": "discovery-linux-x86_64.pkg",
       "sha256": "c5abe335f053156b5a990ac74190e9ce69e5b4eeb49e57d2dd1fb8813037c337"
+    },
+    {
+      "id": "macos-aarch64",
+      "file": "discovery-macos-aarch64.pkg",
+      "sha256": "b850b42f50e142e65577a418ecace3fefbec32502dba96c71f82593b37e5a004"
     }
   ],
   "install": {

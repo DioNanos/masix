@@ -8,6 +8,11 @@
   - artifact checksum/size verification enforced server-side before download
   - catalog served in minimal mode with per-platform integrity metadata
 - Package metadata normalized to canonical repository URL (`DioNanos/MasiX`).
+- Expanded MIT package track under `packages/free/`:
+  - added `codex-backend` package set (`0.1.3`, android/linux/macos)
+  - added `codex-tools` package set (`0.1.2`, android/linux/macos)
+  - updated `discovery` package set (`0.2.3`) with macOS artifact metadata
+- Added `docs/THIRD_PARTY_NOTICES.md` with Codex Apache-2.0 attribution reference.
 
 ## 0.3.1 - 2026-03-02
 

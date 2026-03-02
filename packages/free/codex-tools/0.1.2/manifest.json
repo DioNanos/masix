@@ -1,0 +1,33 @@
+{
+  "plugin_id": "codex-tools",
+  "version": "0.1.2",
+  "visibility": "free",
+  "license": "MIT",
+  "admin_only": true,
+  "package_type": "mcp_binary",
+  "platforms": [
+    {
+      "id": "android-aarch64-termux",
+      "file": "codex-tools-android-aarch64-termux.pkg",
+      "sha256": "9e6edc178a75da262b16095cfa6bc04f6212198b5b629d4b43a822cf695a78d5"
+    },
+    {
+      "id": "linux-x86_64",
+      "file": "codex-tools-linux-x86_64.pkg",
+      "sha256": "a1f0ba6134255805fcf28a71b2f94b6dc6375b575a70599472d837a35b398c7e"
+    },
+    {
+      "id": "macos-aarch64",
+      "file": "codex-tools-macos-aarch64.pkg",
+      "sha256": "d52ae0ccd97060dce260cb542ac820b7eb0bd664c82820c126c2a7f032c9b383"
+    }
+  ],
+  "install": {
+    "command": "masix plugin install-file --file <path-to-pkg> --plugin codex-tools --version 0.1.2 --package-type mcp_binary"
+  },
+  "notes": [
+    "Admin-only module. Non-admin users cannot call codex tools.",
+    "Package usable without plugin server.",
+    "Requires codex-backend enabled for full functionality."
+  ]
+}
