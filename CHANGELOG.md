@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.3 - 2026-03-02
+
+- MIT package track expanded with bundled free modules:
+  - `codex-backend` `0.1.3` (android-aarch64-termux, linux-x86_64, macos-aarch64)
+  - `codex-tools` `0.1.2` (android-aarch64-termux, linux-x86_64, macos-aarch64)
+  - `discovery` `0.2.3` metadata updated with macOS artifact
+- Added `docs/THIRD_PARTY_NOTICES.md` with upstream Codex Apache-2.0 attribution notes.
+- Fixed plugin reinstall/update race (`text file busy`, ETXTBSY) using atomic package write/copy in CLI plugin manager.
+
 ## 0.3.2 - 2026-03-02
 
 - Release alignment with modules-server security hardening:
