@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.5 - 2026-03-03
+
+- Rebuilt Termux Android prebuilt binary from current MIT source (no artifact reuse), with sanitized build metadata.
+- Aligned release line/version markers across:
+  - `Cargo.toml`
+  - `README.md`
+  - `npm/masix-termux/package.json`
+- Kept the surgical MIT core sync from `0.3.4` (enterprise runtime improvements).
+- Operational correction: supersedes invalid `0.3.4` npm binary release.
+
 ## 0.3.4 - 2026-03-03
 
 - Surgical MIT sync of stable core runtime improvements:

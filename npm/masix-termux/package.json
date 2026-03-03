@@ -1,6 +1,6 @@
 {
   "name": "@mmmbuto/masix",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Termux-first MIT automation runtime (Telegram, MCP, Cron) with optional in-core STT",
   "main": "check-update.js",
   "files": [

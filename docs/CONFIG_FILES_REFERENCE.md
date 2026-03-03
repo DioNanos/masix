@@ -2,6 +2,9 @@
 
 This is the minimal file map for operating MasiX safely.
 
+Power-mode sanitized reference:
+- `docs/CONFIG_EXAMPLE_POWER.md`
+
 ## 1) Main Config
 
 - Default: `~/.config/masix/config.toml`
