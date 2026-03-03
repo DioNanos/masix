@@ -17,6 +17,17 @@ Core runtime sections (optional but supported):
 - `[core.streaming]`
 - `[core.cron]`
 
+Streaming quick example (Telegram progressive output):
+
+```toml
+[core.streaming]
+enabled = true
+mode = "telegram_edit" # off | telegram_edit | telegram_chunked
+flush_interval_ms = 900
+max_message_edits = 20
+finalize_timeout_secs = 10
+```
+
 MCP server timeout controls:
 - `timeout_secs`
 - `startup_timeout_secs`
