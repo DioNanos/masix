@@ -9,7 +9,10 @@ use base64::Engine;
 use builtin_tools::{execute_builtin_tool, get_builtin_tool_definitions, is_builtin_tool};
 #[cfg(feature = "stt")]
 use masix_config::SttConfig;
-use masix_config::{Config, GroupMode, PermissionLevel, RetryPolicyConfig, UserToolsMode};
+use masix_config::{
+    AgentLoopContinuationDetection, Config, CoreCronConfig, CoreToolProgressConfig, GroupMode,
+    PermissionLevel, RetryPolicyConfig, StreamingMode, ToolProgressMode, UserToolsMode,
+};
 use masix_exec::{
     is_termux_environment, manage_termux_boot, manage_termux_wake_lock, run_command, BootAction,
     ExecMode, ExecPolicy, WakeLockAction,
@@ -27,6 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command as TokioCommand;
@@ -38,7 +42,7 @@ use masix_telegram::menu::Language;
 #[cfg(feature = "sms")]
 use std::hash::{Hash, Hasher};
 
-const MAX_TOOL_ITERATIONS: usize = 5;
+const DEFAULT_MAX_TOOL_ITERATIONS: usize = 25;
 const MEMORY_MAX_CONTEXT_ENTRIES: usize = 12;
 const MAX_INBOUND_CONCURRENCY: usize = 8;
 const DEFAULT_PLUGIN_SERVER_URL: &str = "https://masix.wellanet.dev";
@@ -122,16 +126,20 @@ fn is_admin_only_tool(tool_name: &str, admin_only_modules: &HashSet<String>) -> 
         return false;
     }
 
-    // MCP tools are prefixed with server_name_
-    let parts: Vec<&str> = tool_name.splitn(2, '_').collect();
-    if parts.len() == 2 {
-        let server_name = parts[0];
-        // Check both hyphen and underscore variants
-        let with_hyphens = server_name.replace('_', "-");
-        let with_underscores = server_name.replace('-', "_");
-        return admin_only_modules.contains(server_name)
-            || admin_only_modules.contains(&with_hyphens)
-            || admin_only_modules.contains(&with_underscores);
+    for module_id in admin_only_modules {
+        let normalized_module = module_id.replace('-', "_");
+        let candidate_prefixes = [
+            module_id.clone(),
+            normalized_module.clone(),
+            format!("plugin_{}", normalized_module),
+        ];
+
+        for prefix in candidate_prefixes {
+            let full_prefix = format!("{}_", prefix);
+            if tool_name.starts_with(&full_prefix) {
+                return true;
+            }
+        }
     }
 
     false
@@ -243,7 +251,10 @@ impl RuntimeToolAccess {
 #[cfg(test)]
 mod tests {
     use super::{is_admin_only_tool, load_admin_only_modules, MasixRuntime};
-    use masix_config::{Config, GroupMode, TelegramAccount, TelegramConfig};
+    use masix_config::{
+        AgentLoopContinuationDetection, Config, CoreToolProgressConfig, GroupMode, TelegramAccount,
+        TelegramConfig, ToolProgressMode,
+    };
     use masix_ipc::{Envelope, MessageKind};
     use masix_providers::ChatMessage;
     use masix_storage::Storage;
@@ -339,11 +350,23 @@ mod tests {
         let mut admin_modules = HashSet::new();
         admin_modules.insert("codex-backend".to_string());
 
-        // MCP tools prefixed with server_name_ (hyphens preserved in server name)
+        // MCP tools may come from direct server names or plugin-prefixed names.
         assert!(is_admin_only_tool("codex-backend_run", &admin_modules));
         assert!(is_admin_only_tool("codex-backend_list", &admin_modules));
+        assert!(is_admin_only_tool(
+            "plugin_codex_backend_run_task",
+            &admin_modules
+        ));
+        assert!(is_admin_only_tool(
+            "plugin_codex_backend_plan_apply",
+            &admin_modules
+        ));
 
         // Non-admin tools
+        assert!(!is_admin_only_tool(
+            "plugin_discovery_web_search",
+            &admin_modules
+        ));
         assert!(!is_admin_only_tool("discovery_web-search", &admin_modules));
         assert!(!is_admin_only_tool("other_server_tool", &admin_modules));
 
@@ -381,6 +404,55 @@ mod tests {
         assert!(!modules.contains("admin-module-disabled")); // Not enabled
 
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn continuation_prompt_detection_modes() {
+        assert!(MasixRuntime::looks_like_continuation_prompt(
+            "Vuoi che continui?",
+            AgentLoopContinuationDetection::HeuristicV1
+        ));
+        assert!(!MasixRuntime::looks_like_continuation_prompt(
+            "Vuoi che continui?",
+            AgentLoopContinuationDetection::StrictV1
+        ));
+        assert!(MasixRuntime::looks_like_continuation_prompt(
+            "should i continue?",
+            AgentLoopContinuationDetection::StrictV1
+        ));
+    }
+
+    #[test]
+    fn tool_progress_emission_modes() {
+        let cfg_first = CoreToolProgressConfig::default();
+        assert!(MasixRuntime::should_emit_tool_progress(
+            &cfg_first, 1, 0, None
+        ));
+        assert!(!MasixRuntime::should_emit_tool_progress(
+            &cfg_first, 2, 1, None
+        ));
+
+        let cfg_periodic = CoreToolProgressConfig {
+            mode: ToolProgressMode::Periodic,
+            ..CoreToolProgressConfig::default()
+        };
+        assert!(MasixRuntime::should_emit_tool_progress(
+            &cfg_periodic,
+            2,
+            1,
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(10))
+        ));
+
+        let cfg_milestone = CoreToolProgressConfig {
+            mode: ToolProgressMode::Milestones,
+            ..CoreToolProgressConfig::default()
+        };
+        assert!(MasixRuntime::should_emit_tool_progress(
+            &cfg_milestone,
+            3,
+            1,
+            None
+        ));
     }
 
     #[test]
@@ -501,6 +573,14 @@ mod tests {
     #[tokio::test]
     async fn cron_check_dispatches_due_job_and_disables_one_shot() {
         let path = temp_db_path("cron-dispatch");
+        let dead_letter_dir = std::env::temp_dir().join(format!(
+            "masix-test-cron-dead-letter-dispatch-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dead_letter_dir).expect("dead letter dir");
         let storage = Storage::new(&path).expect("storage");
         let due = (chrono::Utc::now() - chrono::Duration::seconds(2)).to_rfc3339();
         storage
@@ -519,7 +599,13 @@ mod tests {
         let storage = Arc::new(Mutex::new(storage));
         let (tx, mut rx) = broadcast::channel(8);
 
-        MasixRuntime::check_cron_jobs(&storage, &tx, Some("bot_default"))
+        MasixRuntime::check_cron_jobs(
+            &storage,
+            &tx,
+            Some("bot_default"),
+            &masix_config::CoreCronConfig::default(),
+            dead_letter_dir.as_path(),
+        )
             .await
             .expect("cron check");
 
@@ -537,11 +623,20 @@ mod tests {
         assert!(remaining.is_empty());
 
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dead_letter_dir);
     }
 
     #[tokio::test]
     async fn cron_check_skips_non_numeric_recipient_and_disables_job() {
         let path = temp_db_path("cron-invalid-recipient");
+        let dead_letter_dir = std::env::temp_dir().join(format!(
+            "masix-test-cron-dead-letter-invalid-recipient-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dead_letter_dir).expect("dead letter dir");
         let storage = Storage::new(&path).expect("storage");
         let due = (chrono::Utc::now() - chrono::Duration::seconds(2)).to_rfc3339();
         storage
@@ -560,7 +655,13 @@ mod tests {
         let storage = Arc::new(Mutex::new(storage));
         let (tx, mut rx) = broadcast::channel(8);
 
-        MasixRuntime::check_cron_jobs(&storage, &tx, None)
+        MasixRuntime::check_cron_jobs(
+            &storage,
+            &tx,
+            None,
+            &masix_config::CoreCronConfig::default(),
+            dead_letter_dir.as_path(),
+        )
             .await
             .expect("cron check");
 
@@ -577,6 +678,7 @@ mod tests {
         assert!(remaining.is_empty());
 
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dead_letter_dir);
     }
 
     #[test]
@@ -634,6 +736,25 @@ mod tests {
         assert!(out.contains("Raw findings"));
         assert!(out.contains("Result A"));
     }
+
+    #[test]
+    fn resolve_mcp_tool_name_prefers_longest_prefix() {
+        let names = vec![
+            "disc".to_string(),
+            "discovery".to_string(),
+            "discovery_extra".to_string(),
+        ];
+        let resolved =
+            MasixRuntime::resolve_mcp_tool_name(&names, "discovery_web_search").expect("resolved");
+        assert_eq!(resolved.0, "discovery");
+        assert_eq!(resolved.1, "web_search");
+
+        let resolved_extra =
+            MasixRuntime::resolve_mcp_tool_name(&names, "discovery_extra_fetch")
+                .expect("resolved");
+        assert_eq!(resolved_extra.0, "discovery_extra");
+        assert_eq!(resolved_extra.1, "fetch");
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -653,6 +774,14 @@ struct LlmLoopResult {
     final_response: String,
     used_tools: Vec<String>,
     successful_discovery_search_calls: usize,
+}
+
+struct LlmLoopOptions {
+    max_iterations: usize,
+    auto_continue_enabled: bool,
+    auto_continue_max: usize,
+    continuation_detection: AgentLoopContinuationDetection,
+    tool_progress: CoreToolProgressConfig,
 }
 
 /// Context for LLM message building
@@ -841,6 +970,8 @@ impl MasixRuntime {
         let user_models_for_processor = Arc::clone(&self.user_models);
         let config_for_processor = self.config.clone();
         let admin_only_modules_for_processor = Arc::clone(&admin_only_modules);
+        let cron_cfg = self.config.core.cron.clone();
+        let cron_data_dir = base_data_dir.clone();
 
         tokio::spawn(async move {
             let mut cron_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
@@ -926,6 +1057,8 @@ impl MasixRuntime {
                             &storage_for_processor,
                             &outbound_for_processor,
                             default_cron_account_tag.as_deref(),
+                            &cron_cfg,
+                            &cron_data_dir,
                         ).await {
                             error!("Error checking cron jobs: {}", e);
                         }
@@ -944,6 +1077,8 @@ impl MasixRuntime {
         storage: &Arc<Mutex<Storage>>,
         outbound_sender: &broadcast::Sender<OutboundMessage>,
         default_account_tag: Option<&str>,
+        cron_cfg: &CoreCronConfig,
+        data_dir: &Path,
     ) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -951,6 +1086,15 @@ impl MasixRuntime {
         let jobs = storage_guard.get_due_cron_jobs(&now)?;
         drop(storage_guard);
 
+        debug!(
+            "Cron dispatch tick: due_jobs={} dispatch_concurrency={} retries={}",
+            jobs.len(),
+            cron_cfg.dispatch_concurrency,
+            cron_cfg.delivery_retry_count
+        );
+
+        // NOTE: dispatch_concurrency is validated/logged but not yet enforced —
+        // jobs are dispatched sequentially.  Tracked for a future release.
         for job in jobs {
             info!("Executing cron job {}: {}", job.id, job.message);
 
@@ -963,34 +1107,135 @@ impl MasixRuntime {
                 Some(job.account_tag.clone())
             };
 
-            if let Ok(chat_id) = recipient.parse::<i64>() {
+            let send_ok = if let Ok(chat_id) = recipient.parse::<i64>() {
                 let msg = OutboundMessage {
-                    channel,
-                    account_tag,
+                    channel: channel.clone(),
+                    account_tag: account_tag.clone(),
                     chat_id,
-                    text: message,
+                    text: message.clone(),
                     reply_to: None,
                     edit_message_id: None,
                     inline_keyboard: None,
                     chat_action: None,
                 };
-
-                let _ = outbound_sender.send(msg);
+                let mut success = false;
+                for attempt in 0..=cron_cfg.delivery_retry_count {
+                    match outbound_sender.send(msg.clone()) {
+                        Ok(_) => {
+                            success = true;
+                            break;
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Cron job {} send failed (attempt {}/{}): {}",
+                                job.id,
+                                attempt + 1,
+                                cron_cfg.delivery_retry_count + 1,
+                                err
+                            );
+                            if attempt < cron_cfg.delivery_retry_count {
+                                let backoff = cron_cfg
+                                    .delivery_retry_backoff_secs
+                                    .saturating_mul(u64::from(attempt) + 1);
+                                tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
+                            }
+                        }
+                    }
+                }
+                success
             } else {
                 warn!(
                     "Skipping cron job {}: non-numeric recipient '{}' for channel '{}'",
                     job.id, recipient, channel
                 );
-            }
+                false
+            };
 
-            let storage_guard = storage.lock().await;
-            if job.recurring {
-                storage_guard.update_cron_next_run(job.id, &job.schedule, &job.timezone)?;
+            if send_ok {
+                let storage_guard = storage.lock().await;
+                if job.recurring {
+                    storage_guard.update_cron_next_run(job.id, &job.schedule, &job.timezone)?;
+                } else {
+                    storage_guard.disable_cron_job(job.id)?;
+                }
             } else {
-                storage_guard.disable_cron_job(job.id)?;
+                if cron_cfg.dead_letter_enabled {
+                    Self::append_cron_dead_letter(
+                        data_dir,
+                        job.id,
+                        &channel,
+                        &recipient,
+                        &message,
+                        "dispatch_failed",
+                    )
+                    .await?;
+                }
+                let storage_guard = storage.lock().await;
+                if job.recurring {
+                    storage_guard.update_cron_next_run(job.id, &job.schedule, &job.timezone)?;
+                } else {
+                    storage_guard.disable_cron_job(job.id)?;
+                }
             }
         }
 
+        Ok(())
+    }
+
+    async fn append_cron_dead_letter(
+        data_dir: &Path,
+        job_id: i64,
+        channel: &str,
+        recipient: &str,
+        message: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let dir = data_dir.join("logs");
+        fs::create_dir_all(&dir).await?;
+        let path = dir.join("cron_dead_letter.jsonl");
+        let payload = serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "event_type": "cron_dead_letter",
+            "job_id": job_id,
+            "channel": channel,
+            "recipient": recipient,
+            "reason": reason,
+            "message_preview": message.chars().take(280).collect::<String>(),
+        });
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await?;
+        file.write_all(payload.to_string().as_bytes()).await?;
+        file.write_all(b"\n").await?;
+        Ok(())
+    }
+
+    async fn append_runtime_event(
+        workdir: &Path,
+        event_type: &str,
+        envelope: &Envelope,
+        details: serde_json::Value,
+    ) -> Result<()> {
+        let dir = workdir.join("logs");
+        fs::create_dir_all(&dir).await?;
+        let path = dir.join("runtime_events.jsonl");
+        let payload = serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "event_type": event_type,
+            "trace_id": envelope.trace_id,
+            "channel": envelope.channel,
+            "chat_id": envelope.chat_id,
+            "details": details,
+        });
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await?;
+        file.write_all(payload.to_string().as_bytes()).await?;
+        file.write_all(b"\n").await?;
         Ok(())
     }
 
@@ -1006,6 +1251,9 @@ impl MasixRuntime {
                                 server.command.clone(),
                                 server.args.clone(),
                                 server.env.clone(),
+                                server.timeout_secs,
+                                server.startup_timeout_secs,
+                                server.healthcheck_interval_secs,
                             )
                             .await
                         {
@@ -1624,6 +1872,84 @@ impl MasixRuntime {
         format!("{}::{}", tool_call.function.name, canonical_args)
     }
 
+    /// Detect if an LLM response is asking the user to confirm continuation
+    /// rather than providing a final answer. Used for auto-continue logic.
+    fn looks_like_continuation_prompt(
+        text: &str,
+        mode: AgentLoopContinuationDetection,
+    ) -> bool {
+        let lower = text.to_lowercase();
+        let trimmed = lower.trim();
+
+        if !trimmed.ends_with('?') {
+            return false;
+        }
+
+        if mode == AgentLoopContinuationDetection::StrictV1 {
+            return matches!(
+                trimmed,
+                "continue?"
+                    | "proceed?"
+                    | "procedi?"
+                    | "posso continuare?"
+                    | "shall i continue?"
+                    | "should i continue?"
+                    | "do you want me to continue?"
+            );
+        }
+
+        // Heuristic mode
+        if trimmed.len() > 300 {
+            return false;
+        }
+        let patterns = [
+            "procedi",
+            "continuo",
+            "vuoi che",
+            "devo continuare",
+            "shall i",
+            "should i",
+            "continue",
+            "proceed",
+            "want me to",
+            "go ahead",
+            "do you want",
+            "posso",
+            "vado avanti",
+            "proseguo",
+        ];
+        patterns.iter().any(|p| trimmed.contains(p))
+    }
+
+    fn should_emit_tool_progress(
+        cfg: &CoreToolProgressConfig,
+        iteration: usize,
+        emitted: u8,
+        last_emit: Option<Instant>,
+    ) -> bool {
+        if !cfg.enabled || emitted >= cfg.max_updates {
+            return false;
+        }
+
+        match cfg.mode {
+            ToolProgressMode::FirstRound => iteration == 1 && emitted == 0,
+            ToolProgressMode::Periodic => {
+                if emitted == 0 {
+                    return true;
+                }
+                if let Some(last) = last_emit {
+                    last.elapsed().as_secs() >= cfg.interval_secs
+                } else {
+                    true
+                }
+            }
+            ToolProgressMode::Milestones => {
+                const MILESTONES: [usize; 5] = [1, 3, 5, 8, 13];
+                MILESTONES.contains(&iteration)
+            }
+        }
+    }
+
     fn build_relaxed_web_search_args(arguments: &serde_json::Value) -> Option<serde_json::Value> {
         let query = arguments.get("query").and_then(|v| v.as_str())?;
         let relaxed = Self::relax_search_query(query)?;
@@ -1745,6 +2071,22 @@ impl MasixRuntime {
             .count()
     }
 
+    fn resolve_mcp_tool_name(
+        server_names: &[String],
+        tool_name: &str,
+    ) -> Option<(String, String)> {
+        // Resolve by longest prefix first so "discovery" wins over "disc"
+        // for tool names like "discovery_web_search".
+        let mut sorted = server_names.to_vec();
+        sorted.sort_by(|a, b| b.len().cmp(&a.len()));
+        sorted.into_iter().find_map(|server| {
+            let prefix = format!("{}_", server);
+            tool_name
+                .strip_prefix(prefix.as_str())
+                .map(|rest| (server, rest.to_string()))
+        })
+    }
+
     fn sanitize_false_search_unavailable_claims(response: &str) -> (String, bool) {
         let mut changed = false;
         let mut kept = Vec::new();
@@ -1841,6 +2183,8 @@ impl MasixRuntime {
         envelope: &Envelope,
         account_tag: Option<&str>,
         vision_analysis: Option<&str>,
+        config: &Config,
+        bot_context: &BotContext,
     ) -> Result<String> {
         let tool_name = &tool_call.function.name;
         let arguments: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
@@ -1851,6 +2195,16 @@ impl MasixRuntime {
         }
         if tool_name == "vision" {
             return Self::execute_vision_tool(arguments, envelope, vision_analysis);
+        }
+        if tool_name == "chat_context" {
+            return Self::execute_chat_context_tool(
+                arguments,
+                envelope,
+                config,
+                account_tag,
+                bot_context,
+            )
+            .await;
         }
 
         // Check if it's a builtin tool
@@ -1871,14 +2225,7 @@ impl MasixRuntime {
             let mcp_guard = mcp_client.as_ref().unwrap().lock().await;
             let names = mcp_guard.server_names();
             drop(mcp_guard);
-            names
-                .into_iter()
-                .find_map(|s| {
-                    let prefix = format!("{}_", s);
-                    tool_name
-                        .strip_prefix(prefix.as_str())
-                        .map(|rest| (s, rest.to_string()))
-                })
+            Self::resolve_mcp_tool_name(&names, tool_name)
                 .ok_or_else(|| anyhow::anyhow!("No MCP server found for tool: {}", tool_name))?
         };
         let server_name = server_name.as_str();
@@ -1961,6 +2308,8 @@ impl MasixRuntime {
     /// Handles tool call deduplication, policy gates, and iteration limits.
     #[allow(clippy::too_many_arguments)]
     async fn run_llm_tool_loop(
+        config: &Config,
+        bot_context: &BotContext,
         provider_router: &ProviderRouter,
         messages: &mut Vec<ChatMessage>,
         tools: Option<Vec<ToolDefinition>>,
@@ -1980,6 +2329,8 @@ impl MasixRuntime {
         vision_analysis: Option<&str>,
         admin_only_modules: &HashSet<String>,
         permission: PermissionLevel,
+        loop_options: &LlmLoopOptions,
+        outbound_sender: Option<&broadcast::Sender<OutboundMessage>>,
     ) -> Result<LlmLoopResult> {
         let mut final_response = String::new();
         let mut iterations = 0;
@@ -1988,10 +2339,13 @@ impl MasixRuntime {
         let mut used_tool_signatures: HashSet<String> = HashSet::new();
         let mut successful_discovery_search_calls = 0usize;
         let mut hit_tool_iteration_limit = false;
+        let mut auto_continue_count = 0usize;
+        let mut progress_updates_sent: u8 = 0;
+        let mut last_progress_emit: Option<Instant> = None;
 
         loop {
             iterations += 1;
-            if iterations > MAX_TOOL_ITERATIONS {
+            if iterations > loop_options.max_iterations {
                 warn!("Max tool iterations reached");
                 hit_tool_iteration_limit = true;
                 break;
@@ -2103,6 +2457,8 @@ impl MasixRuntime {
                         envelope,
                         account_tag,
                         vision_analysis,
+                        config,
+                        bot_context,
                     )
                     .await
                     {
@@ -2125,7 +2481,85 @@ impl MasixRuntime {
                     };
                     messages.push(tool_message);
                 }
+
+                if Self::should_emit_tool_progress(
+                    &loop_options.tool_progress,
+                    iterations,
+                    progress_updates_sent,
+                    last_progress_emit,
+                ) {
+                    if let Some(sender) = outbound_sender {
+                        if envelope.channel == "telegram" {
+                            if let Some(chat_id) = envelope.chat_id {
+                                let progress_text = if loop_options.tool_progress.include_tool_names
+                                    && !used_tools.is_empty()
+                                {
+                                    let tool_names: Vec<&str> =
+                                        used_tools.iter().map(|s| s.as_str()).collect();
+                                    format!(
+                                        "Progress (step {}/{}): {}",
+                                        iterations,
+                                        loop_options.max_iterations,
+                                        tool_names.join(", ")
+                                    )
+                                } else {
+                                    format!(
+                                        "Progress (step {}/{}): running tools...",
+                                        iterations, loop_options.max_iterations
+                                    )
+                                };
+                                Self::send_outbound_text(
+                                    sender,
+                                    &envelope.channel,
+                                    account_tag.map(|s| s.to_string()),
+                                    chat_id,
+                                    &progress_text,
+                                    None,
+                                );
+                                debug!("Sent tool progress message: {}", progress_text);
+                                progress_updates_sent = progress_updates_sent.saturating_add(1);
+                                last_progress_emit = Some(Instant::now());
+                            }
+                        }
+                    }
+                }
             } else {
+                // LLM returned text without tool_calls.
+                // Check if it is a mid-task pause (asking "Procedi?")
+                // rather than a genuine final answer.
+                if loop_options.auto_continue_enabled
+                    && iterations < loop_options.max_iterations
+                    && !used_tools.is_empty()
+                    && auto_continue_count < loop_options.auto_continue_max
+                    && Self::looks_like_continuation_prompt(
+                        &final_response,
+                        loop_options.continuation_detection,
+                    )
+                {
+                    auto_continue_count += 1;
+                    debug!(
+                        "Auto-continue {}/{} at iteration {} (continuation prompt detected)",
+                        auto_continue_count, loop_options.auto_continue_max, iterations
+                    );
+                    messages.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: Some(final_response.clone()),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    });
+                    messages.push(ChatMessage {
+                        role: "user".to_string(),
+                        content: Some(
+                            "Yes, continue. Complete the task autonomously without asking for confirmation."
+                                .to_string(),
+                        ),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    });
+                    continue;
+                }
                 break;
             }
         }
@@ -2455,9 +2889,24 @@ impl MasixRuntime {
 
                 let preferred_provider = user_providers.lock().await.get(&user_state_key).cloned();
                 let preferred_model = user_models.lock().await.get(&user_state_key).cloned();
+                let max_tool_iterations = config
+                    .core
+                    .agent_loop
+                    .max_tool_iterations
+                    .or(config.core.max_tool_iterations)
+                    .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS);
+                let loop_options = LlmLoopOptions {
+                    max_iterations: max_tool_iterations,
+                    auto_continue_enabled: config.core.agent_loop.auto_continue_enabled,
+                    auto_continue_max: usize::from(config.core.agent_loop.auto_continue_max),
+                    continuation_detection: config.core.agent_loop.continuation_detection,
+                    tool_progress: config.core.tool_progress.clone(),
+                };
 
                 // Execute LLM loop with tool calling
                 let llm_result = Self::run_llm_tool_loop(
+                    config,
+                    &bot_context,
                     provider_router,
                     &mut messages,
                     if has_tools { Some(tools.clone()) } else { None },
@@ -2477,6 +2926,8 @@ impl MasixRuntime {
                     vision_analysis.as_deref(),
                     admin_only_modules,
                     permission,
+                    &loop_options,
+                    Some(&outbound_sender),
                 )
                 .await?;
 
@@ -2532,7 +2983,18 @@ impl MasixRuntime {
                     account_tag.clone(),
                     &final_response,
                     config,
-                );
+                )
+                .await;
+                let _ = Self::append_runtime_event(
+                    &bot_context.workdir,
+                    "response_sent",
+                    &envelope,
+                    serde_json::json!({
+                        "tools_used": llm_result.used_tools.len(),
+                        "successful_discovery_search_calls": llm_result.successful_discovery_search_calls,
+                    }),
+                )
+                .await;
             }
             MessageKind::Callback { query_id, data } => {
                 info!("Processing callback {}: {}", query_id, data);
@@ -2617,7 +3079,7 @@ impl MasixRuntime {
         Ok(())
     }
 
-    fn dispatch_final_response(
+    async fn dispatch_final_response(
         outbound_sender: &broadcast::Sender<OutboundMessage>,
         envelope: &Envelope,
         account_tag: Option<String>,
@@ -2626,14 +3088,45 @@ impl MasixRuntime {
     ) {
         if envelope.channel == "telegram" {
             if let Some(chat_id) = envelope.chat_id {
-                Self::send_outbound_text(
-                    outbound_sender,
-                    &envelope.channel,
-                    account_tag,
-                    chat_id,
-                    response,
-                    envelope.message_id,
-                );
+                let stream_cfg = &config.core.streaming;
+                if stream_cfg.enabled && stream_cfg.mode != StreamingMode::Off {
+                    let chunks = Self::split_message_chunks(response, 1200);
+                    if stream_cfg.mode == StreamingMode::TelegramEdit {
+                        Self::send_outbound_text(
+                            outbound_sender,
+                            &envelope.channel,
+                            account_tag.clone(),
+                            chat_id,
+                            "Streaming update…",
+                            envelope.message_id,
+                        );
+                    }
+                    for (idx, chunk) in chunks.iter().enumerate() {
+                        Self::send_outbound_text(
+                            outbound_sender,
+                            &envelope.channel,
+                            account_tag.clone(),
+                            chat_id,
+                            chunk,
+                            if idx == 0 { envelope.message_id } else { None },
+                        );
+                        if idx + 1 < chunks.len() {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                stream_cfg.flush_interval_ms,
+                            ))
+                            .await;
+                        }
+                    }
+                } else {
+                    Self::send_outbound_text(
+                        outbound_sender,
+                        &envelope.channel,
+                        account_tag,
+                        chat_id,
+                        response,
+                        envelope.message_id,
+                    );
+                }
             }
             return;
         }
@@ -3667,6 +4160,37 @@ impl MasixRuntime {
         }
     }
 
+    async fn execute_chat_context_tool(
+        _arguments: serde_json::Value,
+        envelope: &Envelope,
+        config: &Config,
+        account_tag: Option<&str>,
+        bot_context: &BotContext,
+    ) -> Result<String> {
+        let observed_groups =
+            Self::collect_observed_telegram_groups(config, account_tag, bot_context).await?;
+        let from_user_id = envelope
+            .payload
+            .get("from_user_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_default();
+        let payload = serde_json::json!({
+            "channel": envelope.channel,
+            "chat_id": envelope.chat_id,
+            "from_user_id": from_user_id,
+            "account_tag": account_tag.unwrap_or("__default__"),
+            "kind": match &envelope.kind {
+                MessageKind::Message { .. } => "message",
+                MessageKind::Callback { .. } => "callback",
+                MessageKind::Command { .. } => "command",
+                MessageKind::Reply { .. } => "reply",
+                MessageKind::Error { .. } => "error",
+            },
+            "observed_group_chat_ids": observed_groups,
+        });
+        Ok(serde_json::to_string_pretty(&payload)?)
+    }
+
     async fn execute_cron_instruction(
         command: &str,
         channel: &str,
@@ -3725,6 +4249,21 @@ impl MasixRuntime {
         let parser = masix_cron::CronParser::new();
         let parsed = parser.parse(rest, channel, recipient)?;
         let storage_guard = storage.lock().await;
+        let existing = storage_guard
+            .list_enabled_cron_jobs_for_account_recipient(scoped_account_tag, recipient)?
+            .into_iter()
+            .find(|job| {
+                job.channel == parsed.channel
+                    && job.schedule == parsed.schedule
+                    && job.message == parsed.message
+                    && job.recurring == parsed.recurring
+            });
+        if let Some(job) = existing {
+            return Ok(format!(
+                "Reminder già presente.\nID: {}\nSchedule: {}\nRecurring: {}\nMessage: {}",
+                job.id, job.schedule, job.recurring, job.message
+            ));
+        }
         let id = storage_guard.create_cron_job(
             channel,
             &parsed.schedule,
@@ -3954,9 +4493,30 @@ impl MasixRuntime {
 
         if text.starts_with("/admin") {
             info!("Processing /admin");
+            let response = Self::handle_admin_command(
+                text,
+                config,
+                account_tag,
+                from_user_id,
+                permission,
+                bot_context,
+            )
+            .await;
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &response,
+                None,
+            );
+            return Ok(true);
+        }
+
+        if text.starts_with("/groups") {
+            info!("Processing /groups");
             let response =
-                Self::handle_admin_command(text, config, account_tag, from_user_id, permission)
-                    .await;
+                Self::handle_groups_command(config, account_tag, permission, bot_context).await;
             Self::send_outbound_text(
                 outbound_sender,
                 &envelope.channel,
@@ -4343,6 +4903,7 @@ impl MasixRuntime {
         account_tag: Option<&str>,
         _from_user_id: i64,
         permission: PermissionLevel,
+        bot_context: &BotContext,
     ) -> String {
         if permission != PermissionLevel::Admin {
             return "Admin only command.".to_string();
@@ -4356,6 +4917,8 @@ impl MasixRuntime {
 /admin remove <user_id>\n\
 /admin promote <user_id>\n\
 /admin demote <user_id>\n\
+/admin groups\n\
+/admin groups refresh\n\
 /admin tools user list\n\
 /admin tools user available\n\
 /admin tools user mode <none|selected>\n\
@@ -4502,8 +5065,96 @@ impl MasixRuntime {
                     Err(_) => "Invalid user ID.".to_string(),
                 }
             }
-            _ => "Unknown command. Use: add, remove, promote, demote, list, tools".to_string(),
+            "groups" => {
+                if parts.len() > 2 && !parts[2].eq_ignore_ascii_case("refresh") {
+                    return "Usage: /admin groups [refresh]".to_string();
+                }
+                Self::render_observed_groups(config, account_tag, bot_context).await
+            }
+            _ => "Unknown command. Use: add, remove, promote, demote, list, groups, tools"
+                .to_string(),
         }
+    }
+
+    async fn handle_groups_command(
+        config: &Config,
+        account_tag: Option<&str>,
+        permission: PermissionLevel,
+        bot_context: &BotContext,
+    ) -> String {
+        if permission != PermissionLevel::Admin {
+            return "Admin only command.".to_string();
+        }
+        Self::render_observed_groups(config, account_tag, bot_context).await
+    }
+
+    async fn render_observed_groups(
+        config: &Config,
+        account_tag: Option<&str>,
+        bot_context: &BotContext,
+    ) -> String {
+        match Self::collect_observed_telegram_groups(config, account_tag, bot_context).await {
+            Ok(groups) => {
+                if groups.is_empty() {
+                    return "No observed Telegram groups yet. Add the bot to a group and send at least one message there.".to_string();
+                }
+                let mut lines = vec![
+                    format!("Observed Telegram groups ({}):", groups.len()),
+                    "Use these chat IDs for cron recipient targeting.".to_string(),
+                ];
+                for group_id in groups {
+                    lines.push(format!("- {}", group_id));
+                }
+                lines.join("\n")
+            }
+            Err(err) => format!("Failed to load observed groups: {}", err),
+        }
+    }
+
+    async fn collect_observed_telegram_groups(
+        config: &Config,
+        account_tag: Option<&str>,
+        bot_context: &BotContext,
+    ) -> Result<Vec<i64>> {
+        let account = Self::sanitize_scope_component(&Self::account_scope(account_tag));
+        let base_data_dir = Self::data_dir_from_config(config)?;
+        let users_root = base_data_dir
+            .join("memories")
+            .join(bot_context.profile_name.as_str())
+            .join("accounts")
+            .join(account)
+            .join("users");
+        let mut groups: HashSet<i64> = HashSet::new();
+
+        let mut users_dir = match fs::read_dir(&users_root).await {
+            Ok(dir) => dir,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        while let Some(user_entry) = users_dir.next_entry().await? {
+            let user_path = user_entry.path();
+            let meta_path = user_path.join("meta.json");
+            let raw = match fs::read_to_string(&meta_path).await {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let meta = match serde_json::from_str::<UserMemoryMeta>(&raw) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if !meta.channels.iter().any(|ch| ch == "telegram") {
+                continue;
+            }
+            for chat_id in meta.chat_ids {
+                if chat_id < 0 {
+                    groups.insert(chat_id);
+                }
+            }
+        }
+
+        let mut out: Vec<i64> = groups.into_iter().collect();
+        out.sort_unstable();
+        Ok(out)
     }
 
     async fn handle_admin_tools_subcommand(
@@ -5649,6 +6300,25 @@ impl MasixRuntime {
             inline_keyboard: None,
             chat_action: None,
         });
+    }
+
+    fn split_message_chunks(text: &str, max_chars: usize) -> Vec<String> {
+        if text.chars().count() <= max_chars {
+            return vec![text.to_string()];
+        }
+        let mut out = Vec::new();
+        let mut current = String::new();
+        for ch in text.chars() {
+            current.push(ch);
+            if current.chars().count() >= max_chars {
+                out.push(current);
+                current = String::new();
+            }
+        }
+        if !current.is_empty() {
+            out.push(current);
+        }
+        out
     }
 
     fn start_typing_heartbeat(

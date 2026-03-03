@@ -6409,6 +6409,9 @@ fn handle_mcp_command(action: McpCommands, config_path: Option<String>) -> Resul
                 command,
                 args,
                 env: std::collections::HashMap::new(),
+                timeout_secs: 30,
+                startup_timeout_secs: 20,
+                healthcheck_interval_secs: 60,
             });
             let config_toml = toml::to_string_pretty(&config)?;
             fs::write(&config_path, config_toml)?;
@@ -6931,6 +6934,88 @@ async fn run_doctor(
         }
     }
 
+    if let Some(mcp) = &config.mcp {
+        if mcp.enabled {
+            println!("✓ MCP: enabled ({} server(s))", mcp.servers.len());
+            for server in &mcp.servers {
+                println!(
+                    "  - {} | timeout={}s startup={}s health={}s",
+                    server.name,
+                    server.timeout_secs,
+                    server.startup_timeout_secs,
+                    server.healthcheck_interval_secs
+                );
+            }
+        } else {
+            println!("! MCP: disabled");
+        }
+    } else {
+        println!("! MCP: not configured");
+    }
+
+    let plugins_dir = data_dir.join("plugins");
+    let auth_path = plugins_dir.join("auth.json");
+    if auth_path.exists() {
+        match std::fs::read_to_string(&auth_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        {
+            Some(value) => {
+                let key_count = value
+                    .get("plugin_keys")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| obj.len())
+                    .unwrap_or(0);
+                let has_device_key = value
+                    .get("device_key")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| !v.trim().is_empty());
+                println!(
+                    "✓ Plugin auth store: keys={} device_key={}",
+                    key_count,
+                    if has_device_key { "yes" } else { "no" }
+                );
+            }
+            None => {
+                println!("✗ Plugin auth store: invalid JSON ({})", auth_path.display());
+                failed += 1;
+            }
+        }
+    } else {
+        println!("! Plugin auth store: missing ({})", auth_path.display());
+    }
+
+    let installed_path = plugins_dir.join("installed.json");
+    if installed_path.exists() {
+        match std::fs::read_to_string(&installed_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        {
+            Some(value) => {
+                let plugins = value
+                    .get("plugins")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let enabled = plugins
+                    .iter()
+                    .filter(|p| p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count();
+                println!(
+                    "✓ Installed plugins: total={} enabled={}",
+                    plugins.len(),
+                    enabled
+                );
+            }
+            None => {
+                println!("✗ Installed plugins registry: invalid JSON ({})", installed_path.display());
+                failed += 1;
+            }
+        }
+    } else {
+        println!("! Installed plugins registry: missing ({})", installed_path.display());
+    }
+
     if !offline {
         print!("✓ Network: ");
         match tokio::time::timeout(
@@ -6973,6 +7058,25 @@ async fn run_doctor(
                 println!("! Termux binary not found: {}", bin);
                 println!("  → Install: pkg install termux-api");
             }
+        }
+    }
+
+    if db_path.exists() {
+        match Storage::new(&db_path).and_then(|storage| storage.count_enabled_cron_jobs()) {
+            Ok(count) => println!("✓ Active cron jobs: {}", count),
+            Err(e) => {
+                println!("✗ Active cron jobs check failed: {}", e);
+                failed += 1;
+            }
+        }
+    }
+
+    if let Ok(raw_cfg) = std::fs::read_to_string(config_path) {
+        if raw_cfg.contains("api_key = \"") && !raw_cfg.contains("api_key = \"env:") {
+            println!("! Secrets hygiene: found inline api_key entries in config");
+            println!("  → Consider env-backed keys (api_key = \"env:VAR_NAME\")");
+        } else {
+            println!("✓ Secrets hygiene: no obvious inline api_key literals");
         }
     }
 

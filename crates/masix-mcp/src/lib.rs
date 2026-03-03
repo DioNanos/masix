@@ -8,6 +8,7 @@ use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::time::Instant;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -15,8 +16,15 @@ use tokio::sync::{oneshot, Mutex};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
 
-const MCP_REQUEST_TIMEOUT_SECS: u64 = 30;
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
+const CIRCUIT_FAILURE_THRESHOLD: u32 = 3;
+const CIRCUIT_OPEN_SECS: u64 = 30;
+
+#[derive(Debug, Default)]
+struct CircuitState {
+    consecutive_failures: u32,
+    open_until: Option<Instant>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tool {
@@ -52,6 +60,8 @@ pub struct McpServer {
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
     request_id: Arc<Mutex<u64>>,
     pending: PendingMap,
+    timeout_secs: u64,
+    circuit: Arc<Mutex<CircuitState>>,
 }
 
 impl McpServer {
@@ -60,6 +70,8 @@ impl McpServer {
         command: String,
         args: Vec<String>,
         env: std::collections::HashMap<String, String>,
+        timeout_secs: u64,
+        startup_timeout_secs: u64,
     ) -> Result<Self> {
         info!("Starting MCP server '{}' ({})", name, command);
 
@@ -93,10 +105,21 @@ impl McpServer {
             stdin: Arc::new(Mutex::new(stdin)),
             request_id: Arc::new(Mutex::new(1)),
             pending,
+            timeout_secs,
+            circuit: Arc::new(Mutex::new(CircuitState::default())),
         };
 
         // Initialize MCP connection
-        server.initialize().await?;
+        match timeout(Duration::from_secs(startup_timeout_secs), server.initialize()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(anyhow!(
+                    "MCP server '{}' startup timeout after {}s",
+                    server.name,
+                    startup_timeout_secs
+                ))
+            }
+        }
 
         Ok(server)
     }
@@ -229,6 +252,8 @@ impl McpServer {
     }
 
     async fn send_request(&self, request: Value) -> Result<Value> {
+        self.check_circuit().await?;
+
         let id = request
             .get("id")
             .and_then(|v| v.as_u64())
@@ -239,12 +264,14 @@ impl McpServer {
 
         if let Err(e) = self.send_json_line(&request).await {
             self.pending.lock().await.remove(&id);
+            self.mark_failure().await;
             return Err(e);
         }
 
-        let response = match timeout(Duration::from_secs(MCP_REQUEST_TIMEOUT_SECS), rx).await {
+        let response = match timeout(Duration::from_secs(self.timeout_secs), rx).await {
             Ok(Ok(value)) => value,
             Ok(Err(_)) => {
+                self.mark_failure().await;
                 return Err(anyhow!(
                     "MCP response channel closed (server='{}', id={})",
                     self.name,
@@ -253,9 +280,10 @@ impl McpServer {
             }
             Err(_) => {
                 self.pending.lock().await.remove(&id);
+                self.mark_failure().await;
                 return Err(anyhow!(
                     "MCP request timeout after {}s (server='{}', id={})",
-                    MCP_REQUEST_TIMEOUT_SECS,
+                    self.timeout_secs,
                     self.name,
                     id
                 ));
@@ -263,10 +291,52 @@ impl McpServer {
         };
 
         if let Some(error) = response.get("error") {
+            self.mark_failure().await;
             return Err(anyhow!("MCP error from '{}': {:?}", self.name, error));
         }
 
+        self.mark_success().await;
         Ok(response)
+    }
+
+    async fn check_circuit(&self) -> Result<()> {
+        let mut circuit = self.circuit.lock().await;
+        if let Some(open_until) = circuit.open_until {
+            if Instant::now() < open_until {
+                let remaining = open_until.saturating_duration_since(Instant::now()).as_secs();
+                return Err(anyhow!(
+                    "MCP circuit open for '{}' (cooldown {}s)",
+                    self.name,
+                    remaining
+                ));
+            }
+            circuit.open_until = None;
+            circuit.consecutive_failures = 0;
+        }
+        Ok(())
+    }
+
+    async fn mark_success(&self) {
+        let mut circuit = self.circuit.lock().await;
+        if circuit.consecutive_failures > 0 || circuit.open_until.is_some() {
+            debug!("MCP circuit reset for '{}'", self.name);
+        }
+        circuit.consecutive_failures = 0;
+        circuit.open_until = None;
+    }
+
+    async fn mark_failure(&self) {
+        let mut circuit = self.circuit.lock().await;
+        circuit.consecutive_failures = circuit.consecutive_failures.saturating_add(1);
+        if circuit.consecutive_failures >= CIRCUIT_FAILURE_THRESHOLD {
+            let open_until = Instant::now() + std::time::Duration::from_secs(CIRCUIT_OPEN_SECS);
+            circuit.open_until = Some(open_until);
+            circuit.consecutive_failures = 0;
+            warn!(
+                "MCP circuit opened for '{}' ({}s cooldown)",
+                self.name, CIRCUIT_OPEN_SECS
+            );
+        }
     }
 
     async fn send_notification(&self, notification: Value) -> Result<()> {
@@ -409,9 +479,40 @@ impl McpClient {
         command: String,
         args: Vec<String>,
         env: std::collections::HashMap<String, String>,
+        timeout_secs: u64,
+        startup_timeout_secs: u64,
+        healthcheck_interval_secs: u64,
     ) -> Result<()> {
-        let server = McpServer::start(name, command, args, env).await?;
-        self.servers.push(Arc::new(server));
+        let server = McpServer::start(
+            name,
+            command,
+            args,
+            env,
+            timeout_secs,
+            startup_timeout_secs,
+        )
+        .await?;
+        let server = Arc::new(server);
+        self.servers.push(Arc::clone(&server));
+
+        if healthcheck_interval_secs > 0 {
+            let health_server = Arc::clone(&server);
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(Duration::from_secs(healthcheck_interval_secs));
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = health_server.list_tools().await {
+                        warn!(
+                            "MCP healthcheck failed for '{}': {}",
+                            health_server.name(),
+                            e
+                        );
+                    }
+                }
+            });
+        }
+
         Ok(())
     }
 

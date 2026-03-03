@@ -164,6 +164,18 @@ pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             tool_type: "function".to_string(),
             function: masix_providers::FunctionDefinition {
+                name: "chat_context".to_string(),
+                description: "Return current chat/account context and observed group chat ids for this bot account.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: masix_providers::FunctionDefinition {
                 name: "intent".to_string(),
                 description: "Dispatch Android intents via `am` (start/broadcast/service). Use for opening apps, deep links, or sending broadcast intents from Termux.".to_string(),
                 parameters: serde_json::json!({
@@ -393,6 +405,10 @@ pub async fn execute_builtin_tool(
             "Vision tool requires message media context and is executed by the runtime coordinator."
                 .to_string(),
         ),
+        "chat_context" => Ok(
+            "chat_context tool requires runtime envelope context and is executed by the runtime coordinator."
+                .to_string(),
+        ),
         "intent" => {
             if !is_termux_environment() {
                 return Ok(
@@ -428,6 +444,7 @@ pub fn is_builtin_tool(tool_name: &str) -> bool {
             | "device_info"
             | "cron"
             | "vision"
+            | "chat_context"
             | "intent"
     );
     core_tools

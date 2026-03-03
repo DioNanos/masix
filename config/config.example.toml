@@ -7,6 +7,32 @@
 data_dir = "~/.masix"
 log_level = "info"
 
+[core.agent_loop]
+auto_continue_enabled = true
+auto_continue_max = 3
+continuation_detection = "heuristic_v1" # or "strict_v1"
+# max_tool_iterations = 25
+
+[core.tool_progress]
+enabled = true
+mode = "first_round" # first_round | periodic | milestones
+interval_secs = 8
+max_updates = 5
+include_tool_names = true
+
+[core.streaming]
+enabled = false
+mode = "off" # off | telegram_edit | telegram_chunked
+flush_interval_ms = 900
+max_message_edits = 20
+finalize_timeout_secs = 10
+
+[core.cron]
+dispatch_concurrency = 2
+delivery_retry_count = 2
+delivery_retry_backoff_secs = 10
+dead_letter_enabled = true
+
 [updates]
 enabled = true
 check_on_start = true
@@ -37,11 +63,27 @@ enabled = true
 name = "filesystem"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/data/data/com.termux/files/home"]
+timeout_secs = 30
+startup_timeout_secs = 20
+healthcheck_interval_secs = 60
 
 [[mcp.servers]]
 name = "memory"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-memory"]
+timeout_secs = 30
+startup_timeout_secs = 20
+healthcheck_interval_secs = 60
+
+# Example: long-running MCP server (codex tools) with extended timeout
+# [[mcp.servers]]
+# name = "plugin_codex_tools"
+# command = "/path/to/codex-tools"
+# args = ["serve-mcp"]
+# env = { CODEX_TIMEOUT_SECS = "1800" }
+# timeout_secs = 1800  # Match internal plugin timeout (default: 30)
+# startup_timeout_secs = 30
+# healthcheck_interval_secs = 120
 
 # Providers will be configured by 'masix config init' wizard
 [providers]

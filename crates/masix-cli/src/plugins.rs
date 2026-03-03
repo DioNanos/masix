@@ -828,7 +828,7 @@ fn sync_plugin_mcp_servers_in_config(
 
     for existing in &mcp_cfg.servers {
         if let Some(next) = desired.get(&existing.name) {
-            merged.push(next.clone());
+            merged.push(merge_plugin_mcp_server(existing, next));
             seen.insert(existing.name.clone());
         } else if managed_names.contains(&existing.name) {
             continue;
@@ -858,7 +858,29 @@ fn build_plugin_mcp_server(record: &InstalledPluginRecord) -> Option<McpServer> 
         command: record.install_path.clone(),
         args: vec!["serve-mcp".to_string()],
         env: std::collections::HashMap::new(),
+        timeout_secs: 30,
+        startup_timeout_secs: 20,
+        healthcheck_interval_secs: 60,
     })
+}
+
+fn merge_plugin_mcp_server(existing: &McpServer, generated: &McpServer) -> McpServer {
+    let mut merged = generated.clone();
+    // Preserve operator-tuned timeout/env values on config sync while still
+    // updating command/path from latest installed plugin record.
+    if existing.timeout_secs > 0 {
+        merged.timeout_secs = existing.timeout_secs;
+    }
+    if existing.startup_timeout_secs > 0 {
+        merged.startup_timeout_secs = existing.startup_timeout_secs;
+    }
+    if existing.healthcheck_interval_secs > 0 {
+        merged.healthcheck_interval_secs = existing.healthcheck_interval_secs;
+    }
+    if !existing.env.is_empty() {
+        merged.env = existing.env.clone();
+    }
+    merged
 }
 
 fn plugin_record_is_mcp_binary(record: &InstalledPluginRecord) -> bool {
@@ -1249,12 +1271,8 @@ fn package_temp_path(destination: &Path) -> Result<PathBuf> {
 
 fn write_package_atomically(destination: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = package_temp_path(destination)?;
-    std::fs::write(&tmp, bytes).with_context(|| {
-        format!(
-            "Failed to write temporary package file '{}'",
-            tmp.display()
-        )
-    })?;
+    std::fs::write(&tmp, bytes)
+        .with_context(|| format!("Failed to write temporary package file '{}'", tmp.display()))?;
     match std::fs::rename(&tmp, destination) {
         Ok(()) => Ok(()),
         Err(err) => {
@@ -1565,7 +1583,6 @@ fn open_url(url: &str) -> Result<()> {
             .arg(url)
             .spawn()
             .context("Failed to open URL with xdg-open")?;
-        return Ok(());
     }
     #[cfg(target_os = "macos")]
     {
@@ -1573,7 +1590,6 @@ fn open_url(url: &str) -> Result<()> {
             .arg(url)
             .spawn()
             .context("Failed to open URL with open")?;
-        return Ok(());
     }
     #[cfg(target_os = "windows")]
     {
@@ -1581,13 +1597,12 @@ fn open_url(url: &str) -> Result<()> {
             .args(["/C", "start", url])
             .spawn()
             .context("Failed to open URL with start")?;
-        return Ok(());
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
-        let _ = url;
         anyhow::bail!("URL opening not supported on this platform");
     }
+    Ok(())
 }
 
 /// Get the global key if available (for auto-auth in install/update)
@@ -1596,4 +1611,44 @@ pub fn get_global_key(config_path: Option<&str>) -> Result<Option<String>> {
     let plugins_dir = plugin_root_dir(&data_dir);
     let global_key = load_global_key(&plugins_dir)?;
     Ok(global_key.map(|g| g.key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_plugin_mcp_server;
+    use masix_config::McpServer;
+    use std::collections::HashMap;
+
+    #[test]
+    fn merge_plugin_mcp_server_preserves_timeout_and_env() {
+        let mut existing_env = HashMap::new();
+        existing_env.insert("A".to_string(), "1".to_string());
+
+        let existing = McpServer {
+            name: "plugin_codex_backend".to_string(),
+            command: "/old/path".to_string(),
+            args: vec!["serve-mcp".to_string()],
+            env: existing_env.clone(),
+            timeout_secs: 1800,
+            startup_timeout_secs: 45,
+            healthcheck_interval_secs: 180,
+        };
+
+        let generated = McpServer {
+            name: "plugin_codex_backend".to_string(),
+            command: "/new/path".to_string(),
+            args: vec!["serve-mcp".to_string()],
+            env: HashMap::new(),
+            timeout_secs: 30,
+            startup_timeout_secs: 20,
+            healthcheck_interval_secs: 60,
+        };
+
+        let merged = merge_plugin_mcp_server(&existing, &generated);
+        assert_eq!(merged.command, "/new/path");
+        assert_eq!(merged.timeout_secs, 1800);
+        assert_eq!(merged.startup_timeout_secs, 45);
+        assert_eq!(merged.healthcheck_interval_secs, 180);
+        assert_eq!(merged.env, existing_env);
+    }
 }

@@ -78,7 +78,13 @@ Cron CLI subcommands (verified):
 
 Admin/runtime:
 - `/admin ...`
+- `/groups`
+- `/admin groups`
+- `/admin groups refresh`
 - `/plugin ...`
 - `/mcp`
 - `/tools`
 - `/exec <allowlisted-command>`
+
+AI/runtime context:
+- `chat_context` (builtin tool; exposed to tool-calling runtime)

@@ -31,6 +31,141 @@ pub struct CoreConfig {
     pub soul_file: Option<String>,
     #[serde(default)]
     pub global_memory_file: Option<String>,
+    /// Legacy max tool iterations in the agent loop. Default: 25.
+    #[serde(default)]
+    pub max_tool_iterations: Option<usize>,
+    #[serde(default)]
+    pub agent_loop: CoreAgentLoopConfig,
+    #[serde(default)]
+    pub tool_progress: CoreToolProgressConfig,
+    #[serde(default)]
+    pub streaming: CoreStreamingConfig,
+    #[serde(default)]
+    pub cron: CoreCronConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLoopContinuationDetection {
+    #[default]
+    HeuristicV1,
+    StrictV1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoreAgentLoopConfig {
+    #[serde(default = "default_true")]
+    pub auto_continue_enabled: bool,
+    #[serde(default = "default_agent_loop_auto_continue_max")]
+    pub auto_continue_max: u8,
+    #[serde(default)]
+    pub continuation_detection: AgentLoopContinuationDetection,
+    #[serde(default)]
+    pub max_tool_iterations: Option<usize>,
+}
+
+impl Default for CoreAgentLoopConfig {
+    fn default() -> Self {
+        Self {
+            auto_continue_enabled: true,
+            auto_continue_max: default_agent_loop_auto_continue_max(),
+            continuation_detection: AgentLoopContinuationDetection::HeuristicV1,
+            max_tool_iterations: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProgressMode {
+    #[default]
+    FirstRound,
+    Periodic,
+    Milestones,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoreToolProgressConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: ToolProgressMode,
+    #[serde(default = "default_tool_progress_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default = "default_tool_progress_max_updates")]
+    pub max_updates: u8,
+    #[serde(default = "default_true")]
+    pub include_tool_names: bool,
+}
+
+impl Default for CoreToolProgressConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: ToolProgressMode::FirstRound,
+            interval_secs: default_tool_progress_interval_secs(),
+            max_updates: default_tool_progress_max_updates(),
+            include_tool_names: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamingMode {
+    #[default]
+    Off,
+    TelegramEdit,
+    TelegramChunked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoreStreamingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: StreamingMode,
+    #[serde(default = "default_streaming_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+    #[serde(default = "default_streaming_max_message_edits")]
+    pub max_message_edits: u16,
+    #[serde(default = "default_streaming_finalize_timeout_secs")]
+    pub finalize_timeout_secs: u64,
+}
+
+impl Default for CoreStreamingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: StreamingMode::Off,
+            flush_interval_ms: default_streaming_flush_interval_ms(),
+            max_message_edits: default_streaming_max_message_edits(),
+            finalize_timeout_secs: default_streaming_finalize_timeout_secs(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoreCronConfig {
+    #[serde(default = "default_cron_dispatch_concurrency")]
+    pub dispatch_concurrency: u8,
+    #[serde(default = "default_cron_delivery_retry_count")]
+    pub delivery_retry_count: u8,
+    #[serde(default = "default_cron_delivery_retry_backoff_secs")]
+    pub delivery_retry_backoff_secs: u64,
+    #[serde(default = "default_true")]
+    pub dead_letter_enabled: bool,
+}
+
+impl Default for CoreCronConfig {
+    fn default() -> Self {
+        Self {
+            dispatch_concurrency: default_cron_dispatch_concurrency(),
+            delivery_retry_count: default_cron_delivery_retry_count(),
+            delivery_retry_backoff_secs: default_cron_delivery_retry_backoff_secs(),
+            dead_letter_enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,6 +409,12 @@ pub struct McpServer {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    #[serde(default = "default_mcp_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_mcp_startup_timeout")]
+    pub startup_timeout_secs: u64,
+    #[serde(default = "default_mcp_healthcheck_interval")]
+    pub healthcheck_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -496,6 +637,54 @@ fn default_update_channel() -> String {
 
 fn default_stt_engine() -> String {
     "local_whisper_cpp".to_string()
+}
+
+fn default_mcp_timeout() -> u64 {
+    30
+}
+
+fn default_mcp_startup_timeout() -> u64 {
+    20
+}
+
+fn default_mcp_healthcheck_interval() -> u64 {
+    60
+}
+
+fn default_agent_loop_auto_continue_max() -> u8 {
+    3
+}
+
+fn default_tool_progress_interval_secs() -> u64 {
+    8
+}
+
+fn default_tool_progress_max_updates() -> u8 {
+    5
+}
+
+fn default_streaming_flush_interval_ms() -> u64 {
+    900
+}
+
+fn default_streaming_max_message_edits() -> u16 {
+    20
+}
+
+fn default_streaming_finalize_timeout_secs() -> u64 {
+    10
+}
+
+fn default_cron_dispatch_concurrency() -> u8 {
+    2
+}
+
+fn default_cron_delivery_retry_count() -> u8 {
+    2
+}
+
+fn default_cron_delivery_retry_backoff_secs() -> u64 {
+    10
 }
 
 impl Config {
@@ -745,6 +934,70 @@ impl Config {
             for item in &exec.termux_allowlist {
                 if item.trim().is_empty() {
                     anyhow::bail!("exec.termux_allowlist contains an empty command");
+                }
+            }
+        }
+
+        if let Some(max_iters) = self.core.max_tool_iterations {
+            if max_iters == 0 {
+                anyhow::bail!("core.max_tool_iterations must be > 0");
+            }
+        }
+
+        if let Some(max_iters) = self.core.agent_loop.max_tool_iterations {
+            if max_iters == 0 {
+                anyhow::bail!("core.agent_loop.max_tool_iterations must be > 0");
+            }
+        }
+        if self.core.agent_loop.auto_continue_max == 0 {
+            anyhow::bail!("core.agent_loop.auto_continue_max must be > 0");
+        }
+
+        if self.core.tool_progress.interval_secs == 0 {
+            anyhow::bail!("core.tool_progress.interval_secs must be > 0");
+        }
+        if self.core.tool_progress.max_updates == 0 {
+            anyhow::bail!("core.tool_progress.max_updates must be > 0");
+        }
+
+        if self.core.streaming.enabled && self.core.streaming.mode != StreamingMode::Off {
+            if self.core.streaming.flush_interval_ms < 300 {
+                anyhow::bail!("core.streaming.flush_interval_ms must be >= 300");
+            }
+            if self.core.streaming.max_message_edits == 0 {
+                anyhow::bail!("core.streaming.max_message_edits must be > 0");
+            }
+            if self.core.streaming.finalize_timeout_secs == 0 {
+                anyhow::bail!("core.streaming.finalize_timeout_secs must be > 0");
+            }
+        }
+
+        if self.core.cron.dispatch_concurrency == 0 {
+            anyhow::bail!("core.cron.dispatch_concurrency must be > 0");
+        }
+        if self.core.cron.delivery_retry_backoff_secs == 0 {
+            anyhow::bail!("core.cron.delivery_retry_backoff_secs must be > 0");
+        }
+
+        if let Some(mcp) = &self.mcp {
+            for server in &mcp.servers {
+                if server.timeout_secs == 0 {
+                    anyhow::bail!(
+                        "mcp.servers['{}'].timeout_secs must be > 0",
+                        server.name
+                    );
+                }
+                if server.startup_timeout_secs == 0 {
+                    anyhow::bail!(
+                        "mcp.servers['{}'].startup_timeout_secs must be > 0",
+                        server.name
+                    );
+                }
+                if server.healthcheck_interval_secs == 0 {
+                    anyhow::bail!(
+                        "mcp.servers['{}'].healthcheck_interval_secs must be > 0",
+                        server.name
+                    );
                 }
             }
         }
@@ -1171,6 +1424,133 @@ api_key = "k"
 [stt]
 enabled = true
 engine = "local_whisper_cpp"
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_tool_iterations() {
+        let cfg = parse_config(
+            r#"
+[core]
+max_tool_iterations = 0
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_mcp_server_timeout() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+
+[mcp]
+[[mcp.servers]]
+name = "test"
+command = "echo"
+args = []
+timeout_secs = 0
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_agent_loop_auto_continue_max() {
+        let cfg = parse_config(
+            r#"
+[core]
+[core.agent_loop]
+auto_continue_max = 0
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_tool_progress_max_updates() {
+        let cfg = parse_config(
+            r#"
+[core]
+[core.tool_progress]
+max_updates = 0
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_streaming_too_fast_flush() {
+        let cfg = parse_config(
+            r#"
+[core]
+[core.streaming]
+enabled = true
+mode = "telegram_edit"
+flush_interval_ms = 100
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+"#,
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_mcp_startup_timeout() {
+        let cfg = parse_config(
+            r#"
+[core]
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+
+[mcp]
+[[mcp.servers]]
+name = "test"
+command = "echo"
+args = []
+timeout_secs = 30
+startup_timeout_secs = 0
+healthcheck_interval_secs = 60
 "#,
         );
         assert!(cfg.validate().is_err());
