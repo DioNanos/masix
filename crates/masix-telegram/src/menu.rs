@@ -453,6 +453,7 @@ fn action_message(
         text,
         reply_to: None,
         edit_message_id: message_id,
+        draft_id: None,
         inline_keyboard: keyboard,
         chat_action: None,
     }

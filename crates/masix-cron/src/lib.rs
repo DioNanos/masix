@@ -259,6 +259,7 @@ impl CronExecutor {
                                 text: message,
                                 reply_to: None,
                                 edit_message_id: None,
+                                draft_id: None,
                                 inline_keyboard: None,
                                 chat_action: None,
                             };

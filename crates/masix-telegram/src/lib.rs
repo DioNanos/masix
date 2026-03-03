@@ -317,6 +317,49 @@ impl TelegramAdapter {
         Ok(())
     }
 
+    pub async fn send_message_draft(&self, chat_id: i64, draft_id: i64, text: &str) -> Result<()> {
+        let draft_id = if draft_id == 0 { 1 } else { draft_id };
+        let trimmed: String = text.chars().take(TELEGRAM_MAX_MESSAGE_LEN).collect();
+        if trimmed.trim().is_empty() {
+            return Ok(());
+        }
+
+        let url = format!("{}/sendMessageDraft", self.api_url);
+        let payload = serde_json::json!({
+            "chat_id": chat_id,
+            "draft_id": draft_id,
+            "text": trimmed,
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| anyhow!("telegram sendMessageDraft request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "telegram sendMessageDraft HTTP {}: {}",
+                status,
+                body
+            ));
+        }
+
+        let parsed: ApiResponse<serde_json::Value> = response
+            .json()
+            .await
+            .map_err(|e| anyhow!("telegram sendMessageDraft decode failed: {}", e))?;
+        if !parsed.ok {
+            return Err(anyhow!("telegram sendMessageDraft returned ok=false"));
+        }
+
+        Ok(())
+    }
+
     pub async fn edit_message_text(
         &self,
         chat_id: i64,
@@ -884,7 +927,9 @@ impl TelegramAdapter {
                         continue;
                     }
 
-                    let send_result = if let Some(message_id) = msg.edit_message_id {
+                    let send_result = if let Some(draft_id) = msg.draft_id {
+                        self.send_message_draft(msg.chat_id, draft_id, &msg.text).await
+                    } else if let Some(message_id) = msg.edit_message_id {
                         self.edit_message_text(
                             msg.chat_id,
                             message_id,

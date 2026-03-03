@@ -24,8 +24,8 @@ max_updates = 5
 include_tool_names = true
 
 [core.streaming]
-enabled = false
-mode = "off" # off | telegram_edit | telegram_chunked
+enabled = true
+mode = "telegram_draft" # off | telegram_draft | telegram_chunked (legacy: telegram_edit)
 flush_interval_ms = 900
 max_message_edits = 20
 finalize_timeout_secs = 10

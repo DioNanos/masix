@@ -46,6 +46,7 @@ const DEFAULT_MAX_TOOL_ITERATIONS: usize = 25;
 const MEMORY_MAX_CONTEXT_ENTRIES: usize = 12;
 const MAX_INBOUND_CONCURRENCY: usize = 8;
 const DEFAULT_PLUGIN_SERVER_URL: &str = "https://masix.wellanet.dev";
+const TELEGRAM_DRAFT_MAX_MESSAGE_LEN: usize = 4096;
 
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 struct PluginCatalog {
@@ -1115,6 +1116,7 @@ impl MasixRuntime {
                     text: message.clone(),
                     reply_to: None,
                     edit_message_id: None,
+                    draft_id: None,
                     inline_keyboard: None,
                     chat_action: None,
                 };
@@ -3021,6 +3023,7 @@ impl MasixRuntime {
                                 text: masix_telegram::menu::language_changed_text(new_lang),
                                 reply_to: None,
                                 edit_message_id: envelope.message_id,
+                                draft_id: None,
                                 inline_keyboard: Some(keyboard),
                                 chat_action: None,
                             };
@@ -3090,31 +3093,90 @@ impl MasixRuntime {
             if let Some(chat_id) = envelope.chat_id {
                 let stream_cfg = &config.core.streaming;
                 if stream_cfg.enabled && stream_cfg.mode != StreamingMode::Off {
-                    let chunks = Self::split_message_chunks(response, 1200);
-                    if stream_cfg.mode == StreamingMode::TelegramEdit {
-                        Self::send_outbound_text(
-                            outbound_sender,
-                            &envelope.channel,
-                            account_tag.clone(),
-                            chat_id,
-                            "Streaming update…",
-                            envelope.message_id,
-                        );
-                    }
-                    for (idx, chunk) in chunks.iter().enumerate() {
-                        Self::send_outbound_text(
-                            outbound_sender,
-                            &envelope.channel,
-                            account_tag.clone(),
-                            chat_id,
-                            chunk,
-                            if idx == 0 { envelope.message_id } else { None },
-                        );
-                        if idx + 1 < chunks.len() {
-                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                    match stream_cfg.mode {
+                        StreamingMode::TelegramDraft => {
+                            if Self::is_telegram_private_chat(envelope, chat_id) {
+                                let draft_id = Self::streaming_draft_id(envelope);
+                                let updates = Self::build_draft_updates(
+                                    response,
+                                    usize::from(stream_cfg.max_message_edits),
+                                );
+                                for (idx, partial) in updates.iter().enumerate() {
+                                    Self::send_outbound_draft(
+                                        outbound_sender,
+                                        &envelope.channel,
+                                        account_tag.clone(),
+                                        chat_id,
+                                        partial,
+                                        draft_id,
+                                    );
+                                    if idx + 1 < updates.len() {
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                                            stream_cfg.flush_interval_ms,
+                                        ))
+                                        .await;
+                                    }
+                                }
+                                Self::send_outbound_text(
+                                    outbound_sender,
+                                    &envelope.channel,
+                                    account_tag,
+                                    chat_id,
+                                    response,
+                                    envelope.message_id,
+                                );
+                            } else {
+                                debug!(
+                                    "telegram_draft requires private chat; falling back to chunked send"
+                                );
+                                Self::send_streaming_chunks(
+                                    outbound_sender,
+                                    &envelope.channel,
+                                    account_tag,
+                                    chat_id,
+                                    response,
+                                    envelope.message_id,
+                                    stream_cfg.flush_interval_ms,
+                                )
+                                .await;
+                            }
+                        }
+                        StreamingMode::TelegramEdit => {
+                            warn!(
+                                "streaming mode 'telegram_edit' is deprecated; using chunked fallback"
+                            );
+                            Self::send_streaming_chunks(
+                                outbound_sender,
+                                &envelope.channel,
+                                account_tag,
+                                chat_id,
+                                response,
+                                envelope.message_id,
                                 stream_cfg.flush_interval_ms,
-                            ))
+                            )
                             .await;
+                        }
+                        StreamingMode::TelegramChunked => {
+                            Self::send_streaming_chunks(
+                                outbound_sender,
+                                &envelope.channel,
+                                account_tag,
+                                chat_id,
+                                response,
+                                envelope.message_id,
+                                stream_cfg.flush_interval_ms,
+                            )
+                            .await;
+                        }
+                        StreamingMode::Off => {
+                            Self::send_outbound_text(
+                                outbound_sender,
+                                &envelope.channel,
+                                account_tag,
+                                chat_id,
+                                response,
+                                envelope.message_id,
+                            );
                         }
                     }
                 } else {
@@ -3177,6 +3239,7 @@ impl MasixRuntime {
             text,
             reply_to: None,
             edit_message_id: None,
+            draft_id: None,
             inline_keyboard: None,
             chat_action: None,
         })
@@ -3204,6 +3267,7 @@ impl MasixRuntime {
             text,
             reply_to: None,
             edit_message_id: None,
+            draft_id: None,
             inline_keyboard: None,
             chat_action: None,
         })
@@ -4342,6 +4406,7 @@ impl MasixRuntime {
                 text: menu_text,
                 reply_to: None,
                 edit_message_id: None,
+                draft_id: None,
                 inline_keyboard: Some(keyboard),
                 chat_action: None,
             };
@@ -4447,6 +4512,7 @@ impl MasixRuntime {
                 text: menu_text,
                 reply_to: None,
                 edit_message_id: None,
+                draft_id: None,
                 inline_keyboard: Some(keyboard),
                 chat_action: None,
             };
@@ -6297,9 +6363,103 @@ impl MasixRuntime {
             text: text.to_string(),
             reply_to,
             edit_message_id: None,
+            draft_id: None,
             inline_keyboard: None,
             chat_action: None,
         });
+    }
+
+    fn send_outbound_draft(
+        outbound_sender: &broadcast::Sender<OutboundMessage>,
+        channel: &str,
+        account_tag: Option<String>,
+        chat_id: i64,
+        text: &str,
+        draft_id: i64,
+    ) {
+        let _ = outbound_sender.send(OutboundMessage {
+            channel: channel.to_string(),
+            account_tag,
+            chat_id,
+            text: text.to_string(),
+            reply_to: None,
+            edit_message_id: None,
+            draft_id: Some(draft_id),
+            inline_keyboard: None,
+            chat_action: None,
+        });
+    }
+
+    async fn send_streaming_chunks(
+        outbound_sender: &broadcast::Sender<OutboundMessage>,
+        channel: &str,
+        account_tag: Option<String>,
+        chat_id: i64,
+        response: &str,
+        first_reply_to: Option<i64>,
+        flush_interval_ms: u64,
+    ) {
+        let chunks = Self::split_message_chunks(response, 1200);
+        for (idx, chunk) in chunks.iter().enumerate() {
+            Self::send_outbound_text(
+                outbound_sender,
+                channel,
+                account_tag.clone(),
+                chat_id,
+                chunk,
+                if idx == 0 { first_reply_to } else { None },
+            );
+            if idx + 1 < chunks.len() {
+                tokio::time::sleep(tokio::time::Duration::from_millis(flush_interval_ms)).await;
+            }
+        }
+    }
+
+    fn build_draft_updates(response: &str, max_updates: usize) -> Vec<String> {
+        let effective_max = max_updates.max(1);
+        let capped: String = response
+            .chars()
+            .take(TELEGRAM_DRAFT_MAX_MESSAGE_LEN)
+            .collect();
+        if capped.is_empty() {
+            return Vec::new();
+        }
+
+        let chars: Vec<char> = capped.chars().collect();
+        let total = chars.len();
+        let mut updates = Vec::new();
+        let mut prev_upto = 0usize;
+
+        for i in 1..=effective_max {
+            let upto = ((i * total) + (effective_max - 1)) / effective_max;
+            if upto <= prev_upto {
+                continue;
+            }
+            updates.push(chars[..upto].iter().collect::<String>());
+            prev_upto = upto;
+            if upto >= total {
+                break;
+            }
+        }
+
+        updates
+    }
+
+    fn is_telegram_private_chat(envelope: &Envelope, chat_id: i64) -> bool {
+        if let Some(chat_type) = envelope.payload.get("chat_type").and_then(|v| v.as_str()) {
+            return chat_type == "private";
+        }
+        chat_id > 0
+    }
+
+    fn streaming_draft_id(envelope: &Envelope) -> i64 {
+        if let Some(message_id) = envelope.message_id {
+            if message_id != 0 {
+                return message_id;
+            }
+        }
+        let ts = chrono::Utc::now().timestamp_millis();
+        if ts == 0 { 1 } else { ts.abs() }
     }
 
     fn split_message_chunks(text: &str, max_chars: usize) -> Vec<String> {
@@ -6346,6 +6506,7 @@ impl MasixRuntime {
                     text: String::new(),
                     reply_to: None,
                     edit_message_id: None,
+                    draft_id: None,
                     inline_keyboard: None,
                     chat_action: Some("typing".to_string()),
                 });

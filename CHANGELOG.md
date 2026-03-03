@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.6 - 2026-03-03
+
+- Fixed Telegram streaming UX: removed placeholder preamble and added real progressive updates path.
+- Added Telegram Bot API `sendMessageDraft` support (`telegram_draft`) for private chat streaming.
+- Added clean fallback behavior:
+  - non-private chats fall back to chunked send
+  - legacy `telegram_edit` mode remains accepted but is deprecated
+- Added outbound `draft_id` support across IPC/core/telegram adapter.
+- Updated sanitized docs for streaming modes and power config examples.
+
 ## 0.3.5 - 2026-03-03
 
 - Rebuilt Termux Android prebuilt binary from current MIT source (no artifact reuse), with sanitized build metadata.

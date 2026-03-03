@@ -115,6 +115,7 @@ impl Default for CoreToolProgressConfig {
 pub enum StreamingMode {
     #[default]
     Off,
+    TelegramDraft,
     TelegramEdit,
     TelegramChunked,
 }
@@ -1092,7 +1093,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, StreamingMode};
 
     fn parse_config(input: &str) -> Config {
         let cfg: Config = toml::from_str(input).expect("valid TOML");
@@ -1516,7 +1517,7 @@ api_key = "k"
 [core]
 [core.streaming]
 enabled = true
-mode = "telegram_edit"
+mode = "telegram_draft"
 flush_interval_ms = 100
 
 [providers]
@@ -1528,6 +1529,46 @@ api_key = "k"
 "#,
         );
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn parse_accepts_streaming_mode_telegram_draft() {
+        let cfg = parse_config(
+            r#"
+[core]
+[core.streaming]
+enabled = true
+mode = "telegram_draft"
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+"#,
+        );
+        assert_eq!(cfg.core.streaming.mode, StreamingMode::TelegramDraft);
+    }
+
+    #[test]
+    fn parse_accepts_legacy_streaming_mode_telegram_edit() {
+        let cfg = parse_config(
+            r#"
+[core]
+[core.streaming]
+enabled = true
+mode = "telegram_edit"
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+"#,
+        );
+        assert_eq!(cfg.core.streaming.mode, StreamingMode::TelegramEdit);
     }
 
     #[test]

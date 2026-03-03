@@ -22,11 +22,16 @@ Streaming quick example (Telegram progressive output):
 ```toml
 [core.streaming]
 enabled = true
-mode = "telegram_edit" # off | telegram_edit | telegram_chunked
+mode = "telegram_draft" # off | telegram_draft | telegram_chunked
 flush_interval_ms = 900
 max_message_edits = 20
 finalize_timeout_secs = 10
 ```
+
+Notes:
+- `telegram_draft` uses Telegram Bot API `sendMessageDraft` for private chats.
+- `telegram_chunked` is the portable fallback for non-private chats.
+- `telegram_edit` remains accepted for backward compatibility, but is deprecated.
 
 MCP server timeout controls:
 - `timeout_secs`
