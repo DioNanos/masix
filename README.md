@@ -1,6 +1,6 @@
 # MasiX - AI-Friendly Modular Assistant (Rust)
 
-[![Status](https://img.shields.io/badge/Status-0.3.3-blue.svg)](#project-status)
+[![Status](https://img.shields.io/badge/Status-0.3.4-blue.svg)](#project-status)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![Target](https://img.shields.io/badge/Target-Termux%20%2F%20Linux%20%2F%20macOS-green.svg)](https://termux.dev)
@@ -17,7 +17,7 @@ Core capabilities:
 
 ## Project Status
 
-- Current line: `0.3.3`
+- Current line: `0.3.4`
 - Core track is MIT and automation-first
 - Optional capabilities are delivered as modules/plugins
 - Free modules can be installed from server catalog or local `.pkg` files

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.4 - 2026-03-03
+
+- Surgical MIT sync of stable core runtime improvements:
+  - agent loop options (`core.agent_loop`) with controlled auto-continue behavior
+  - tool progress controls (`core.tool_progress`)
+  - streaming config surface (`core.streaming`)
+  - cron delivery retry/backoff and dead-letter logging (`core.cron`)
+  - MCP per-server timeout/startup/healthcheck controls
+  - runtime context tools and group visibility commands (`/groups`, `/admin groups`, `chat_context`)
+- Hardened MCP tool routing to resolve server/tool names by longest prefix.
+- Updated minimal public docs for command/config parity:
+  - `docs/COMMANDS_REFERENCE.md`
+  - `docs/CONFIG_FILES_REFERENCE.md`
+- Refreshed Termux Android prebuilt binary in npm package track.
+
 ## 0.3.3 - 2026-03-02
 
 - MIT package track expanded with bundled free modules:
