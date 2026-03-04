@@ -31,7 +31,7 @@ const NPM_PACKAGE_NAME: &str = "@mmmbuto/masix";
 const UPDATE_CACHE_FILE: &str = ".masix/.update-check";
 const UPDATE_CACHE_DURATION_SECS: u64 = 24 * 60 * 60;
 const WHISPER_MODEL_URL_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
-const MASIX_GITHUB_RELEASES_BASE_URL: &str = "https://github.com/DioNanos/MasiX/releases/download";
+const MASIX_GITHUB_RELEASES_BASE_URL: &str = "https://github.com/DioNanos/masix/releases/download";
 const MASIX_STT_PREBUILT_ASSET_PREFIX: &str = "masix-stt-whisper-cli";
 const AI_CONTRACT_SCHEMA_VERSION: &str = "masix.ai.contract.v1";
 const AI_DEFAULT_PLUGIN_SERVER_URL: &str = "https://masix.wellanet.dev";
@@ -431,6 +431,12 @@ enum ConfigCommands {
         /// Auto-register users in non-interactive mode
         #[arg(long, action = clap::ArgAction::Set)]
         auto_register_users: Option<bool>,
+        /// Notify admins when a new user is auto-registered
+        #[arg(long, action = clap::ArgAction::Set)]
+        notify_admin_on_new_user: Option<bool>,
+        /// Optional welcome message sent to newly auto-registered users (empty clears)
+        #[arg(long)]
+        new_user_welcome_message: Option<String>,
         /// User tools mode: none|selected in non-interactive mode
         #[arg(long)]
         user_tools_mode: Option<String>,
@@ -1260,6 +1266,8 @@ async fn main() -> Result<()> {
                 allowed_chats,
                 group_mode,
                 auto_register_users,
+                notify_admin_on_new_user,
+                new_user_welcome_message,
                 user_tools_mode,
                 user_allowed_tools,
                 isolated,
@@ -1281,6 +1289,8 @@ async fn main() -> Result<()> {
                     || allowed_chats.is_some()
                     || group_mode.is_some()
                     || auto_register_users.is_some()
+                    || notify_admin_on_new_user.is_some()
+                    || new_user_welcome_message.is_some()
                     || user_tools_mode.is_some()
                     || user_allowed_tools.is_some()
                     || isolated.is_some()
@@ -1309,6 +1319,8 @@ async fn main() -> Result<()> {
                             allowed_chats,
                             group_mode,
                             auto_register_users,
+                            notify_admin_on_new_user,
+                            new_user_welcome_message,
                             user_tools_mode,
                             user_allowed_tools,
                             isolated,
@@ -1832,7 +1844,7 @@ fn build_ai_commands_catalog() -> serde_json::Value {
             },
             {
                 "id": "config.telegram.direct",
-                "command": "masix config telegram --account <tag> [--set-token <token>] [--admins <csv>|--add-admins <csv>|--remove-admins <csv>] [--users <csv>|--add-users <csv>|--remove-users <csv>] [--readonly <csv>|--add-readonly <csv>|--remove-readonly <csv>] [--group-mode <mode>] [--user-tools-mode <mode>] [--user-allowed-tools <csv>] [--allowed-chats <csv>] [--auto-register-users <bool>] [--isolated <bool>] [--allow-self-memory-edit <bool>] [--register-to-file <path>]",
+                "command": "masix config telegram --account <tag> [--set-token <token>] [--admins <csv>|--add-admins <csv>|--remove-admins <csv>] [--users <csv>|--add-users <csv>|--remove-users <csv>] [--readonly <csv>|--add-readonly <csv>|--remove-readonly <csv>] [--group-mode <mode>] [--user-tools-mode <mode>] [--user-allowed-tools <csv>] [--allowed-chats <csv>] [--auto-register-users <bool>] [--notify-admin-on-new-user <bool>] [--new-user-welcome-message <text>] [--isolated <bool>] [--allow-self-memory-edit <bool>] [--register-to-file <path>]",
                 "scope": "core",
                 "interactive": false,
                 "purpose": "Configure Telegram/RBAC/tools/group policy non-interactively for AI workers"
@@ -2872,6 +2884,8 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
                     allow_self_memory_edit: true,
                     group_mode: masix_config::GroupMode::All,
                     auto_register_users: false,
+                    notify_admin_on_new_user: true,
+                    new_user_welcome_message: None,
                     register_to_file: None,
                     user_tools_mode: masix_config::UserToolsMode::None,
                     user_allowed_tools: vec![],
@@ -3199,6 +3213,8 @@ struct TelegramDirectUpdate {
     allowed_chats: Option<String>,
     group_mode: Option<String>,
     auto_register_users: Option<bool>,
+    notify_admin_on_new_user: Option<bool>,
+    new_user_welcome_message: Option<String>,
     user_tools_mode: Option<String>,
     user_allowed_tools: Option<String>,
     isolated: Option<bool>,
@@ -3265,6 +3281,8 @@ fn run_telegram_non_interactive_update(
                 allow_self_memory_edit: true,
                 group_mode: masix_config::GroupMode::All,
                 auto_register_users: false,
+                notify_admin_on_new_user: true,
+                new_user_welcome_message: None,
                 register_to_file: None,
                 user_tools_mode: masix_config::UserToolsMode::None,
                 user_allowed_tools: Vec::new(),
@@ -3319,6 +3337,19 @@ fn run_telegram_non_interactive_update(
 
         if let Some(auto) = update.auto_register_users {
             account.auto_register_users = auto;
+        }
+
+        if let Some(notify) = update.notify_admin_on_new_user {
+            account.notify_admin_on_new_user = notify;
+        }
+
+        if let Some(message) = update.new_user_welcome_message {
+            let trimmed = message.trim();
+            account.new_user_welcome_message = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
         }
 
         if let Some(mode) = update.user_tools_mode {
@@ -4736,6 +4767,17 @@ fn print_telegram_accounts_and_channels(config: &Config) {
         let account_tag = telegram_account_tag(&account.bot_token);
         let profile = account.bot_profile.as_deref().unwrap_or("(none)");
         println!("  {:2}. tag={} profile={}", index + 1, account_tag, profile);
+        println!(
+            "      auto_register={} notify_admin_on_new_user={} welcome_message={} register_file={}",
+            account.auto_register_users,
+            account.notify_admin_on_new_user,
+            if account.new_user_welcome_message.is_some() {
+                "set"
+            } else {
+                "(none)"
+            },
+            account.register_to_file.as_deref().unwrap_or("(default)")
+        );
 
         if let Some(chats) = &account.allowed_chats {
             if chats.is_empty() {
@@ -4967,6 +5009,17 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
 
     let auto_register = group_mode == masix_config::GroupMode::All
         && prompt_confirm("Auto-register unknown users?", false)?;
+    let notify_admin_on_new_user = prompt_confirm(
+        "Notify admins when a new user is auto-registered?",
+        true,
+    )?;
+    let new_user_welcome_default = existing
+        .and_then(|account| account.new_user_welcome_message.clone())
+        .unwrap_or_default();
+    let new_user_welcome_input = prompt_input(
+        "Welcome message for newly registered users (optional)",
+        &new_user_welcome_default,
+    )?;
     let register_to_file_input = prompt_input(
         "Register file path for /admin mutations",
         &register_to_file_default,
@@ -4998,6 +5051,12 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
         allow_self_memory_edit: true,
         group_mode,
         auto_register_users: auto_register,
+        notify_admin_on_new_user,
+        new_user_welcome_message: if new_user_welcome_input.trim().is_empty() {
+            None
+        } else {
+            Some(new_user_welcome_input.trim().to_string())
+        },
         register_to_file,
         user_tools_mode,
         user_allowed_tools,
@@ -7128,6 +7187,8 @@ mod tests {
             allow_self_memory_edit: true,
             group_mode: masix_config::GroupMode::All,
             auto_register_users: false,
+            notify_admin_on_new_user: true,
+            new_user_welcome_message: None,
             register_to_file: None,
             user_tools_mode: masix_config::UserToolsMode::None,
             user_allowed_tools: vec![],

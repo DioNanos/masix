@@ -115,7 +115,6 @@ impl Default for CoreToolProgressConfig {
 pub enum StreamingMode {
     #[default]
     Off,
-    TelegramDraft,
     TelegramEdit,
     TelegramChunked,
 }
@@ -247,6 +246,10 @@ pub struct TelegramAccount {
     pub group_mode: GroupMode,
     #[serde(default)]
     pub auto_register_users: bool,
+    #[serde(default = "default_true")]
+    pub notify_admin_on_new_user: bool,
+    #[serde(default)]
+    pub new_user_welcome_message: Option<String>,
     #[serde(default)]
     pub register_to_file: Option<String>,
     #[serde(default)]
@@ -1093,7 +1096,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, StreamingMode};
+    use super::Config;
 
     fn parse_config(input: &str) -> Config {
         let cfg: Config = toml::from_str(input).expect("valid TOML");
@@ -1517,7 +1520,7 @@ api_key = "k"
 [core]
 [core.streaming]
 enabled = true
-mode = "telegram_draft"
+mode = "telegram_edit"
 flush_interval_ms = 100
 
 [providers]
@@ -1529,46 +1532,6 @@ api_key = "k"
 "#,
         );
         assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn parse_accepts_streaming_mode_telegram_draft() {
-        let cfg = parse_config(
-            r#"
-[core]
-[core.streaming]
-enabled = true
-mode = "telegram_draft"
-
-[providers]
-default_provider = "openai"
-
-[[providers.providers]]
-name = "openai"
-api_key = "k"
-"#,
-        );
-        assert_eq!(cfg.core.streaming.mode, StreamingMode::TelegramDraft);
-    }
-
-    #[test]
-    fn parse_accepts_legacy_streaming_mode_telegram_edit() {
-        let cfg = parse_config(
-            r#"
-[core]
-[core.streaming]
-enabled = true
-mode = "telegram_edit"
-
-[providers]
-default_provider = "openai"
-
-[[providers.providers]]
-name = "openai"
-api_key = "k"
-"#,
-        );
-        assert_eq!(cfg.core.streaming.mode, StreamingMode::TelegramEdit);
     }
 
     #[test]

@@ -12,6 +12,8 @@ config/config.toml
 ~/.config/masix/config.toml
 .env
 .env.*
+!.env.example
+!docker/env/.env.example
 
 # Database
 *.db
@@ -19,6 +21,10 @@ config/config.toml
 
 # Runtime
 runtime/
+docker/runtime/*
+!docker/runtime/.gitkeep
+!docker/runtime/data/.gitkeep
+!docker/runtime/config/.gitkeep
 *.offset
 
 # Secrets

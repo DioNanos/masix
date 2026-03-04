@@ -68,6 +68,7 @@ Configuration paths and file responsibilities:
 - [User Guide](docs/USER_GUIDE.md)
 - [Commands Reference](docs/COMMANDS_REFERENCE.md)
 - [Config Files Reference](docs/CONFIG_FILES_REFERENCE.md)
+- [Docker Telegram Standard](docs/DOCKER_TELEGRAM_STANDARD.md)
 - [Power Config Example (Sanitized)](docs/CONFIG_EXAMPLE_POWER.md)
 - [Homebrew Tap (Formula)](https://github.com/DioNanos/homebrew-masix)
 - [Termux Local AI Endpoint](docs/TERMUX_LLAMA_CPP_LOCAL_ENDPOINT.md)
@@ -114,6 +115,13 @@ cargo build -q
 
 # Core + local STT
 cargo build -q -p masix-cli --features stt
+```
+
+## Docker (Telegram Assistant Standard)
+
+```bash
+cp docker/env/.env.example docker/env/.env
+docker compose -f docker-compose.standard.yml up -d --build
 ```
 
 ## Security Notes

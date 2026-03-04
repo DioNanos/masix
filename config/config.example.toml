@@ -22,7 +22,7 @@ include_tool_names = true
 
 [core.streaming]
 enabled = false
-mode = "off" # off | telegram_draft | telegram_chunked (legacy: telegram_edit)
+mode = "off" # off | telegram_draft | telegram_chunked
 flush_interval_ms = 900
 max_message_edits = 20
 finalize_timeout_secs = 10
@@ -45,6 +45,16 @@ poll_timeout_secs = 60
 
 [[telegram.accounts]]
 bot_token = "YOUR_BOT_TOKEN_HERE"
+admins = []
+users = []
+readonly = []
+group_mode = "all"
+auto_register_users = true
+notify_admin_on_new_user = true
+# new_user_welcome_message = "Welcome! I'm online."
+user_tools_mode = "none"
+# user_allowed_tools = ["web_fetch", "plugin_discovery_web_search", "read_file"]
+user_allowed_tools = []
 
 # Optional modules are installed later via `masix plugin ...` / wizard plugin step.
 

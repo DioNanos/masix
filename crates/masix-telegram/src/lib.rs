@@ -124,6 +124,10 @@ pub struct TelegramUser {
     #[serde(default)]
     pub is_bot: Option<bool>,
     #[serde(default)]
+    pub first_name: Option<String>,
+    #[serde(default)]
+    pub last_name: Option<String>,
+    #[serde(default)]
     pub username: Option<String>,
 }
 
@@ -312,49 +316,6 @@ impl TelegramAdapter {
             }
 
             self.send_with_markdown_fallback(&url, payload).await?;
-        }
-
-        Ok(())
-    }
-
-    pub async fn send_message_draft(&self, chat_id: i64, draft_id: i64, text: &str) -> Result<()> {
-        let draft_id = if draft_id == 0 { 1 } else { draft_id };
-        let trimmed: String = text.chars().take(TELEGRAM_MAX_MESSAGE_LEN).collect();
-        if trimmed.trim().is_empty() {
-            return Ok(());
-        }
-
-        let url = format!("{}/sendMessageDraft", self.api_url);
-        let payload = serde_json::json!({
-            "chat_id": chat_id,
-            "draft_id": draft_id,
-            "text": trimmed,
-        });
-
-        let response = self
-            .client
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| anyhow!("telegram sendMessageDraft request failed: {}", e))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "telegram sendMessageDraft HTTP {}: {}",
-                status,
-                body
-            ));
-        }
-
-        let parsed: ApiResponse<serde_json::Value> = response
-            .json()
-            .await
-            .map_err(|e| anyhow!("telegram sendMessageDraft decode failed: {}", e))?;
-        if !parsed.ok {
-            return Err(anyhow!("telegram sendMessageDraft returned ok=false"));
         }
 
         Ok(())
@@ -744,6 +705,17 @@ impl TelegramAdapter {
                     "account_tag": self.account_tag.clone(),
                     "chat_type": message.chat.chat_type.clone(),
                 });
+                if let Some(from) = message.from.as_ref() {
+                    if let Some(obj) = payload.as_object_mut() {
+                        if let Some(username) = from.username.as_ref() {
+                            obj.insert("from_username".to_string(), serde_json::json!(username));
+                        }
+                        obj.insert("from_first_name".to_string(), serde_json::json!(from.first_name));
+                        if let Some(last_name) = from.last_name.as_ref() {
+                            obj.insert("from_last_name".to_string(), serde_json::json!(last_name));
+                        }
+                    }
+                }
                 if let Some(from_user_id) = from_user_id {
                     if let Some(obj) = payload.as_object_mut() {
                         obj.insert("from_user_id".to_string(), serde_json::json!(from_user_id));
@@ -927,9 +899,7 @@ impl TelegramAdapter {
                         continue;
                     }
 
-                    let send_result = if let Some(draft_id) = msg.draft_id {
-                        self.send_message_draft(msg.chat_id, draft_id, &msg.text).await
-                    } else if let Some(message_id) = msg.edit_message_id {
+                    let send_result = if let Some(message_id) = msg.edit_message_id {
                         self.edit_message_text(
                             msg.chat_id,
                             message_id,
@@ -980,6 +950,8 @@ mod tests {
             allow_self_memory_edit: true,
             group_mode: masix_config::GroupMode::All,
             auto_register_users: false,
+            notify_admin_on_new_user: true,
+            new_user_welcome_message: None,
             register_to_file: None,
             user_tools_mode: masix_config::UserToolsMode::None,
             user_allowed_tools: vec![],

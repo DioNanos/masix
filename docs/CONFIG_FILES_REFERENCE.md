@@ -4,6 +4,8 @@ This is the minimal file map for operating MasiX safely.
 
 Power-mode sanitized reference:
 - `docs/CONFIG_EXAMPLE_POWER.md`
+- Docker Telegram standard:
+- `docs/DOCKER_TELEGRAM_STANDARD.md`
 
 ## 1) Main Config
 
@@ -60,3 +62,10 @@ MCP server timeout controls:
 ## 5) Operational Rule
 
 Prefer CLI commands to change state. Do not edit generated runtime files manually unless strictly required.
+
+## 6) Telegram Registration Controls
+
+For each `[[telegram.accounts]]`:
+- `auto_register_users` enables private-chat auto-registration when `group_mode = "all"`.
+- `notify_admin_on_new_user` notifies admins on first auto-registration event.
+- `new_user_welcome_message` sends a one-time welcome text to newly registered users.

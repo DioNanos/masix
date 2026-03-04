@@ -1,0 +1,27 @@
+services:
+  masix-telegram-assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: masix-telegram-assistant:local
+    container_name: masix-telegram-assistant
+    restart: unless-stopped
+    env_file:
+      - ./docker/env/.env
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=64m
+    volumes:
+      - ./docker/runtime/data:/data
+      - ./docker/runtime/config:/config
+    healthcheck:
+      test: ["CMD", "masix", "verify", "--config", "/config/config.toml"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+

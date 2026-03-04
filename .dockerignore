@@ -1,0 +1,10 @@
+target
+.git
+.gitignore
+.docs
+node_modules
+dist
+tmp
+*.log
+*.tar.gz
+npm/masix-termux/prebuilt

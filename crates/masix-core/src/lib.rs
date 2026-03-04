@@ -46,7 +46,6 @@ const DEFAULT_MAX_TOOL_ITERATIONS: usize = 25;
 const MEMORY_MAX_CONTEXT_ENTRIES: usize = 12;
 const MAX_INBOUND_CONCURRENCY: usize = 8;
 const DEFAULT_PLUGIN_SERVER_URL: &str = "https://masix.wellanet.dev";
-const TELEGRAM_DRAFT_MAX_MESSAGE_LEN: usize = 4096;
 
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 struct PluginCatalog {
@@ -278,6 +277,8 @@ mod tests {
             allow_self_memory_edit: true,
             group_mode: GroupMode::All,
             auto_register_users: false,
+            notify_admin_on_new_user: true,
+            new_user_welcome_message: None,
             register_to_file: None,
             user_tools_mode: masix_config::UserToolsMode::None,
             user_allowed_tools: vec![],
@@ -809,6 +810,12 @@ struct UserMemoryMeta {
     chat_ids: Vec<i64>,
 }
 
+#[derive(Debug, Clone)]
+struct AutoRegisterResult {
+    newly_registered: bool,
+    register_file: Option<PathBuf>,
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct TelegramGetFileResponse {
     ok: bool,
@@ -1116,9 +1123,9 @@ impl MasixRuntime {
                     text: message.clone(),
                     reply_to: None,
                     edit_message_id: None,
-                    draft_id: None,
                     inline_keyboard: None,
                     chat_action: None,
+                    draft_id: None,
                 };
                 let mut success = false;
                 for attempt in 0..=cron_cfg.delivery_retry_count {
@@ -2712,20 +2719,51 @@ impl MasixRuntime {
                         chat_id,
                     )
                 {
-                    if let Err(e) =
-                        Self::register_user(config, account_tag.as_deref(), from_user_id).await
-                    {
-                        warn!("Failed to auto-register user {}: {}", from_user_id, e);
-                    } else {
-                        permission = Self::get_permission_level(
-                            config,
-                            account_tag.as_deref(),
-                            &envelope.channel,
-                            from,
-                            from_user_id,
-                            chat_id,
-                            text,
-                        );
+                    match Self::register_user(config, account_tag.as_deref(), from_user_id).await {
+                        Err(e) => {
+                            warn!("Failed to auto-register user {}: {}", from_user_id, e);
+                        }
+                        Ok(result) => {
+                            if result.newly_registered {
+                                Self::send_new_user_welcome_if_configured(
+                                    config,
+                                    account_tag.as_deref(),
+                                    &outbound_sender,
+                                    chat_id,
+                                );
+                                Self::notify_admins_new_user_auto_registered(
+                                    config,
+                                    account_tag.as_deref(),
+                                    &outbound_sender,
+                                    from_user_id,
+                                    chat_id,
+                                    &envelope,
+                                );
+                                let _ = Self::append_runtime_event(
+                                    &bot_context.workdir,
+                                    "user_auto_registered",
+                                    &envelope,
+                                    serde_json::json!({
+                                        "user_id": from_user_id,
+                                        "chat_id": chat_id,
+                                        "account_tag": account_tag.as_deref().unwrap_or("__default__"),
+                                        "register_file": result.register_file.as_ref().map(|p| p.display().to_string()),
+                                        "source": "auto_register"
+                                    }),
+                                )
+                                .await;
+                            }
+
+                            permission = Self::get_permission_level(
+                                config,
+                                account_tag.as_deref(),
+                                &envelope.channel,
+                                from,
+                                from_user_id,
+                                chat_id,
+                                text,
+                            );
+                        }
                     }
                 }
 
@@ -3023,9 +3061,9 @@ impl MasixRuntime {
                                 text: masix_telegram::menu::language_changed_text(new_lang),
                                 reply_to: None,
                                 edit_message_id: envelope.message_id,
-                                draft_id: None,
                                 inline_keyboard: Some(keyboard),
                                 chat_action: None,
+                                draft_id: None,
                             };
                             let _ = outbound_sender.send(msg);
                             return Ok(());
@@ -3093,90 +3131,31 @@ impl MasixRuntime {
             if let Some(chat_id) = envelope.chat_id {
                 let stream_cfg = &config.core.streaming;
                 if stream_cfg.enabled && stream_cfg.mode != StreamingMode::Off {
-                    match stream_cfg.mode {
-                        StreamingMode::TelegramDraft => {
-                            if Self::is_telegram_private_chat(envelope, chat_id) {
-                                let draft_id = Self::streaming_draft_id(envelope);
-                                let updates = Self::build_draft_updates(
-                                    response,
-                                    usize::from(stream_cfg.max_message_edits),
-                                );
-                                for (idx, partial) in updates.iter().enumerate() {
-                                    Self::send_outbound_draft(
-                                        outbound_sender,
-                                        &envelope.channel,
-                                        account_tag.clone(),
-                                        chat_id,
-                                        partial,
-                                        draft_id,
-                                    );
-                                    if idx + 1 < updates.len() {
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(
-                                            stream_cfg.flush_interval_ms,
-                                        ))
-                                        .await;
-                                    }
-                                }
-                                Self::send_outbound_text(
-                                    outbound_sender,
-                                    &envelope.channel,
-                                    account_tag,
-                                    chat_id,
-                                    response,
-                                    envelope.message_id,
-                                );
-                            } else {
-                                debug!(
-                                    "telegram_draft requires private chat; falling back to chunked send"
-                                );
-                                Self::send_streaming_chunks(
-                                    outbound_sender,
-                                    &envelope.channel,
-                                    account_tag,
-                                    chat_id,
-                                    response,
-                                    envelope.message_id,
-                                    stream_cfg.flush_interval_ms,
-                                )
-                                .await;
-                            }
-                        }
-                        StreamingMode::TelegramEdit => {
-                            warn!(
-                                "streaming mode 'telegram_edit' is deprecated; using chunked fallback"
-                            );
-                            Self::send_streaming_chunks(
-                                outbound_sender,
-                                &envelope.channel,
-                                account_tag,
-                                chat_id,
-                                response,
-                                envelope.message_id,
+                    let chunks = Self::split_message_chunks(response, 1200);
+                    if stream_cfg.mode == StreamingMode::TelegramEdit {
+                        Self::send_outbound_text(
+                            outbound_sender,
+                            &envelope.channel,
+                            account_tag.clone(),
+                            chat_id,
+                            "Streaming update…",
+                            envelope.message_id,
+                        );
+                    }
+                    for (idx, chunk) in chunks.iter().enumerate() {
+                        Self::send_outbound_text(
+                            outbound_sender,
+                            &envelope.channel,
+                            account_tag.clone(),
+                            chat_id,
+                            chunk,
+                            if idx == 0 { envelope.message_id } else { None },
+                        );
+                        if idx + 1 < chunks.len() {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
                                 stream_cfg.flush_interval_ms,
-                            )
+                            ))
                             .await;
-                        }
-                        StreamingMode::TelegramChunked => {
-                            Self::send_streaming_chunks(
-                                outbound_sender,
-                                &envelope.channel,
-                                account_tag,
-                                chat_id,
-                                response,
-                                envelope.message_id,
-                                stream_cfg.flush_interval_ms,
-                            )
-                            .await;
-                        }
-                        StreamingMode::Off => {
-                            Self::send_outbound_text(
-                                outbound_sender,
-                                &envelope.channel,
-                                account_tag,
-                                chat_id,
-                                response,
-                                envelope.message_id,
-                            );
                         }
                     }
                 } else {
@@ -3239,9 +3218,9 @@ impl MasixRuntime {
             text,
             reply_to: None,
             edit_message_id: None,
-            draft_id: None,
             inline_keyboard: None,
             chat_action: None,
+            draft_id: None,
         })
     }
 
@@ -3267,9 +3246,9 @@ impl MasixRuntime {
             text,
             reply_to: None,
             edit_message_id: None,
-            draft_id: None,
             inline_keyboard: None,
             chat_action: None,
+            draft_id: None,
         })
     }
 
@@ -4406,9 +4385,9 @@ impl MasixRuntime {
                 text: menu_text,
                 reply_to: None,
                 edit_message_id: None,
-                draft_id: None,
                 inline_keyboard: Some(keyboard),
                 chat_action: None,
+                draft_id: None,
             };
             if let Err(e) = outbound_sender.send(msg) {
                 error!("Failed to send menu: {}", e);
@@ -4512,9 +4491,9 @@ impl MasixRuntime {
                 text: menu_text,
                 reply_to: None,
                 edit_message_id: None,
-                draft_id: None,
                 inline_keyboard: Some(keyboard),
                 chat_action: None,
+                draft_id: None,
             };
             let _ = outbound_sender.send(msg);
             return Ok(true);
@@ -5432,7 +5411,11 @@ impl MasixRuntime {
         Ok(())
     }
 
-    async fn register_user(config: &Config, account_tag: Option<&str>, user_id: i64) -> Result<()> {
+    async fn register_user(
+        config: &Config,
+        account_tag: Option<&str>,
+        user_id: i64,
+    ) -> Result<AutoRegisterResult> {
         let account = Self::get_telegram_account(config, account_tag);
         if let Some(account) = account {
             let path = Self::effective_register_file_path(account);
@@ -5448,22 +5431,43 @@ impl MasixRuntime {
                 serde_json::json!({})
             };
 
-            let timestamp = chrono::Utc::now().to_rfc3339();
+            let mut newly_registered = false;
             if let Some(obj) = registered.as_object_mut() {
-                obj.insert(
-                    user_id.to_string(),
-                    serde_json::json!({
-                        "first_seen": timestamp,
-                        "source": "auto_register"
-                    }),
+                let user_key = user_id.to_string();
+                if !obj.contains_key(&user_key) {
+                    let timestamp = chrono::Utc::now().to_rfc3339();
+                    obj.insert(
+                        user_key,
+                        serde_json::json!({
+                            "first_seen": timestamp,
+                            "source": "auto_register"
+                        }),
+                    );
+                    newly_registered = true;
+                }
+            }
+
+            if newly_registered {
+                let content = serde_json::to_string_pretty(&registered)?;
+                fs::write(&path, content).await?;
+                info!("Auto-registered user {} to {}", user_id, path.display());
+            } else {
+                debug!(
+                    "Auto-register skipped: user {} already present in {}",
+                    user_id,
+                    path.display()
                 );
             }
 
-            let content = serde_json::to_string_pretty(&registered)?;
-            fs::write(&path, content).await?;
-            info!("Auto-registered user {} to {}", user_id, path.display());
+            return Ok(AutoRegisterResult {
+                newly_registered,
+                register_file: Some(path),
+            });
         }
-        Ok(())
+        Ok(AutoRegisterResult {
+            newly_registered: false,
+            register_file: None,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6363,103 +6367,110 @@ impl MasixRuntime {
             text: text.to_string(),
             reply_to,
             edit_message_id: None,
+            inline_keyboard: None,
+            chat_action: None,
             draft_id: None,
-            inline_keyboard: None,
-            chat_action: None,
         });
     }
 
-    fn send_outbound_draft(
+    fn notify_admins_new_user_auto_registered(
+        config: &Config,
+        account_tag: Option<&str>,
         outbound_sender: &broadcast::Sender<OutboundMessage>,
-        channel: &str,
-        account_tag: Option<String>,
+        user_id: i64,
         chat_id: i64,
-        text: &str,
-        draft_id: i64,
+        envelope: &Envelope,
     ) {
-        let _ = outbound_sender.send(OutboundMessage {
-            channel: channel.to_string(),
-            account_tag,
-            chat_id,
-            text: text.to_string(),
-            reply_to: None,
-            edit_message_id: None,
-            draft_id: Some(draft_id),
-            inline_keyboard: None,
-            chat_action: None,
-        });
-    }
-
-    async fn send_streaming_chunks(
-        outbound_sender: &broadcast::Sender<OutboundMessage>,
-        channel: &str,
-        account_tag: Option<String>,
-        chat_id: i64,
-        response: &str,
-        first_reply_to: Option<i64>,
-        flush_interval_ms: u64,
-    ) {
-        let chunks = Self::split_message_chunks(response, 1200);
-        for (idx, chunk) in chunks.iter().enumerate() {
-            Self::send_outbound_text(
-                outbound_sender,
-                channel,
-                account_tag.clone(),
-                chat_id,
-                chunk,
-                if idx == 0 { first_reply_to } else { None },
-            );
-            if idx + 1 < chunks.len() {
-                tokio::time::sleep(tokio::time::Duration::from_millis(flush_interval_ms)).await;
-            }
-        }
-    }
-
-    fn build_draft_updates(response: &str, max_updates: usize) -> Vec<String> {
-        let effective_max = max_updates.max(1);
-        let capped: String = response
-            .chars()
-            .take(TELEGRAM_DRAFT_MAX_MESSAGE_LEN)
-            .collect();
-        if capped.is_empty() {
-            return Vec::new();
+        let Some(account) = Self::get_telegram_account(config, account_tag) else {
+            return;
+        };
+        if !account.notify_admin_on_new_user {
+            return;
         }
 
-        let chars: Vec<char> = capped.chars().collect();
-        let total = chars.len();
-        let mut updates = Vec::new();
-        let mut prev_upto = 0usize;
+        let dynamic_acl = Self::load_dynamic_acl_for_account(account);
+        let mut admins: Vec<i64> = account.admins.clone();
+        admins.extend(dynamic_acl.admins.iter().copied());
+        admins.sort_unstable();
+        admins.dedup();
+        if admins.is_empty() {
+            return;
+        }
 
-        for i in 1..=effective_max {
-            let upto = ((i * total) + (effective_max - 1)) / effective_max;
-            if upto <= prev_upto {
+        let username = envelope
+            .payload
+            .get("from_username")
+            .and_then(|v| v.as_str())
+            .map(|v| format!("@{}", v));
+        let first_name = envelope
+            .payload
+            .get("from_first_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let last_name = envelope
+            .payload
+            .get("from_last_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let full_name = format!("{} {}", first_name, last_name).trim().to_string();
+
+        let mut lines = vec![
+            "New user auto-registered.".to_string(),
+            format!("user_id: {}", user_id),
+            format!("chat_id: {}", chat_id),
+        ];
+        if !full_name.is_empty() {
+            lines.push(format!("name: {}", full_name));
+        }
+        if let Some(username) = username {
+            lines.push(format!("username: {}", username));
+        }
+        if let Some(tag) = account_tag {
+            lines.push(format!("account_tag: {}", tag));
+        }
+
+        let message = lines.join("\n");
+        for admin_id in admins {
+            if admin_id == user_id {
                 continue;
             }
-            updates.push(chars[..upto].iter().collect::<String>());
-            prev_upto = upto;
-            if upto >= total {
-                break;
-            }
+            Self::send_outbound_text(
+                outbound_sender,
+                "telegram",
+                account_tag.map(|value| value.to_string()),
+                admin_id,
+                &message,
+                None,
+            );
         }
-
-        updates
     }
 
-    fn is_telegram_private_chat(envelope: &Envelope, chat_id: i64) -> bool {
-        if let Some(chat_type) = envelope.payload.get("chat_type").and_then(|v| v.as_str()) {
-            return chat_type == "private";
+    fn send_new_user_welcome_if_configured(
+        config: &Config,
+        account_tag: Option<&str>,
+        outbound_sender: &broadcast::Sender<OutboundMessage>,
+        chat_id: i64,
+    ) {
+        let Some(account) = Self::get_telegram_account(config, account_tag) else {
+            return;
+        };
+        let Some(message) = account.new_user_welcome_message.as_deref() else {
+            return;
+        };
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            return;
         }
-        chat_id > 0
-    }
-
-    fn streaming_draft_id(envelope: &Envelope) -> i64 {
-        if let Some(message_id) = envelope.message_id {
-            if message_id != 0 {
-                return message_id;
-            }
-        }
-        let ts = chrono::Utc::now().timestamp_millis();
-        if ts == 0 { 1 } else { ts.abs() }
+        Self::send_outbound_text(
+            outbound_sender,
+            "telegram",
+            account_tag.map(|value| value.to_string()),
+            chat_id,
+            trimmed,
+            None,
+        );
     }
 
     fn split_message_chunks(text: &str, max_chars: usize) -> Vec<String> {
@@ -6506,9 +6517,9 @@ impl MasixRuntime {
                     text: String::new(),
                     reply_to: None,
                     edit_message_id: None,
-                    draft_id: None,
                     inline_keyboard: None,
                     chat_action: Some("typing".to_string()),
+                    draft_id: None,
                 });
                 tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
             }
