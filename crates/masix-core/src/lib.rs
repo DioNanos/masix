@@ -2346,6 +2346,7 @@ impl MasixRuntime {
         let mut selected_provider = preferred_provider;
         let mut used_tools: Vec<String> = Vec::new();
         let mut used_tool_signatures: HashSet<String> = HashSet::new();
+        let mut tool_call_counts: HashMap<String, usize> = HashMap::new();
         let mut successful_discovery_search_calls = 0usize;
         let mut hit_tool_iteration_limit = false;
         let mut auto_continue_count = 0usize;
@@ -2393,7 +2394,39 @@ impl MasixRuntime {
                 };
                 messages.push(assistant_message);
 
+                let mut force_finalize_after_guard = false;
                 for tool_call in tool_calls {
+                    let count = tool_call_counts
+                        .entry(tool_call.function.name.clone())
+                        .and_modify(|value| *value = value.saturating_add(1))
+                        .or_insert(1);
+                    let max_calls_for_tool = if tool_call.function.name == "cron" {
+                        3usize
+                    } else {
+                        6usize
+                    };
+                    if *count > max_calls_for_tool {
+                        warn!(
+                            "Tool call guard triggered: tool='{}' count={} limit={}",
+                            tool_call.function.name, count, max_calls_for_tool
+                        );
+                        messages.push(ChatMessage {
+                            role: "tool".to_string(),
+                            content: Some(format!(
+                                "Loop guard: too many '{}' calls in one turn ({}>{}). Stop calling tools and finalize with current results.",
+                                tool_call.function.name, count, max_calls_for_tool
+                            )),
+                            tool_calls: None,
+                            tool_call_id: Some(tool_call.id.clone()),
+                            name: Some(tool_call.function.name.clone()),
+                        });
+                        if tool_call.function.name == "cron" {
+                            force_finalize_after_guard = true;
+                            break;
+                        }
+                        continue;
+                    }
+
                     info!("Executing tool: {}", tool_call.function.name);
                     if !used_tools
                         .iter()
@@ -2491,6 +2524,11 @@ impl MasixRuntime {
                     messages.push(tool_message);
                 }
 
+                if force_finalize_after_guard {
+                    debug!("Breaking tool loop early due to cron guard; finalizing response.");
+                    break;
+                }
+
                 if Self::should_emit_tool_progress(
                     &loop_options.tool_progress,
                     iterations,
@@ -2506,14 +2544,14 @@ impl MasixRuntime {
                                     let tool_names: Vec<&str> =
                                         used_tools.iter().map(|s| s.as_str()).collect();
                                     format!(
-                                        "Progress (step {}/{}): {}",
+                                        "Quick update ({}/{}): checking {}.",
                                         iterations,
                                         loop_options.max_iterations,
                                         tool_names.join(", ")
                                     )
                                 } else {
                                     format!(
-                                        "Progress (step {}/{}): running tools...",
+                                        "Quick update ({}/{}): still working, running tools...",
                                         iterations, loop_options.max_iterations
                                     )
                                 };
