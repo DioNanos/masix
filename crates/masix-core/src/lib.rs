@@ -5157,15 +5157,14 @@ impl MasixRuntime {
     }
 
     async fn collect_observed_telegram_groups(
-        config: &Config,
+        _config: &Config,
         account_tag: Option<&str>,
         bot_context: &BotContext,
     ) -> Result<Vec<i64>> {
         let account = Self::sanitize_scope_component(&Self::account_scope(account_tag));
-        let base_data_dir = Self::data_dir_from_config(config)?;
-        let users_root = base_data_dir
-            .join("memories")
-            .join(bot_context.profile_name.as_str())
+        // Read from the same runtime tree used by record_user_catalog/user_memory_dir.
+        let users_root = bot_context
+            .memory_dir
             .join("accounts")
             .join(account)
             .join("users");
