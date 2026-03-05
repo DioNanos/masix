@@ -13,9 +13,9 @@
 
 ```bash
 masix plugin install-file \
-  --file packages/free/codex-backend/0.1.3/codex-backend-linux-x86_64.pkg \
+  --file packages/free/codex-backend/0.1.4/codex-backend-linux-x86_64.pkg \
   --plugin codex-backend \
-  --version 0.1.3 \
+  --version 0.1.4 \
   --package-type library
 ```
 

@@ -2,6 +2,10 @@
 
 ## 0.3.7 - 2026-03-05
 
+- Refreshed MIT offline free package track:
+  - `discovery` `0.2.4`
+  - `codex-backend` `0.1.4`
+  - `codex-tools` `0.1.3`
 - Ported stable runtime delta from internal DEV line:
   - access mode + scoped memory policy hardening
   - telegram capability visibility and stream scope enforcement

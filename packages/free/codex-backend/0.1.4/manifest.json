@@ -1,0 +1,33 @@
+{
+  "plugin_id": "codex-backend",
+  "version": "0.1.4",
+  "visibility": "free",
+  "license": "MIT",
+  "admin_only": true,
+  "package_type": "library",
+  "platforms": [
+    {
+      "id": "android-aarch64-termux",
+      "file": "codex-backend-android-aarch64-termux.pkg",
+      "sha256": "3175ff8fc1e6336ea63d881b2a72d6660496656314c0ed8408c9168f3e67754d"
+    },
+    {
+      "id": "linux-x86_64",
+      "file": "codex-backend-linux-x86_64.pkg",
+      "sha256": "3175ff8fc1e6336ea63d881b2a72d6660496656314c0ed8408c9168f3e67754d"
+    },
+    {
+      "id": "macos-aarch64",
+      "file": "codex-backend-macos-aarch64.pkg",
+      "sha256": "3175ff8fc1e6336ea63d881b2a72d6660496656314c0ed8408c9168f3e67754d"
+    }
+  ],
+  "install": {
+    "command": "masix plugin install-file --file <path-to-pkg> --plugin codex-backend --version 0.1.4 --package-type library"
+  },
+  "notes": [
+    "Admin-only module. Non-admin users cannot call codex-backend tools.",
+    "Package usable without plugin server.",
+    "See docs/THIRD_PARTY_NOTICES.md for upstream Codex attribution."
+  ]
+}

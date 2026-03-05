@@ -14,9 +14,9 @@ Termux:
 
 ```bash
 masix plugin install-file \
-  --file packages/free/discovery/0.2.3/discovery-android-aarch64-termux.pkg \
+  --file packages/free/discovery/0.2.4/discovery-android-aarch64-termux.pkg \
   --plugin discovery \
-  --version 0.2.3 \
+  --version 0.2.4 \
   --package-type mcp_binary
 ```
 
@@ -24,9 +24,9 @@ Linux:
 
 ```bash
 masix plugin install-file \
-  --file packages/free/discovery/0.2.3/discovery-linux-x86_64.pkg \
+  --file packages/free/discovery/0.2.4/discovery-linux-x86_64.pkg \
   --plugin discovery \
-  --version 0.2.3 \
+  --version 0.2.4 \
   --package-type mcp_binary
 ```
 
@@ -34,9 +34,9 @@ macOS (Apple Silicon):
 
 ```bash
 masix plugin install-file \
-  --file packages/free/discovery/0.2.3/discovery-macos-aarch64.pkg \
+  --file packages/free/discovery/0.2.4/discovery-macos-aarch64.pkg \
   --plugin discovery \
-  --version 0.2.3 \
+  --version 0.2.4 \
   --package-type mcp_binary
 ```
 

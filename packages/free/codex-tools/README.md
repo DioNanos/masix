@@ -13,9 +13,9 @@
 
 ```bash
 masix plugin install-file \
-  --file packages/free/codex-tools/0.1.2/codex-tools-linux-x86_64.pkg \
+  --file packages/free/codex-tools/0.1.3/codex-tools-linux-x86_64.pkg \
   --plugin codex-tools \
-  --version 0.1.2 \
+  --version 0.1.3 \
   --package-type mcp_binary
 ```
 
