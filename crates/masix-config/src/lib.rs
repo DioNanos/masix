@@ -327,6 +327,10 @@ pub struct TelegramAccount {
     #[serde(default)]
     pub new_user_welcome_message: Option<String>,
     #[serde(default)]
+    pub start_welcome_admin: Option<String>,
+    #[serde(default)]
+    pub start_welcome_user: Option<String>,
+    #[serde(default)]
     pub user_tools_mode: UserToolsMode,
     #[serde(default)]
     pub user_allowed_tools: Vec<String>,
@@ -1364,6 +1368,8 @@ api_key = "k"
             register_to_file: None,
             notify_admin_on_new_user: true,
             new_user_welcome_message: None,
+            start_welcome_admin: None,
+            start_welcome_user: None,
             user_tools_mode: Default::default(),
             user_allowed_tools: Vec::new(),
         }

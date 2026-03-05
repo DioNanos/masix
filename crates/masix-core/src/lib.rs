@@ -287,6 +287,8 @@ mod tests {
             pairing: Default::default(),
             notify_admin_on_new_user: true,
             new_user_welcome_message: None,
+            start_welcome_admin: None,
+            start_welcome_user: None,
             register_to_file: None,
             user_tools_mode: masix_config::UserToolsMode::None,
             user_allowed_tools: vec![],
@@ -5012,7 +5014,22 @@ impl MasixRuntime {
             return Ok(true);
         }
 
-        if text.starts_with("/start") || text.starts_with("/menu") {
+        if text.starts_with("/start") {
+            info!("Processing start command");
+            let start_text =
+                Self::resolve_start_welcome_message(config, account_tag, permission);
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &start_text,
+                None,
+            );
+            return Ok(true);
+        }
+
+        if text.starts_with("/menu") {
             info!("Processing menu command");
             let lang = user_languages
                 .lock()
@@ -6827,6 +6844,38 @@ impl MasixRuntime {
             let a_tag = masix_config::telegram_account_tag(&a.bot_token);
             a_tag == tag || (tag.is_empty() && telegram.accounts.len() == 1)
         })
+    }
+
+    fn resolve_start_welcome_message(
+        config: &Config,
+        account_tag: Option<&str>,
+        permission: PermissionLevel,
+    ) -> String {
+        let account = Self::get_telegram_account(config, account_tag);
+        let configured = match (account, permission) {
+            (Some(acc), PermissionLevel::Admin) => acc
+                .start_welcome_admin
+                .as_deref()
+                .or(acc.start_welcome_user.as_deref()),
+            (Some(acc), PermissionLevel::User) | (Some(acc), PermissionLevel::Readonly) => {
+                acc.start_welcome_user.as_deref()
+            }
+            _ => None,
+        }
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+        if let Some(message) = configured {
+            return message.to_string();
+        }
+
+        match permission {
+            PermissionLevel::Admin => "Ciao, sono pronto.".to_string(),
+            PermissionLevel::User | PermissionLevel::Readonly => {
+                "Ciao! Benvenuto in GENOMI Assistant.".to_string()
+            }
+            PermissionLevel::None => "Ciao.".to_string(),
+        }
     }
 
     fn resolve_sender_user_id(envelope: &Envelope, sender: &str) -> i64 {

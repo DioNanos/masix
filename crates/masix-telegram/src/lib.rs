@@ -1060,6 +1060,8 @@ mod tests {
             pairing: Default::default(),
             notify_admin_on_new_user: true,
             new_user_welcome_message: None,
+            start_welcome_admin: None,
+            start_welcome_user: None,
             register_to_file: None,
             user_tools_mode: masix_config::UserToolsMode::None,
             user_allowed_tools: vec![],
