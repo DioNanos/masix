@@ -424,6 +424,12 @@ enum ConfigCommands {
         /// Optional welcome message sent to newly auto-registered users (empty clears)
         #[arg(long)]
         new_user_welcome_message: Option<String>,
+        /// Optional /start welcome message for admins (empty clears)
+        #[arg(long)]
+        start_welcome_admin: Option<String>,
+        /// Optional /start welcome message for users/readonly (empty clears)
+        #[arg(long)]
+        start_welcome_user: Option<String>,
         /// User tools mode: none|selected in non-interactive mode
         #[arg(long)]
         user_tools_mode: Option<String>,
@@ -1220,6 +1226,8 @@ async fn main() -> Result<()> {
                 auto_register_users,
                 notify_admin_on_new_user,
                 new_user_welcome_message,
+                start_welcome_admin,
+                start_welcome_user,
                 user_tools_mode,
                 user_allowed_tools,
                 isolated,
@@ -1244,6 +1252,8 @@ async fn main() -> Result<()> {
                     || auto_register_users.is_some()
                     || notify_admin_on_new_user.is_some()
                     || new_user_welcome_message.is_some()
+                    || start_welcome_admin.is_some()
+                    || start_welcome_user.is_some()
                     || user_tools_mode.is_some()
                     || user_allowed_tools.is_some()
                     || isolated.is_some()
@@ -1275,6 +1285,8 @@ async fn main() -> Result<()> {
                             auto_register_users,
                             notify_admin_on_new_user,
                             new_user_welcome_message,
+                            start_welcome_admin,
+                            start_welcome_user,
                             user_tools_mode,
                             user_allowed_tools,
                             isolated,
@@ -3042,6 +3054,8 @@ struct TelegramDirectUpdate {
     auto_register_users: Option<bool>,
     notify_admin_on_new_user: Option<bool>,
     new_user_welcome_message: Option<String>,
+    start_welcome_admin: Option<String>,
+    start_welcome_user: Option<String>,
     user_tools_mode: Option<String>,
     user_allowed_tools: Option<String>,
     isolated: Option<bool>,
@@ -3199,6 +3213,22 @@ fn run_telegram_non_interactive_update(
         if let Some(message) = update.new_user_welcome_message {
             let trimmed = message.trim();
             account.new_user_welcome_message = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Some(message) = update.start_welcome_admin {
+            let trimmed = message.trim();
+            account.start_welcome_admin = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Some(message) = update.start_welcome_user {
+            let trimmed = message.trim();
+            account.start_welcome_user = if trimmed.is_empty() {
                 None
             } else {
                 Some(trimmed.to_string())
@@ -4621,7 +4651,7 @@ fn print_telegram_accounts_and_channels(config: &Config) {
         let profile = account.bot_profile.as_deref().unwrap_or("(none)");
         println!("  {:2}. tag={} profile={}", index + 1, account_tag, profile);
         println!(
-            "      access_mode={} dm_policy={:?} group_mode={} notify_admin_on_new_user={} welcome_message={} register_file={}",
+            "      access_mode={} dm_policy={:?} group_mode={} notify_admin_on_new_user={} welcome_message={} start_welcome_admin={} start_welcome_user={} register_file={}",
             account
                 .access_mode
                 .map(|m| access_mode_label(m).to_string())
@@ -4630,6 +4660,16 @@ fn print_telegram_accounts_and_channels(config: &Config) {
             detect_legacy_group_mode(account).as_str(),
             account.notify_admin_on_new_user,
             if account.new_user_welcome_message.is_some() {
+                "set"
+            } else {
+                "(none)"
+            },
+            if account.start_welcome_admin.is_some() {
+                "set"
+            } else {
+                "(none)"
+            },
+            if account.start_welcome_user.is_some() {
                 "set"
             } else {
                 "(none)"
@@ -4868,11 +4908,28 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
     let notify_admin_on_new_user =
         prompt_confirm("Notify admins when a new user is auto-registered?", true)?;
     let new_user_welcome_default = existing
+        .as_ref()
         .and_then(|account| account.new_user_welcome_message.clone())
+        .unwrap_or_default();
+    let start_welcome_admin_default = existing
+        .as_ref()
+        .and_then(|account| account.start_welcome_admin.clone())
+        .unwrap_or_default();
+    let start_welcome_user_default = existing
+        .as_ref()
+        .and_then(|account| account.start_welcome_user.clone())
         .unwrap_or_default();
     let new_user_welcome_input = prompt_input(
         "Welcome message for newly registered users (optional)",
         &new_user_welcome_default,
+    )?;
+    let start_welcome_admin_input = prompt_input(
+        "/start welcome message for admins (optional)",
+        &start_welcome_admin_default,
+    )?;
+    let start_welcome_user_input = prompt_input(
+        "/start welcome message for users/readonly (optional)",
+        &start_welcome_user_default,
     )?;
     let register_to_file_input = prompt_input(
         "Register file path for /admin mutations",
@@ -4922,8 +4979,16 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
         } else {
             Some(new_user_welcome_input.trim().to_string())
         },
-        start_welcome_admin: None,
-        start_welcome_user: None,
+        start_welcome_admin: if start_welcome_admin_input.trim().is_empty() {
+            None
+        } else {
+            Some(start_welcome_admin_input.trim().to_string())
+        },
+        start_welcome_user: if start_welcome_user_input.trim().is_empty() {
+            None
+        } else {
+            Some(start_welcome_user_input.trim().to_string())
+        },
         register_to_file,
         user_tools_mode,
         user_allowed_tools,

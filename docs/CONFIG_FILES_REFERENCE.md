@@ -71,3 +71,31 @@ For each `[[telegram.accounts]]`:
 - `group_require_mention` and `group_allow_known_untagged` refine group handling.
 - `notify_admin_on_new_user` notifies admins on first auto-registration event.
 - `new_user_welcome_message` sends a one-time welcome text to newly registered users.
+- `start_welcome_admin` customizes `/start` response for admins.
+- `start_welcome_user` customizes `/start` response for users/readonly.
+
+CLI non-interactive update example:
+
+```bash
+masix config telegram \
+  --account <account_tag> \
+  --start-welcome-admin "Admin ready." \
+  --start-welcome-user "Welcome."
+```
+
+## 7) MasiX Assistant Modules (Optional)
+
+Recommended module wiring (via MCP servers + provider endpoint):
+- `markai-assistant-kb-bridge` as MCP server for scoped memory/task/customer tools.
+- `masix-assistant-orchestrator` as MCP server for playbook/state-machine actions.
+- `masix-assistant-endpoint` as OpenAI-compatible HTTP provider endpoint.
+- `masix-whatsapp-business` as channel adapter for WhatsApp Business Cloud.
+
+Suggested env keys:
+- `MASIX_ASSISTANT_KB_CORE_URL`
+- `MASIX_ASSISTANT_KB_CORE_SHARED_KEY`
+- `MASIX_ASSISTANT_KB_POLICY_DEFAULT`
+- `MASIX_ASSISTANT_KB_POLICY_MAP`
+- `MASIX_ASSISTANT_UPSTREAM_BASE_URL`
+- `MASIX_ASSISTANT_UPSTREAM_API_KEY`
+- `MASIX_ASSISTANT_ENDPOINT_TOKEN` or `MASIX_ASSISTANT_ENDPOINT_TOKENS`

@@ -5016,8 +5016,7 @@ impl MasixRuntime {
 
         if text.starts_with("/start") {
             info!("Processing start command");
-            let start_text =
-                Self::resolve_start_welcome_message(config, account_tag, permission);
+            let start_text = Self::resolve_start_welcome_message(config, account_tag, permission);
             Self::send_outbound_text(
                 outbound_sender,
                 &envelope.channel,
@@ -5098,9 +5097,7 @@ impl MasixRuntime {
         }
 
         let normalized_text = text.trim().to_ascii_lowercase();
-        if permission == PermissionLevel::Admin
-            && Self::is_admin_contacts_query(&normalized_text)
-        {
+        if permission == PermissionLevel::Admin && Self::is_admin_contacts_query(&normalized_text) {
             let response =
                 Self::render_admin_contacts_snapshot(config, account_tag, bot_context).await;
             Self::send_outbound_text(
@@ -6241,16 +6238,20 @@ impl MasixRuntime {
 
     async fn load_user_summary_snippet(user_dir: &Path) -> Option<String> {
         let mut entries = fs::read_dir(user_dir).await.ok()?;
-        let mut summary_path: Option<PathBuf> = None;
+        let mut summary_paths: Vec<PathBuf> = Vec::new();
         while let Some(entry) = entries.next_entry().await.ok()? {
             let path = entry.path();
             let name = path.file_name()?.to_string_lossy().to_string();
             if name.starts_with("summary_") && name.ends_with(".md") {
-                summary_path = Some(path);
-                break;
+                summary_paths.push(path);
             }
         }
-        let path = summary_path?;
+        if summary_paths.is_empty() {
+            return None;
+        }
+        // Deterministic selection: prefer lexicographically newest summary file.
+        summary_paths.sort();
+        let path = summary_paths.pop()?;
         let raw = fs::read_to_string(path).await.ok()?;
         let mut picked = None;
         for line in raw.lines().rev() {
@@ -7186,7 +7187,9 @@ impl MasixRuntime {
         let mut effective = account.clone();
         effective.admins.extend(dynamic_acl.admins.iter().copied());
         effective.users.extend(dynamic_acl.users.iter().copied());
-        effective.readonly.extend(dynamic_acl.readonly.iter().copied());
+        effective
+            .readonly
+            .extend(dynamic_acl.readonly.iter().copied());
         effective.admins.sort_unstable();
         effective.users.sort_unstable();
         effective.readonly.sort_unstable();
@@ -8980,13 +8983,19 @@ impl MasixRuntime {
         if text.is_empty() || text.starts_with('/') {
             return false;
         }
-        text.contains("ci sono stati contatti")
-            || text.contains("nuovi contatti")
-            || text.contains("contatti recenti")
-            || text.contains("parlami di questo cliente")
-            || text.contains("parlami del cliente")
-            || text.contains("stato cliente")
-            || text.contains("info cliente")
+        matches!(
+            text,
+            "contatti"
+                | "contatti recenti"
+                | "snapshot contatti"
+                | "contatti snapshot"
+                | "admin contacts"
+                | "recent contacts"
+                | "contacts snapshot"
+        ) || text.starts_with("mostra contatti")
+            || text.starts_with("show contacts")
+            || text.starts_with("contatti ")
+            || text.starts_with("contacts ")
     }
 
     fn filter_visible_tools_by_permission(
