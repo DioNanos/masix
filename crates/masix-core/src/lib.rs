@@ -5098,6 +5098,22 @@ impl MasixRuntime {
         }
 
         let normalized_text = text.trim().to_ascii_lowercase();
+        if permission == PermissionLevel::Admin
+            && Self::is_admin_contacts_query(&normalized_text)
+        {
+            let response =
+                Self::render_admin_contacts_snapshot(config, account_tag, bot_context).await;
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &response,
+                None,
+            );
+            return Ok(true);
+        }
+
         if text.starts_with("/capabilities") || Self::is_capabilities_query(&normalized_text) {
             let response = Self::render_runtime_capabilities(
                 config,
@@ -5742,6 +5758,7 @@ impl MasixRuntime {
             return "🛡️ Admin commands\n\
 /admin list\n\
 /admin users [chat_id]\n\
+/admin contacts\n\
 /admin add <user_id|@username>\n\
 /admin remove <user_id|@username>\n\
 /admin promote <user_id|@username>\n\
@@ -5925,6 +5942,9 @@ impl MasixRuntime {
                     None
                 };
                 Self::render_observed_users(config, account_tag, bot_context, chat_filter).await
+            }
+            "contacts" => {
+                Self::render_admin_contacts_snapshot(config, account_tag, bot_context).await
             }
             "groups" => {
                 if parts.len() > 2 && !parts[2].eq_ignore_ascii_case("refresh") {
@@ -6146,6 +6166,115 @@ impl MasixRuntime {
 
         out.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
         Ok(out)
+    }
+
+    async fn render_admin_contacts_snapshot(
+        config: &Config,
+        account_tag: Option<&str>,
+        bot_context: &BotContext,
+    ) -> String {
+        let users =
+            match Self::collect_observed_telegram_users(config, account_tag, bot_context, None)
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => return format!("Failed to load contact snapshot: {}", err),
+            };
+
+        if users.is_empty() {
+            return "Nessun contatto osservato al momento.".to_string();
+        }
+
+        let Some(account) = Self::get_telegram_account(config, account_tag) else {
+            return "No Telegram account context found.".to_string();
+        };
+        let dynamic_acl = Self::load_dynamic_acl_for_account(account);
+        let account_scope = Self::sanitize_scope_component(&Self::account_scope(account_tag));
+        let users_root = bot_context
+            .memory_dir
+            .join("accounts")
+            .join(account_scope)
+            .join("users");
+
+        let mut lines = vec!["Contatti recenti (snapshot):".to_string()];
+        let mut shown = 0usize;
+
+        for user in users {
+            let role = Self::telegram_user_permission(account, &dynamic_acl, user.user_id);
+            if role == PermissionLevel::Admin {
+                continue;
+            }
+
+            shown += 1;
+            let username = user
+                .usernames
+                .first()
+                .map(|v| format!("@{}", v))
+                .unwrap_or_else(|| "-".to_string());
+            let display = user
+                .display_names
+                .first()
+                .cloned()
+                .or_else(|| user.first_names.first().cloned())
+                .unwrap_or_else(|| "-".to_string());
+
+            lines.push(format!(
+                "- user_id={} | {} | nome={} | last_seen={}",
+                user.user_id, username, display, user.last_seen
+            ));
+
+            let user_dir = users_root.join(user.user_id.to_string());
+            if let Some(snippet) = Self::load_user_summary_snippet(&user_dir).await {
+                lines.push(format!("  ultimo_stato: {}", snippet));
+            }
+
+            if shown >= 10 {
+                break;
+            }
+        }
+
+        if shown == 0 {
+            return "Nessun contatto utente disponibile (solo admin presenti).".to_string();
+        }
+        lines.join("\n")
+    }
+
+    async fn load_user_summary_snippet(user_dir: &Path) -> Option<String> {
+        let mut entries = fs::read_dir(user_dir).await.ok()?;
+        let mut summary_path: Option<PathBuf> = None;
+        while let Some(entry) = entries.next_entry().await.ok()? {
+            let path = entry.path();
+            let name = path.file_name()?.to_string_lossy().to_string();
+            if name.starts_with("summary_") && name.ends_with(".md") {
+                summary_path = Some(path);
+                break;
+            }
+        }
+        let path = summary_path?;
+        let raw = fs::read_to_string(path).await.ok()?;
+        let mut picked = None;
+        for line in raw.lines().rev() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("- assistant:") || trimmed.starts_with("- user:") {
+                picked = Some(trimmed.trim_start_matches("- ").to_string());
+                break;
+            }
+        }
+        let line = picked?;
+        let max = 220usize;
+        if line.chars().count() <= max {
+            Some(line)
+        } else {
+            let mut out = String::new();
+            for ch in line.chars().take(max) {
+                out.push(ch);
+            }
+            out.push_str("...");
+            Some(out)
+        }
     }
 
     async fn resolve_admin_target_user_id(
@@ -8844,6 +8973,20 @@ impl MasixRuntime {
                 | "quali strumenti hai"
                 | "capabilities"
         )
+    }
+
+    fn is_admin_contacts_query(normalized_text: &str) -> bool {
+        let text = normalized_text.trim();
+        if text.is_empty() || text.starts_with('/') {
+            return false;
+        }
+        text.contains("ci sono stati contatti")
+            || text.contains("nuovi contatti")
+            || text.contains("contatti recenti")
+            || text.contains("parlami di questo cliente")
+            || text.contains("parlami del cliente")
+            || text.contains("stato cliente")
+            || text.contains("info cliente")
     }
 
     fn filter_visible_tools_by_permission(
