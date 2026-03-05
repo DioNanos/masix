@@ -25,7 +25,7 @@ include_tool_names = true
 
 [core.streaming]
 enabled = true
-mode = "telegram_draft" # off | telegram_draft | telegram_chunked (legacy: telegram_edit)
+mode = "telegram_chunked" # off | telegram_edit | telegram_chunked
 flush_interval_ms = 900
 max_message_edits = 20
 finalize_timeout_secs = 10
@@ -57,8 +57,12 @@ readonly = []
 isolated = true
 shared_memory_with = []
 allow_self_memory_edit = true
-group_mode = "tag_only" # all | users_only | tag_only | users_or_tag | listen_only
-auto_register_users = true
+dm_policy = "pairing" # pairing | allowlist | open | disabled
+access_mode = "group_tag_response" # admin_only_registered | assistant_autoregister | group_tag_response | group_profiler | group_all_response
+group_policy = "allowlist" # allowlist | open | disabled
+group_require_mention = true
+group_allow_known_untagged = false
+notify_admin_on_new_user = true
 user_tools_mode = "selected" # none | selected
 user_allowed_tools = [
   "read_file",

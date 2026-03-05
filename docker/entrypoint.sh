@@ -115,15 +115,18 @@ build_config() {
   MASIX_BOT_NAME="${MASIX_BOT_NAME:-}"
   MASIX_LOG_LEVEL="${MASIX_LOG_LEVEL:-info}"
   MASIX_POLL_TIMEOUT_SECS="${MASIX_POLL_TIMEOUT_SECS:-60}"
-  MASIX_AUTO_REGISTER_USERS="${MASIX_AUTO_REGISTER_USERS:-true}"
+  MASIX_DM_POLICY="${MASIX_DM_POLICY:-pairing}"
+  MASIX_ACCESS_MODE="${MASIX_ACCESS_MODE:-assistant_autoregister}"
+  MASIX_GROUP_POLICY="${MASIX_GROUP_POLICY:-allowlist}"
+  MASIX_GROUP_REQUIRE_MENTION="${MASIX_GROUP_REQUIRE_MENTION:-true}"
+  MASIX_GROUP_ALLOW_KNOWN_UNTAGGED="${MASIX_GROUP_ALLOW_KNOWN_UNTAGGED:-false}"
   MASIX_NOTIFY_ADMIN_ON_NEW_USER="${MASIX_NOTIFY_ADMIN_ON_NEW_USER:-true}"
-  MASIX_GROUP_MODE="${MASIX_GROUP_MODE:-all}"
   MASIX_USER_TOOLS_MODE="${MASIX_USER_TOOLS_MODE:-none}"
   MASIX_USER_ALLOWED_TOOLS="${MASIX_USER_ALLOWED_TOOLS:-}"
   MASIX_REGISTER_TO_FILE="${MASIX_REGISTER_TO_FILE:-/data/register/telegram_users.json}"
   MASIX_NEW_USER_WELCOME_MESSAGE="${MASIX_NEW_USER_WELCOME_MESSAGE:-}"
   MASIX_ENABLE_STREAMING="${MASIX_ENABLE_STREAMING:-true}"
-  MASIX_STREAMING_MODE="${MASIX_STREAMING_MODE:-telegram_draft}"
+  MASIX_STREAMING_MODE="${MASIX_STREAMING_MODE:-telegram_chunked}"
 
   admins_toml="$(csv_ids_to_toml_array "$MASIX_ADMIN_IDS")"
 
@@ -165,8 +168,11 @@ users = []
 readonly = []
 isolated = true
 allow_self_memory_edit = true
-group_mode = "$MASIX_GROUP_MODE"
-auto_register_users = $MASIX_AUTO_REGISTER_USERS
+dm_policy = "$MASIX_DM_POLICY"
+access_mode = "$MASIX_ACCESS_MODE"
+group_policy = "$MASIX_GROUP_POLICY"
+group_require_mention = $MASIX_GROUP_REQUIRE_MENTION
+group_allow_known_untagged = $MASIX_GROUP_ALLOW_KNOWN_UNTAGGED
 notify_admin_on_new_user = $MASIX_NOTIFY_ADMIN_ON_NEW_USER
 register_to_file = "$(toml_escape "$MASIX_REGISTER_TO_FILE")"
 user_tools_mode = "$MASIX_USER_TOOLS_MODE"
@@ -243,4 +249,3 @@ main() {
 }
 
 main "$@"
-

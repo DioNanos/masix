@@ -22,6 +22,7 @@ pub struct CronParser {
     // Regex patterns
     domani_re: Regex,
     tra_re: Regex,
+    every_day_re: Regex,
     ogni_re: Regex,
     alle_re: Regex,
     il_re: Regex,
@@ -32,7 +33,12 @@ impl CronParser {
         Self {
             domani_re: Regex::new(r"(?i)domani").unwrap(),
             tra_re: Regex::new(r"(?i)tra\s+(\d+)\s*(ore|minuti|giorni)").unwrap(),
-            ogni_re: Regex::new(r"(?i)ogni\s+(\w+)\s+alle\s+(\d+)").unwrap(),
+            every_day_re: Regex::new(
+                r"(?i)(ogni\s+giorno|tutti\s+i\s+giorni|giornalmente|daily|every\s+day)\s+alle\s+(\d+)(?::(\d+))?",
+            )
+            .unwrap(),
+            ogni_re: Regex::new(r"(?i)ogni\s+([[:alpha:]àèéìòù]+)\s+alle\s+(\d+)(?::(\d+))?")
+                .unwrap(),
             alle_re: Regex::new(r"(?i)alle\s+(\d+)").unwrap(),
             il_re: Regex::new(r"(?i)il\s+(\d+)\s+(\w+)").unwrap(),
         }
@@ -75,12 +81,24 @@ impl CronParser {
 
             let target = Local::now() + duration;
             (target.to_rfc3339(), false)
+        } else if let Some(caps) = self.every_day_re.captures(&input_lower) {
+            // "ogni giorno alle 9" / "tutti i giorni alle 9"
+            let hour: u32 = caps.get(2).unwrap().as_str().parse()?;
+            let minute: u32 = caps
+                .get(3)
+                .and_then(|m| m.as_str().parse::<u32>().ok())
+                .unwrap_or(0);
+            (format!("{} {} * * *", minute, hour), true)
         } else if let Some(caps) = self.ogni_re.captures(&input_lower) {
             // "ogni lunedì alle 9"
             let day = caps.get(1).unwrap().as_str();
             let hour: u32 = caps.get(2).unwrap().as_str().parse()?;
+            let minute: u32 = caps
+                .get(3)
+                .and_then(|m| m.as_str().parse::<u32>().ok())
+                .unwrap_or(0);
 
-            let cron_expr = self.day_to_cron(day, hour);
+            let cron_expr = self.day_to_cron(day, hour, minute);
             (cron_expr, true)
         } else if let Some(caps) = self.il_re.captures(&input_lower) {
             // "il 1 marzo alle 15"
@@ -137,7 +155,7 @@ impl CronParser {
         }
     }
 
-    fn day_to_cron(&self, day: &str, hour: u32) -> String {
+    fn day_to_cron(&self, day: &str, hour: u32, minute: u32) -> String {
         let dow = match day.to_lowercase().as_str() {
             "lunedì" | "lunedi" => "1",
             "martedì" | "martedi" => "2",
@@ -149,7 +167,7 @@ impl CronParser {
             _ => "1",
         };
 
-        format!("0 {} * * {}", hour, dow)
+        format!("{} {} * * {}", minute, hour, dow)
     }
 
     fn month_str_to_num(&self, month: &str) -> Option<u32> {
@@ -259,7 +277,6 @@ impl CronExecutor {
                                 text: message,
                                 reply_to: None,
                                 edit_message_id: None,
-                                draft_id: None,
                                 inline_keyboard: None,
                                 chat_action: None,
                             };
@@ -330,6 +347,16 @@ mod tests {
             .expect("expected valid schedule");
         assert!(!result.recurring);
         assert_eq!(result.channel, "telegram");
+    }
+
+    #[test]
+    fn parse_ogni_giorno_creates_daily_recurring_schedule() {
+        let parser = CronParser::new();
+        let result = parser
+            .parse(r#"ogni giorno alle 8 "News""#, "telegram", "12345")
+            .expect("expected valid schedule");
+        assert!(result.recurring);
+        assert_eq!(result.schedule, "0 8 * * *");
     }
 
     #[tokio::test]

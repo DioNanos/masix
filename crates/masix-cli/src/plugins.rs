@@ -1425,6 +1425,7 @@ async fn register_device_key(
 }
 
 /// Returns the set of plugin IDs that are marked as admin-only in the installed registry.
+#[allow(dead_code)] // Retained for internal automation helpers and diagnostics wiring.
 pub fn get_admin_only_plugins(config_path: Option<&str>) -> Result<HashSet<String>> {
     let data_dir = resolve_data_dir(config_path);
     let plugins_dir = plugin_root_dir(&data_dir);
@@ -1483,6 +1484,7 @@ struct RegisterStartRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // Deserialized from API response; some fields are informational for future UX steps.
 struct RegisterStartResponse {
     request_id: String,
     nonce: String,
@@ -1491,6 +1493,7 @@ struct RegisterStartResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // Deserialized from API response; not all fields are currently surfaced in CLI output.
 struct RegisterStatusResponse {
     request_id: String,
     state: String,
@@ -1576,36 +1579,40 @@ async fn check_registration_status(
         .with_context(|| format!("Invalid registration status JSON from {}", url))
 }
 
+#[cfg(target_os = "linux")]
 fn open_url(url: &str) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .spawn()
-            .context("Failed to open URL with xdg-open")?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()
-            .context("Failed to open URL with open")?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", url])
-            .spawn()
-            .context("Failed to open URL with start")?;
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        anyhow::bail!("URL opening not supported on this platform");
-    }
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .context("Failed to open URL with xdg-open")?;
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn open_url(url: &str) -> Result<()> {
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .context("Failed to open URL with open")?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_url(url: &str) -> Result<()> {
+    std::process::Command::new("cmd")
+        .args(["/C", "start", url])
+        .spawn()
+        .context("Failed to open URL with start")?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn open_url(_url: &str) -> Result<()> {
+    anyhow::bail!("URL opening not supported on this platform")
+}
+
 /// Get the global key if available (for auto-auth in install/update)
+#[allow(dead_code)] // Kept as library helper for future auto-auth flows.
 pub fn get_global_key(config_path: Option<&str>) -> Result<Option<String>> {
     let data_dir = resolve_data_dir(config_path);
     let plugins_dir = plugin_root_dir(&data_dir);

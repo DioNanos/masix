@@ -8,8 +8,8 @@ use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::time::Instant;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex};
@@ -110,7 +110,12 @@ impl McpServer {
         };
 
         // Initialize MCP connection
-        match timeout(Duration::from_secs(startup_timeout_secs), server.initialize()).await {
+        match timeout(
+            Duration::from_secs(startup_timeout_secs),
+            server.initialize(),
+        )
+        .await
+        {
             Ok(result) => result?,
             Err(_) => {
                 return Err(anyhow!(
@@ -276,7 +281,7 @@ impl McpServer {
                     "MCP response channel closed (server='{}', id={})",
                     self.name,
                     id
-                ))
+                ));
             }
             Err(_) => {
                 self.pending.lock().await.remove(&id);
@@ -303,7 +308,9 @@ impl McpServer {
         let mut circuit = self.circuit.lock().await;
         if let Some(open_until) = circuit.open_until {
             if Instant::now() < open_until {
-                let remaining = open_until.saturating_duration_since(Instant::now()).as_secs();
+                let remaining = open_until
+                    .saturating_duration_since(Instant::now())
+                    .as_secs();
                 return Err(anyhow!(
                     "MCP circuit open for '{}' (cooldown {}s)",
                     self.name,
@@ -483,15 +490,8 @@ impl McpClient {
         startup_timeout_secs: u64,
         healthcheck_interval_secs: u64,
     ) -> Result<()> {
-        let server = McpServer::start(
-            name,
-            command,
-            args,
-            env,
-            timeout_secs,
-            startup_timeout_secs,
-        )
-        .await?;
+        let server =
+            McpServer::start(name, command, args, env, timeout_secs, startup_timeout_secs).await?;
         let server = Arc::new(server);
         self.servers.push(Arc::clone(&server));
 

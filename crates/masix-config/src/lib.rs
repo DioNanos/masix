@@ -13,7 +13,6 @@ pub struct Config {
     #[serde(default)]
     pub updates: UpdatesConfig,
     pub telegram: Option<TelegramConfig>,
-    pub whatsapp: Option<WhatsappConfig>,
     pub sms: Option<SmsConfig>,
     pub stt: Option<SttConfig>,
     pub mcp: Option<McpConfig>,
@@ -196,13 +195,31 @@ impl Default for UpdatesConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum GroupMode {
+pub enum DmPolicy {
     #[default]
-    All, // Tutti possono interagire
-    UsersOnly,  // Solo utenti nella lista
-    TagOnly,    // Solo quando il bot è taggato
-    UsersOrTag, // Utenti nella lista OPPURE quando taggato
-    ListenOnly, // Solo ascolto, risponde solo se taggato da admin
+    Pairing,
+    Allowlist,
+    Open,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupPolicy {
+    #[default]
+    Allowlist,
+    Open,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessMode {
+    AdminOnlyRegistered,
+    AssistantAutoregister,
+    GroupTagResponse,
+    GroupProfiler,
+    GroupAllResponse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -211,6 +228,49 @@ pub enum UserToolsMode {
     #[default]
     None,
     Selected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramPairingConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_pairing_pending_ttl_secs")]
+    pub pending_ttl_secs: u64,
+    #[serde(default = "default_pairing_pending_max")]
+    pub pending_max: usize,
+}
+
+impl Default for TelegramPairingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            pending_ttl_secs: default_pairing_pending_ttl_secs(),
+            pending_max: default_pairing_pending_max(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramGroupAccess {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub require_mention: bool,
+    #[serde(default)]
+    pub group_policy: Option<GroupPolicy>,
+    #[serde(default)]
+    pub allow_from: Vec<i64>,
+}
+
+impl Default for TelegramGroupAccess {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            require_mention: true,
+            group_policy: None,
+            allow_from: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -243,71 +303,33 @@ pub struct TelegramAccount {
     #[serde(default = "default_true")]
     pub allow_self_memory_edit: bool,
     #[serde(default)]
-    pub group_mode: GroupMode,
+    pub dm_policy: DmPolicy,
     #[serde(default)]
-    pub auto_register_users: bool,
+    pub dm_allow_from: Vec<i64>,
+    #[serde(default)]
+    pub access_mode: Option<AccessMode>,
+    #[serde(default)]
+    pub group_policy: GroupPolicy,
+    #[serde(default = "default_true")]
+    pub group_require_mention: bool,
+    #[serde(default)]
+    pub group_allow_known_untagged: bool,
+    #[serde(default)]
+    pub group_allow_from: Vec<i64>,
+    #[serde(default)]
+    pub groups: std::collections::BTreeMap<String, TelegramGroupAccess>,
+    #[serde(default)]
+    pub pairing: TelegramPairingConfig,
+    #[serde(default)]
+    pub register_to_file: Option<String>,
     #[serde(default = "default_true")]
     pub notify_admin_on_new_user: bool,
     #[serde(default)]
     pub new_user_welcome_message: Option<String>,
     #[serde(default)]
-    pub register_to_file: Option<String>,
-    #[serde(default)]
     pub user_tools_mode: UserToolsMode,
     #[serde(default)]
     pub user_allowed_tools: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WhatsappConfig {
-    pub enabled: bool,
-    #[serde(default = "default_true")]
-    pub read_only: bool,
-    pub transport_path: Option<String>,
-    pub ingress_shared_secret: Option<String>,
-    pub max_message_chars: Option<usize>,
-    #[serde(default)]
-    pub allowed_senders: Vec<String>,
-    #[serde(default)]
-    pub admins: Vec<String>,
-    #[serde(default)]
-    pub users: Vec<String>,
-    pub forward_to_telegram_chat_id: Option<i64>,
-    pub forward_to_telegram_account_tag: Option<String>,
-    pub forward_prefix: Option<String>,
-    #[serde(default)]
-    pub accounts: Vec<WhatsappAccount>,
-}
-
-impl WhatsappConfig {
-    pub fn get_permission_level(&self, sender: &str) -> PermissionLevel {
-        if self.admins.iter().any(|a| a == sender) {
-            PermissionLevel::Admin
-        } else if self.users.iter().any(|u| u == sender)
-            || self.allowed_senders.iter().any(|s| s == sender)
-        {
-            PermissionLevel::User
-        } else {
-            PermissionLevel::None
-        }
-    }
-
-    pub fn is_authorized(&self, sender: &str) -> bool {
-        self.get_permission_level(sender) != PermissionLevel::None
-    }
-
-    pub fn is_admin(&self, sender: &str) -> bool {
-        self.get_permission_level(sender) == PermissionLevel::Admin
-    }
-
-    pub fn can_use_tools(&self, sender: &str) -> bool {
-        self.is_admin(sender)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WhatsappAccount {
-    pub session_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -510,6 +532,83 @@ pub enum PermissionLevel {
 }
 
 impl TelegramAccount {
+    fn permission_for_mode(
+        &self,
+        mode: AccessMode,
+        user_id: i64,
+        chat_id: i64,
+        is_bot_tagged: bool,
+    ) -> PermissionLevel {
+        let user_perm = self.get_permission_level(user_id);
+        let is_private = user_id == chat_id;
+        let is_allowlisted = self.dm_allow_from.contains(&user_id);
+
+        if is_private {
+            return match mode {
+                AccessMode::AssistantAutoregister => user_perm,
+                _ => {
+                    if user_perm != PermissionLevel::None {
+                        user_perm
+                    } else if is_allowlisted {
+                        PermissionLevel::User
+                    } else {
+                        PermissionLevel::None
+                    }
+                }
+            };
+        }
+
+        match mode {
+            AccessMode::AdminOnlyRegistered => {
+                if user_perm != PermissionLevel::None || self.group_allow_from.contains(&user_id) {
+                    if user_perm == PermissionLevel::None {
+                        PermissionLevel::User
+                    } else {
+                        user_perm
+                    }
+                } else {
+                    PermissionLevel::None
+                }
+            }
+            AccessMode::AssistantAutoregister => {
+                if user_perm != PermissionLevel::None {
+                    user_perm
+                } else if is_bot_tagged {
+                    PermissionLevel::User
+                } else {
+                    PermissionLevel::None
+                }
+            }
+            AccessMode::GroupTagResponse => {
+                if is_bot_tagged {
+                    if user_perm == PermissionLevel::None {
+                        PermissionLevel::User
+                    } else {
+                        user_perm
+                    }
+                } else {
+                    PermissionLevel::None
+                }
+            }
+            AccessMode::GroupProfiler => {
+                if is_bot_tagged && user_perm == PermissionLevel::Admin {
+                    PermissionLevel::Admin
+                } else {
+                    PermissionLevel::None
+                }
+            }
+            AccessMode::GroupAllResponse => {
+                if user_perm == PermissionLevel::Admin {
+                    PermissionLevel::Admin
+                } else if user_perm == PermissionLevel::Readonly {
+                    PermissionLevel::Readonly
+                } else {
+                    PermissionLevel::User
+                }
+            }
+        }
+    }
+
     pub fn get_permission_level(&self, user_id: i64) -> PermissionLevel {
         if self.admins.contains(&user_id) {
             PermissionLevel::Admin
@@ -534,55 +633,91 @@ impl TelegramAccount {
         chat_id: i64,
         is_bot_tagged: bool,
     ) -> PermissionLevel {
+        if let Some(mode) = self.access_mode {
+            return self.permission_for_mode(mode, user_id, chat_id, is_bot_tagged);
+        }
+
         let is_private = user_id == chat_id;
 
         if is_private {
-            return self.get_permission_level(user_id);
+            let base = self.get_permission_level(user_id);
+            let is_allowed = base != PermissionLevel::None || self.dm_allow_from.contains(&user_id);
+            return match self.dm_policy {
+                DmPolicy::Disabled => PermissionLevel::None,
+                DmPolicy::Open => {
+                    if base == PermissionLevel::None {
+                        PermissionLevel::User
+                    } else {
+                        base
+                    }
+                }
+                DmPolicy::Allowlist | DmPolicy::Pairing => {
+                    if is_allowed {
+                        if base == PermissionLevel::None {
+                            PermissionLevel::User
+                        } else {
+                            base
+                        }
+                    } else {
+                        PermissionLevel::None
+                    }
+                }
+            };
         }
 
-        // Gruppo: applica GroupMode
-        let user_perm = self.get_permission_level(user_id);
+        let group_key = chat_id.to_string();
+        let group_cfg = self.groups.get(&group_key);
+        if matches!(group_cfg, Some(cfg) if !cfg.enabled) {
+            return PermissionLevel::None;
+        }
 
-        match self.group_mode {
-            GroupMode::All => {
+        let effective_group_policy = group_cfg
+            .and_then(|cfg| cfg.group_policy)
+            .unwrap_or(self.group_policy);
+        let require_mention = group_cfg
+            .map(|cfg| cfg.require_mention)
+            .unwrap_or(self.group_require_mention);
+        let sender_allow = if let Some(cfg) = group_cfg {
+            if cfg.allow_from.is_empty() {
+                if self.group_allow_from.is_empty() {
+                    &self.dm_allow_from
+                } else {
+                    &self.group_allow_from
+                }
+            } else {
+                &cfg.allow_from
+            }
+        } else if self.group_allow_from.is_empty() {
+            &self.dm_allow_from
+        } else {
+            &self.group_allow_from
+        };
+
+        let user_perm = self.get_permission_level(user_id);
+        if require_mention && !is_bot_tagged && user_perm != PermissionLevel::Admin {
+            if !(self.group_allow_known_untagged && user_perm != PermissionLevel::None) {
+                return PermissionLevel::None;
+            }
+        }
+
+        match effective_group_policy {
+            GroupPolicy::Open => {
                 if user_perm == PermissionLevel::Admin {
                     PermissionLevel::Admin
+                } else if user_perm == PermissionLevel::Readonly {
+                    PermissionLevel::Readonly
                 } else {
                     PermissionLevel::User
                 }
             }
-            GroupMode::UsersOnly => {
-                if user_perm == PermissionLevel::None {
-                    PermissionLevel::None
-                } else {
-                    user_perm
-                }
-            }
-            GroupMode::TagOnly => {
-                if is_bot_tagged {
-                    if user_perm == PermissionLevel::Admin {
-                        PermissionLevel::Admin
-                    } else {
+            GroupPolicy::Disabled => PermissionLevel::None,
+            GroupPolicy::Allowlist => {
+                if user_perm != PermissionLevel::None || sender_allow.contains(&user_id) {
+                    if user_perm == PermissionLevel::None {
                         PermissionLevel::User
+                    } else {
+                        user_perm
                     }
-                } else {
-                    PermissionLevel::None
-                }
-            }
-            GroupMode::UsersOrTag => {
-                if user_perm != PermissionLevel::None {
-                    user_perm
-                } else if is_bot_tagged {
-                    PermissionLevel::User
-                } else {
-                    PermissionLevel::None
-                }
-            }
-            GroupMode::ListenOnly => {
-                if user_perm == PermissionLevel::Admin && is_bot_tagged {
-                    PermissionLevel::Admin
-                } else if is_bot_tagged {
-                    PermissionLevel::User
                 } else {
                     PermissionLevel::None
                 }
@@ -621,8 +756,11 @@ impl TelegramAccount {
         self.bot_username().unwrap_or_else(|| "unknown".to_string())
     }
 
-    pub fn should_auto_register(&self) -> bool {
-        self.auto_register_users && self.group_mode == GroupMode::All
+    pub fn uses_dm_pairing(&self) -> bool {
+        if matches!(self.access_mode, Some(AccessMode::AssistantAutoregister)) {
+            return self.pairing.enabled;
+        }
+        self.pairing.enabled && self.dm_policy == DmPolicy::Pairing
     }
 }
 
@@ -653,6 +791,14 @@ fn default_mcp_startup_timeout() -> u64 {
 
 fn default_mcp_healthcheck_interval() -> u64 {
     60
+}
+
+fn default_pairing_pending_ttl_secs() -> u64 {
+    3600
+}
+
+fn default_pairing_pending_max() -> usize {
+    3
 }
 
 fn default_agent_loop_auto_continue_max() -> u8 {
@@ -694,6 +840,31 @@ fn default_cron_delivery_retry_backoff_secs() -> u64 {
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())?;
+        let value: toml::Value = toml::from_str(&content)?;
+        if value
+            .as_table()
+            .map(|table| table.contains_key("whatsapp"))
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "The [whatsapp] section is deprecated in masix-core. Use the separate module 'masix-whatsapp-business'."
+            );
+        }
+        if let Some(telegram) = value.get("telegram").and_then(|v| v.as_table()) {
+            if let Some(accounts) = telegram.get("accounts").and_then(|v| v.as_array()) {
+                for (index, account) in accounts.iter().enumerate() {
+                    let Some(tbl) = account.as_table() else {
+                        continue;
+                    };
+                    if tbl.contains_key("group_mode") || tbl.contains_key("auto_register_users") {
+                        anyhow::bail!(
+                            "telegram.accounts[{}] uses legacy keys (group_mode/auto_register_users). Please migrate to dm_policy/group_policy/group_require_mention/group_allow_known_untagged.",
+                            index
+                        );
+                    }
+                }
+            }
+        }
         let config: Config = toml::from_str(&content)?;
         config.validate()?;
         Ok(config)
@@ -986,10 +1157,7 @@ impl Config {
         if let Some(mcp) = &self.mcp {
             for server in &mcp.servers {
                 if server.timeout_secs == 0 {
-                    anyhow::bail!(
-                        "mcp.servers['{}'].timeout_secs must be > 0",
-                        server.name
-                    );
+                    anyhow::bail!("mcp.servers['{}'].timeout_secs must be > 0", server.name);
                 }
                 if server.startup_timeout_secs == 0 {
                     anyhow::bail!(
@@ -1008,36 +1176,6 @@ impl Config {
 
         if self.updates.channel.trim().is_empty() {
             anyhow::bail!("updates.channel cannot be empty");
-        }
-
-        if let Some(whatsapp) = &self.whatsapp {
-            if whatsapp.enabled {
-                if !whatsapp.read_only {
-                    anyhow::bail!("whatsapp.read_only=false is not supported");
-                }
-                if let Some(max_chars) = whatsapp.max_message_chars {
-                    if max_chars == 0 || max_chars > 20000 {
-                        anyhow::bail!("whatsapp.max_message_chars must be in range 1..=20000");
-                    }
-                }
-                for sender in &whatsapp.allowed_senders {
-                    if sender.trim().is_empty() {
-                        anyhow::bail!("whatsapp.allowed_senders contains an empty entry");
-                    }
-                }
-                if whatsapp.forward_to_telegram_chat_id.is_some() {
-                    let has_telegram = self
-                        .telegram
-                        .as_ref()
-                        .map(|tg| !tg.accounts.is_empty())
-                        .unwrap_or(false);
-                    if !has_telegram {
-                        anyhow::bail!(
-                            "whatsapp.forward_to_telegram_chat_id requires at least one telegram account"
-                        );
-                    }
-                }
-            }
         }
 
         if let Some(sms) = &self.sms {
@@ -1096,11 +1234,22 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{AccessMode, Config, DmPolicy, GroupPolicy, PermissionLevel, TelegramAccount};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn parse_config(input: &str) -> Config {
         let cfg: Config = toml::from_str(input).expect("valid TOML");
         cfg
+    }
+
+    fn write_temp_config(input: &str) -> std::path::PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("masix-config-test-{}.toml", ts));
+        std::fs::write(&path, input).expect("write temp config");
+        path
     }
 
     #[test]
@@ -1121,6 +1270,60 @@ api_key = "k"
     }
 
     #[test]
+    fn load_rejects_legacy_group_mode_key() {
+        let path = write_temp_config(
+            r#"
+[core]
+
+[telegram]
+[[telegram.accounts]]
+bot_token = "123:abc"
+group_mode = "all"
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+"#,
+        );
+        let err = Config::load(&path).expect_err("legacy key must be rejected");
+        assert!(
+            err.to_string().contains("legacy keys"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_rejects_legacy_auto_register_key() {
+        let path = write_temp_config(
+            r#"
+[core]
+
+[telegram]
+[[telegram.accounts]]
+bot_token = "123:abc"
+auto_register_users = true
+
+[providers]
+default_provider = "openai"
+
+[[providers.providers]]
+name = "openai"
+api_key = "k"
+"#,
+        );
+        let err = Config::load(&path).expect_err("legacy key must be rejected");
+        assert!(
+            err.to_string().contains("legacy keys"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn validate_rejects_unknown_default_provider() {
         let cfg = parse_config(
             r#"
@@ -1135,6 +1338,68 @@ api_key = "k"
 "#,
         );
         assert!(cfg.validate().is_err());
+    }
+
+    fn make_policy_account() -> TelegramAccount {
+        TelegramAccount {
+            bot_token: "123:abc".to_string(),
+            bot_name: None,
+            bot_profile: None,
+            allowed_chats: None,
+            admins: vec![1],
+            users: vec![2],
+            readonly: vec![3],
+            isolated: true,
+            shared_memory_with: Vec::new(),
+            allow_self_memory_edit: true,
+            dm_policy: DmPolicy::Allowlist,
+            dm_allow_from: vec![],
+            access_mode: None,
+            group_policy: GroupPolicy::Allowlist,
+            group_require_mention: true,
+            group_allow_known_untagged: false,
+            group_allow_from: vec![],
+            groups: std::collections::BTreeMap::new(),
+            pairing: Default::default(),
+            register_to_file: None,
+            notify_admin_on_new_user: true,
+            new_user_welcome_message: None,
+            user_tools_mode: Default::default(),
+            user_allowed_tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn access_mode_admin_only_registered_denies_unknown_group_user() {
+        let mut account = make_policy_account();
+        account.access_mode = Some(AccessMode::AdminOnlyRegistered);
+        assert_eq!(
+            account.get_permission_for_group(999, -100, true),
+            PermissionLevel::None
+        );
+        assert_eq!(
+            account.get_permission_for_group(2, -100, false),
+            PermissionLevel::User
+        );
+    }
+
+    #[test]
+    fn access_mode_group_all_response_allows_unknown_group_user() {
+        let mut account = make_policy_account();
+        account.access_mode = Some(AccessMode::GroupAllResponse);
+        assert_eq!(
+            account.get_permission_for_group(999, -100, false),
+            PermissionLevel::User
+        );
+    }
+
+    #[test]
+    fn uses_dm_pairing_is_true_for_assistant_mode() {
+        let mut account = make_policy_account();
+        account.pairing.enabled = true;
+        account.access_mode = Some(AccessMode::AssistantAutoregister);
+        account.dm_policy = DmPolicy::Allowlist;
+        assert!(account.uses_dm_pairing());
     }
 
     #[test]
@@ -1265,8 +1530,16 @@ vision_provider = "missing"
     }
 
     #[test]
-    fn validate_rejects_whatsapp_non_read_only_mode() {
-        let cfg = parse_config(
+    fn load_rejects_deprecated_whatsapp_section() {
+        let path = std::env::temp_dir().join(format!(
+            "masix-config-whatsapp-deprecated-{}.toml",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
             r#"
 [core]
 
@@ -1279,36 +1552,13 @@ api_key = "k"
 
 [whatsapp]
 enabled = true
-read_only = false
 "#,
-        );
-        assert!(cfg.validate().is_err());
-    }
+        )
+        .expect("write temp config");
 
-    #[test]
-    fn validate_accepts_whatsapp_read_only_with_telegram_forward() {
-        let cfg = parse_config(
-            r#"
-[core]
-
-[telegram]
-[[telegram.accounts]]
-bot_token = "123:abc"
-
-[providers]
-default_provider = "openai"
-
-[[providers.providers]]
-name = "openai"
-api_key = "k"
-
-[whatsapp]
-enabled = true
-read_only = true
-forward_to_telegram_chat_id = 111111111
-"#,
-        );
-        assert!(cfg.validate().is_ok());
+        let result = Config::load(&path);
+        std::fs::remove_file(path).ok();
+        assert!(result.is_err());
     }
 
     #[test]

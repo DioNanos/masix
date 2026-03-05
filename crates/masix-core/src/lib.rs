@@ -10,8 +10,9 @@ use builtin_tools::{execute_builtin_tool, get_builtin_tool_definitions, is_built
 #[cfg(feature = "stt")]
 use masix_config::SttConfig;
 use masix_config::{
-    AgentLoopContinuationDetection, Config, CoreCronConfig, CoreToolProgressConfig, GroupMode,
-    PermissionLevel, RetryPolicyConfig, StreamingMode, ToolProgressMode, UserToolsMode,
+    AccessMode, AgentLoopContinuationDetection, Config, CoreCronConfig, CoreToolProgressConfig,
+    GroupPolicy, PermissionLevel, RetryPolicyConfig, StreamingMode, ToolProgressMode,
+    UserToolsMode,
 };
 use masix_exec::{
     is_termux_environment, manage_termux_boot, manage_termux_wake_lock, run_command, BootAction,
@@ -252,11 +253,11 @@ impl RuntimeToolAccess {
 mod tests {
     use super::{is_admin_only_tool, load_admin_only_modules, MasixRuntime};
     use masix_config::{
-        AgentLoopContinuationDetection, Config, CoreToolProgressConfig, GroupMode, TelegramAccount,
-        TelegramConfig, ToolProgressMode,
+        AccessMode, AgentLoopContinuationDetection, Config, CoreToolProgressConfig, DmPolicy,
+        GroupPolicy, PermissionLevel, TelegramAccount, TelegramConfig, ToolProgressMode,
     };
     use masix_ipc::{Envelope, MessageKind};
-    use masix_providers::ChatMessage;
+    use masix_providers::{ChatMessage, FunctionDefinition, ToolDefinition};
     use masix_storage::Storage;
     use std::collections::HashSet;
     use std::sync::Arc;
@@ -275,8 +276,15 @@ mod tests {
             isolated: true,
             shared_memory_with: vec![],
             allow_self_memory_edit: true,
-            group_mode: GroupMode::All,
-            auto_register_users: false,
+            dm_policy: DmPolicy::Allowlist,
+            dm_allow_from: vec![],
+            access_mode: None,
+            group_policy: GroupPolicy::Open,
+            group_require_mention: false,
+            group_allow_known_untagged: false,
+            group_allow_from: vec![],
+            groups: std::collections::BTreeMap::new(),
+            pairing: Default::default(),
             notify_admin_on_new_user: true,
             new_user_welcome_message: None,
             register_to_file: None,
@@ -325,7 +333,9 @@ mod tests {
     fn tag_only_untagged_group_denial_is_silent_ignore() {
         let mut account = make_account("111:AAA");
         account.bot_name = Some("MyBot".to_string());
-        account.group_mode = GroupMode::TagOnly;
+        account.group_policy = GroupPolicy::Open;
+        account.group_require_mention = true;
+        account.group_allow_known_untagged = false;
         let config = Config {
             telegram: Some(TelegramConfig {
                 poll_timeout_secs: Some(60),
@@ -461,7 +471,14 @@ mod tests {
     fn users_only_group_denial_keeps_unauthorized_response() {
         let mut account = make_account("111:AAA");
         account.bot_name = Some("MyBot".to_string());
-        account.group_mode = GroupMode::UsersOnly;
+        account.group_policy = GroupPolicy::Allowlist;
+        account.groups.insert(
+            "-999".to_string(),
+            masix_config::TelegramGroupAccess {
+                require_mention: false,
+                ..Default::default()
+            },
+        );
         let config = Config {
             telegram: Some(TelegramConfig {
                 poll_timeout_secs: Some(60),
@@ -481,6 +498,266 @@ mod tests {
                 "hello group"
             )
         );
+    }
+
+    #[test]
+    fn access_mode_admin_only_registered_is_not_silent_denial() {
+        let mut account = make_account("111:AAA");
+        account.bot_name = Some("MyBot".to_string());
+        account.access_mode = Some(AccessMode::AdminOnlyRegistered);
+        let config = Config {
+            telegram: Some(TelegramConfig {
+                poll_timeout_secs: Some(60),
+                client_recreate_interval_secs: Some(60),
+                default_policy: None,
+                accounts: vec![account],
+            }),
+            ..Config::default()
+        };
+
+        assert!(
+            !MasixRuntime::should_silently_ignore_telegram_permission_denial(
+                &config,
+                Some("111"),
+                123,
+                -999,
+                "hello group"
+            )
+        );
+    }
+
+    #[test]
+    fn assistant_autoregister_mode_enables_dm_pairing_gate() {
+        let mut account = make_account("111:AAA");
+        account.access_mode = Some(AccessMode::AssistantAutoregister);
+        let config = Config {
+            telegram: Some(TelegramConfig {
+                poll_timeout_secs: Some(60),
+                client_recreate_interval_secs: Some(60),
+                default_policy: None,
+                accounts: vec![account],
+            }),
+            ..Config::default()
+        };
+
+        assert!(MasixRuntime::should_auto_register_user(
+            &config,
+            Some("111"),
+            "telegram",
+            12345,
+            12345
+        ));
+    }
+
+    #[test]
+    fn memory_scope_permissions_follow_rbac() {
+        assert!(MasixRuntime::can_access_memory_scope(
+            PermissionLevel::Admin,
+            super::MemoryScope::AdminKb,
+            1,
+            None
+        ));
+        assert!(!MasixRuntime::can_access_memory_scope(
+            PermissionLevel::User,
+            super::MemoryScope::AdminKb,
+            10,
+            None
+        ));
+        assert!(MasixRuntime::can_access_memory_scope(
+            PermissionLevel::User,
+            super::MemoryScope::SharedUserKb,
+            10,
+            None
+        ));
+        assert!(MasixRuntime::can_access_memory_scope(
+            PermissionLevel::User,
+            super::MemoryScope::UserPrivate,
+            10,
+            Some(10)
+        ));
+        assert!(!MasixRuntime::can_access_memory_scope(
+            PermissionLevel::User,
+            super::MemoryScope::UserPrivate,
+            10,
+            Some(99)
+        ));
+    }
+
+    #[test]
+    fn readonly_cannot_write_memory_scopes() {
+        assert!(!MasixRuntime::can_write_memory_scope(
+            PermissionLevel::Readonly,
+            super::MemoryScope::UserPrivate,
+            10,
+            Some(10)
+        ));
+        assert!(!MasixRuntime::can_write_memory_scope(
+            PermissionLevel::Readonly,
+            super::MemoryScope::SharedUserKb,
+            10,
+            None
+        ));
+        assert!(MasixRuntime::can_access_memory_scope(
+            PermissionLevel::Readonly,
+            super::MemoryScope::UserPrivate,
+            10,
+            Some(10)
+        ));
+    }
+
+    #[test]
+    fn capabilities_query_detection_matches_common_prompts() {
+        assert!(MasixRuntime::is_capabilities_query("what can you do"));
+        assert!(MasixRuntime::is_capabilities_query("cosa puoi fare"));
+        assert!(MasixRuntime::is_capabilities_query("quali strumenti hai"));
+        assert!(!MasixRuntime::is_capabilities_query("/capabilities"));
+        assert!(!MasixRuntime::is_capabilities_query("scrivi un file"));
+    }
+
+    #[test]
+    fn group_tag_response_requires_tag_for_capabilities_command() {
+        let mut account = make_account("111:AAA");
+        account.bot_name = Some("MyBot".to_string());
+        account.access_mode = Some(AccessMode::GroupTagResponse);
+        let config = Config {
+            telegram: Some(TelegramConfig {
+                poll_timeout_secs: Some(60),
+                client_recreate_interval_secs: Some(60),
+                default_policy: None,
+                accounts: vec![account],
+            }),
+            ..Config::default()
+        };
+
+        let tagged = MasixRuntime::get_permission_level(
+            &config,
+            Some("111"),
+            "telegram",
+            "1001",
+            1001,
+            -100777,
+            "/capabilities @MyBot",
+        );
+        assert_eq!(tagged, PermissionLevel::User);
+
+        let untagged = MasixRuntime::get_permission_level(
+            &config,
+            Some("111"),
+            "telegram",
+            "1001",
+            1001,
+            -100777,
+            "/capabilities",
+        );
+        assert_eq!(untagged, PermissionLevel::None);
+    }
+
+    #[test]
+    fn non_admin_tool_visibility_hides_admin_only_modules() {
+        let tools = vec![
+            ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "plugin_codex_backend_run_task".to_string(),
+                    description: "codex".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+            },
+            ToolDefinition {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "plugin_discovery_web_search".to_string(),
+                    description: "discovery".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+            },
+        ];
+        let mut admin_only_modules = HashSet::new();
+        admin_only_modules.insert("codex-backend".to_string());
+
+        let user_visible = MasixRuntime::filter_visible_tools_by_permission(
+            tools.clone(),
+            &admin_only_modules,
+            PermissionLevel::User,
+        );
+        assert_eq!(user_visible.len(), 1);
+        assert_eq!(user_visible[0].function.name, "plugin_discovery_web_search");
+
+        let admin_visible = MasixRuntime::filter_visible_tools_by_permission(
+            tools,
+            &admin_only_modules,
+            PermissionLevel::Admin,
+        );
+        assert_eq!(admin_visible.len(), 2);
+    }
+
+    #[test]
+    fn telegram_streaming_is_only_dm_or_tagged_group() {
+        let mut account = make_account("111:AAA");
+        account.bot_name = Some("MyBot".to_string());
+        let config = Config {
+            telegram: Some(TelegramConfig {
+                poll_timeout_secs: Some(60),
+                client_recreate_interval_secs: Some(60),
+                default_policy: None,
+                accounts: vec![account],
+            }),
+            ..Config::default()
+        };
+
+        let dm = Envelope::new(
+            "telegram",
+            MessageKind::Message {
+                from: "1001".to_string(),
+                text: "hello".to_string(),
+            },
+        )
+        .with_chat_id(1001)
+        .with_payload(serde_json::json!({
+            "account_tag": "111",
+            "from_user_id": 1001
+        }));
+        assert!(MasixRuntime::should_stream_telegram_response(
+            &config,
+            Some("111"),
+            &dm
+        ));
+
+        let group_untagged = Envelope::new(
+            "telegram",
+            MessageKind::Message {
+                from: "1001".to_string(),
+                text: "hello group".to_string(),
+            },
+        )
+        .with_chat_id(-100777)
+        .with_payload(serde_json::json!({
+            "account_tag": "111",
+            "from_user_id": 1001
+        }));
+        assert!(!MasixRuntime::should_stream_telegram_response(
+            &config,
+            Some("111"),
+            &group_untagged
+        ));
+
+        let group_tagged = Envelope::new(
+            "telegram",
+            MessageKind::Message {
+                from: "1001".to_string(),
+                text: "@MyBot hello".to_string(),
+            },
+        )
+        .with_chat_id(-100777)
+        .with_payload(serde_json::json!({
+            "account_tag": "111",
+            "from_user_id": 1001
+        }));
+        assert!(MasixRuntime::should_stream_telegram_response(
+            &config,
+            Some("111"),
+            &group_tagged
+        ));
     }
 
     #[test]
@@ -608,8 +885,8 @@ mod tests {
             &masix_config::CoreCronConfig::default(),
             dead_letter_dir.as_path(),
         )
-            .await
-            .expect("cron check");
+        .await
+        .expect("cron check");
 
         let out = rx.recv().await.expect("outbound");
         assert_eq!(out.channel, "telegram");
@@ -664,8 +941,8 @@ mod tests {
             &masix_config::CoreCronConfig::default(),
             dead_letter_dir.as_path(),
         )
-            .await
-            .expect("cron check");
+        .await
+        .expect("cron check");
 
         assert!(matches!(
             rx.try_recv(),
@@ -752,8 +1029,7 @@ mod tests {
         assert_eq!(resolved.1, "web_search");
 
         let resolved_extra =
-            MasixRuntime::resolve_mcp_tool_name(&names, "discovery_extra_fetch")
-                .expect("resolved");
+            MasixRuntime::resolve_mcp_tool_name(&names, "discovery_extra_fetch").expect("resolved");
         assert_eq!(resolved_extra.0, "discovery_extra");
         assert_eq!(resolved_extra.1, "fetch");
     }
@@ -808,12 +1084,48 @@ struct UserMemoryMeta {
     last_seen: String,
     channels: Vec<String>,
     chat_ids: Vec<i64>,
+    #[serde(default)]
+    usernames: Vec<String>,
+    #[serde(default)]
+    first_names: Vec<String>,
+    #[serde(default)]
+    last_names: Vec<String>,
+    #[serde(default)]
+    display_names: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ObservedTelegramUser {
+    user_id: i64,
+    usernames: Vec<String>,
+    first_names: Vec<String>,
+    last_names: Vec<String>,
+    display_names: Vec<String>,
+    last_seen: String,
+    chat_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone)]
 struct AutoRegisterResult {
     newly_registered: bool,
     register_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryScope {
+    UserPrivate,
+    SharedUserKb,
+    AdminKb,
+}
+
+impl MemoryScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::UserPrivate => "user_private",
+            Self::SharedUserKb => "shared_user_kb",
+            Self::AdminKb => "admin_kb",
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -956,7 +1268,6 @@ impl MasixRuntime {
 
         self.start_telegram_adapters(Arc::clone(&bot_contexts))
             .await?;
-        self.start_whatsapp_adapter().await?;
         self.start_sms_adapter().await?;
 
         let mut inbound_rx = self.event_bus.subscribe();
@@ -1125,7 +1436,6 @@ impl MasixRuntime {
                     edit_message_id: None,
                     inline_keyboard: None,
                     chat_action: None,
-                    draft_id: None,
                 };
                 let mut success = false;
                 for attempt in 0..=cron_cfg.delivery_retry_count {
@@ -1329,37 +1639,6 @@ impl MasixRuntime {
                     }
                 });
             }
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "whatsapp")]
-    async fn start_whatsapp_adapter(&self) -> Result<()> {
-        if let Some(whatsapp_config) = &self.config.whatsapp {
-            if whatsapp_config.enabled {
-                info!("WhatsApp adapter enabled (read-only)");
-                let adapter = masix_whatsapp::WhatsAppAdapter::from_config(whatsapp_config)
-                    .with_event_bus(self.event_bus.clone());
-                tokio::spawn(async move {
-                    if let Err(err) = adapter.start().await {
-                        error!("WhatsApp adapter failed: {}", err);
-                    }
-                });
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "whatsapp"))]
-    async fn start_whatsapp_adapter(&self) -> Result<()> {
-        if self
-            .config
-            .whatsapp
-            .as_ref()
-            .map(|cfg| cfg.enabled)
-            .unwrap_or(false)
-        {
-            warn!("WhatsApp support not compiled in. Rebuild with --features whatsapp");
         }
         Ok(())
     }
@@ -1724,6 +2003,14 @@ impl MasixRuntime {
     ) -> Result<LlmMessagesResult> {
         // Build system context
         let mut system_context = system_prompt.to_string();
+        let now_local = chrono::Local::now();
+        let tz = now_local.offset().to_string();
+        system_context.push_str(&format!(
+            "\n\n# Runtime Time Context\nCurrent local datetime: {}\nCurrent local date: {}\nTimezone offset: {}\nUse this as authoritative for 'today/yesterday/tomorrow'.",
+            now_local.to_rfc3339(),
+            now_local.date_naive(),
+            tz
+        ));
         if let Some(memory) = Self::load_bot_memory_file(bot_context).await {
             if !memory.trim().is_empty() {
                 system_context.push_str("\n\n# Bot Memory\n");
@@ -1866,11 +2153,15 @@ impl MasixRuntime {
         };
 
         format!(
-            "\n\n# Tool Calling Protocol\nHai accesso a tool runtime.\nQuando una richiesta richiede azioni su shell/file/web/device/termux, usa un tool-call e non limitarti a descrivere i tool.\nPreferisci sempre il tool-calling nativo del provider.\nSe il provider non supporta tool-calling nativo, usa questo formato esatto:\n### TOOL_CALL\ncall <tool_name>\n{{\"arg\":\"value\"}}\n### TOOL_CALL\nIf a search tool returns results, do not claim search is unavailable or 'Server not found'.\nBuilt-in tools sempre disponibili: {}\nMCP/extra tools disponibili: {}\nTotale tools disponibili: {}",
+            "\n\n# Tool Calling Protocol\nYou have runtime tools.\nWhen a request requires shell/file/web/device actions, use tool-calling instead of only describing tools.\nPrefer native provider tool-calling.\nIf native tool-calling is unavailable, use this exact format:\n### TOOL_CALL\ncall <tool_name>\n{{\"arg\":\"value\"}}\n### TOOL_CALL\nBefore any web search call, consult local memory/files context first; if needed call read_file before search.\nIf a search tool returns results, do not claim search is unavailable or 'Server not found'.\nFor news/current events: prioritize fresh results, always include publication date, and clearly mark older items as historical context.\nBuilt-in tools always available: {}\nMCP/extra tools available: {}\nTotal tools available: {}",
             builtin_names.join(", "),
             extra_preview,
             builtin_names.len() + extra_names.len()
         )
+    }
+
+    fn is_web_search_tool_name(tool_name: &str) -> bool {
+        tool_name == "web_search" || tool_name.ends_with("_web_search")
     }
 
     fn tool_call_signature(tool_call: &ToolCall) -> String {
@@ -1883,10 +2174,7 @@ impl MasixRuntime {
 
     /// Detect if an LLM response is asking the user to confirm continuation
     /// rather than providing a final answer. Used for auto-continue logic.
-    fn looks_like_continuation_prompt(
-        text: &str,
-        mode: AgentLoopContinuationDetection,
-    ) -> bool {
+    fn looks_like_continuation_prompt(text: &str, mode: AgentLoopContinuationDetection) -> bool {
         let lower = text.to_lowercase();
         let trimmed = lower.trim();
 
@@ -2080,10 +2368,7 @@ impl MasixRuntime {
             .count()
     }
 
-    fn resolve_mcp_tool_name(
-        server_names: &[String],
-        tool_name: &str,
-    ) -> Option<(String, String)> {
+    fn resolve_mcp_tool_name(server_names: &[String], tool_name: &str) -> Option<(String, String)> {
         // Resolve by longest prefix first so "discovery" wins over "disc"
         // for tool names like "discovery_web_search".
         let mut sorted = server_names.to_vec();
@@ -2186,6 +2471,7 @@ impl MasixRuntime {
     async fn execute_tool_call(
         mcp_client: &Option<Arc<Mutex<McpClient>>>,
         tool_call: &ToolCall,
+        outbound_sender: Option<&broadcast::Sender<OutboundMessage>>,
         exec_policy: &ExecPolicy,
         workdir: &Path,
         storage: &Arc<Mutex<Storage>>,
@@ -2194,13 +2480,35 @@ impl MasixRuntime {
         vision_analysis: Option<&str>,
         config: &Config,
         bot_context: &BotContext,
+        permission: PermissionLevel,
     ) -> Result<String> {
         let tool_name = &tool_call.function.name;
         let arguments: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
             .unwrap_or_else(|_| serde_json::json!({}));
 
         if tool_name == "cron" {
-            return Self::execute_cron_tool(arguments, storage, envelope, account_tag).await;
+            return Self::execute_cron_tool(arguments, storage, envelope, account_tag, permission)
+                .await;
+        }
+        if tool_name == "telegram_send" {
+            return Self::execute_telegram_send_tool(
+                arguments,
+                outbound_sender,
+                envelope,
+                account_tag,
+                permission,
+            )
+            .await;
+        }
+        if tool_name == "admin_acl" {
+            return Self::execute_admin_acl_tool(
+                arguments,
+                config,
+                account_tag,
+                bot_context,
+                permission,
+            )
+            .await;
         }
         if tool_name == "vision" {
             return Self::execute_vision_tool(arguments, envelope, vision_analysis);
@@ -2212,6 +2520,36 @@ impl MasixRuntime {
                 config,
                 account_tag,
                 bot_context,
+            )
+            .await;
+        }
+        if tool_name == "memory_read" {
+            let caller_user_id = envelope
+                .payload
+                .get("from_user_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or_default();
+            return Self::execute_memory_read_tool(
+                arguments,
+                bot_context,
+                account_tag,
+                caller_user_id,
+                permission,
+            )
+            .await;
+        }
+        if tool_name == "memory_write" {
+            let caller_user_id = envelope
+                .payload
+                .get("from_user_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or_default();
+            return Self::execute_memory_write_tool(
+                arguments,
+                bot_context,
+                account_tag,
+                caller_user_id,
+                permission,
             )
             .await;
         }
@@ -2352,6 +2690,8 @@ impl MasixRuntime {
         let mut auto_continue_count = 0usize;
         let mut progress_updates_sent: u8 = 0;
         let mut last_progress_emit: Option<Instant> = None;
+        let mut pre_search_memory_context_injected = false;
+        let pre_search_memory_digest = Self::build_pre_search_memory_digest(bot_context).await;
 
         loop {
             iterations += 1;
@@ -2490,9 +2830,32 @@ impl MasixRuntime {
                         }
                     }
 
+                    if Self::is_web_search_tool_name(&tool_call.function.name)
+                        && !pre_search_memory_context_injected
+                    {
+                        if let Some(digest) = pre_search_memory_digest.as_deref() {
+                            messages.push(ChatMessage {
+                                role: "system".to_string(),
+                                content: Some(format!(
+                                    "# Local Memory Context (Pre-Search)\n{}\n\nUse this local context before interpreting web search results.",
+                                    digest
+                                )),
+                                tool_calls: None,
+                                tool_call_id: None,
+                                name: None,
+                            });
+                            pre_search_memory_context_injected = true;
+                            debug!(
+                                "Injected pre-search local memory context ({} chars).",
+                                digest.len()
+                            );
+                        }
+                    }
+
                     let tool_result = match Self::execute_tool_call(
                         mcp_client,
                         tool_call,
+                        outbound_sender,
                         exec_policy,
                         workdir,
                         storage,
@@ -2501,6 +2864,7 @@ impl MasixRuntime {
                         vision_analysis,
                         config,
                         bot_context,
+                        permission,
                     )
                     .await
                     {
@@ -2805,6 +3169,16 @@ impl MasixRuntime {
                     }
                 }
 
+                let _ = Self::record_user_catalog(
+                    &bot_context,
+                    account_tag.as_deref(),
+                    user_scope_id.as_deref(),
+                    envelope.chat_id,
+                    &envelope.channel,
+                    &envelope.payload,
+                )
+                .await;
+
                 if permission == PermissionLevel::None {
                     if envelope.channel == "telegram"
                         && Self::should_silently_ignore_telegram_permission_denial(
@@ -2848,15 +3222,6 @@ impl MasixRuntime {
                 );
                 let allow_runtime_tools = runtime_tool_access.is_enabled();
 
-                let _ = Self::record_user_catalog(
-                    &bot_context,
-                    account_tag.as_deref(),
-                    user_scope_id.as_deref(),
-                    envelope.chat_id,
-                    &envelope.channel,
-                )
-                .await;
-
                 if Self::handle_chat_commands(
                     text,
                     &envelope,
@@ -2873,6 +3238,7 @@ impl MasixRuntime {
                     from_user_id,
                     permission,
                     mcp_client,
+                    admin_only_modules,
                 )
                 .await?
                 {
@@ -2885,6 +3251,7 @@ impl MasixRuntime {
                     &outbound_sender,
                     storage,
                     account_tag.clone(),
+                    permission,
                 )
                 .await?
                 {
@@ -2906,7 +3273,12 @@ impl MasixRuntime {
 
                 let tools = if allow_runtime_tools {
                     let all_tools = Self::get_mcp_tools(mcp_client).await;
-                    runtime_tool_access.filter_tools(all_tools)
+                    let filtered = runtime_tool_access.filter_tools(all_tools);
+                    Self::filter_visible_tools_by_permission(
+                        filtered,
+                        admin_only_modules,
+                        permission,
+                    )
                 } else {
                     Vec::new()
                 };
@@ -3101,7 +3473,6 @@ impl MasixRuntime {
                                 edit_message_id: envelope.message_id,
                                 inline_keyboard: Some(keyboard),
                                 chat_action: None,
-                                draft_id: None,
                             };
                             let _ = outbound_sender.send(msg);
                             return Ok(());
@@ -3168,18 +3539,15 @@ impl MasixRuntime {
         if envelope.channel == "telegram" {
             if let Some(chat_id) = envelope.chat_id {
                 let stream_cfg = &config.core.streaming;
-                if stream_cfg.enabled && stream_cfg.mode != StreamingMode::Off {
+                let stream_allowed = stream_cfg.enabled
+                    && stream_cfg.mode != StreamingMode::Off
+                    && Self::should_stream_telegram_response(
+                        config,
+                        account_tag.as_deref(),
+                        envelope,
+                    );
+                if stream_allowed {
                     let chunks = Self::split_message_chunks(response, 1200);
-                    if stream_cfg.mode == StreamingMode::TelegramEdit {
-                        Self::send_outbound_text(
-                            outbound_sender,
-                            &envelope.channel,
-                            account_tag.clone(),
-                            chat_id,
-                            "Streaming update…",
-                            envelope.message_id,
-                        );
-                    }
                     for (idx, chunk) in chunks.iter().enumerate() {
                         Self::send_outbound_text(
                             outbound_sender,
@@ -3210,13 +3578,6 @@ impl MasixRuntime {
             return;
         }
 
-        if envelope.channel == "whatsapp" {
-            if let Some(msg) = Self::build_whatsapp_forward_message(config, envelope, response) {
-                let _ = outbound_sender.send(msg);
-            }
-            return;
-        }
-
         if envelope.channel == "sms" {
             if let Some(msg) = Self::build_sms_forward_message(config, envelope, response) {
                 let _ = outbound_sender.send(msg);
@@ -3229,37 +3590,6 @@ impl MasixRuntime {
             MessageKind::Message { from, .. } => from.as_str(),
             _ => "unknown",
         }
-    }
-
-    fn build_whatsapp_forward_message(
-        config: &Config,
-        envelope: &Envelope,
-        response: &str,
-    ) -> Option<OutboundMessage> {
-        let whatsapp = config.whatsapp.as_ref()?;
-        let chat_id = whatsapp.forward_to_telegram_chat_id?;
-        let account_tag = whatsapp
-            .forward_to_telegram_account_tag
-            .clone()
-            .or_else(|| Self::default_telegram_account_tag_from_config(config));
-        let prefix = whatsapp
-            .forward_prefix
-            .as_deref()
-            .unwrap_or("WhatsApp listener");
-        let sender = Self::message_sender_id(envelope);
-        let text = format!("{} [{}]\n{}", prefix, sender, response);
-
-        Some(OutboundMessage {
-            channel: "telegram".to_string(),
-            account_tag,
-            chat_id,
-            text,
-            reply_to: None,
-            edit_message_id: None,
-            inline_keyboard: None,
-            chat_action: None,
-            draft_id: None,
-        })
     }
 
     fn build_sms_forward_message(
@@ -3286,7 +3616,6 @@ impl MasixRuntime {
             edit_message_id: None,
             inline_keyboard: None,
             chat_action: None,
-            draft_id: None,
         })
     }
 
@@ -4197,6 +4526,7 @@ impl MasixRuntime {
         storage: &Arc<Mutex<Storage>>,
         envelope: &Envelope,
         account_tag: Option<&str>,
+        permission: PermissionLevel,
     ) -> Result<String> {
         let Some(chat_id) = envelope.chat_id else {
             return Ok("Cron tool unavailable: missing chat context.".to_string());
@@ -4210,7 +4540,21 @@ impl MasixRuntime {
         let scoped_account_tag = account_tag
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("__default__");
-        let recipient = chat_id.to_string();
+        let default_recipient = chat_id.to_string();
+        let requested_recipient = arguments
+            .get("recipient")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let recipient =
+            match requested_recipient {
+                Some(value) if permission == PermissionLevel::Admin => value.to_string(),
+                Some(_) => return Ok(
+                    "Cron recipient override is admin-only. Use your current chat or ask an admin."
+                        .to_string(),
+                ),
+                None => default_recipient,
+            };
 
         Self::execute_cron_instruction(
             command,
@@ -4220,6 +4564,62 @@ impl MasixRuntime {
             storage,
         )
         .await
+    }
+
+    async fn execute_telegram_send_tool(
+        arguments: serde_json::Value,
+        outbound_sender: Option<&broadcast::Sender<OutboundMessage>>,
+        envelope: &Envelope,
+        account_tag: Option<&str>,
+        permission: PermissionLevel,
+    ) -> Result<String> {
+        if envelope.channel != "telegram" {
+            return Ok("telegram_send is available only on Telegram channel.".to_string());
+        }
+        if permission != PermissionLevel::Admin {
+            return Ok("telegram_send is admin-only.".to_string());
+        }
+        let Some(sender) = outbound_sender else {
+            return Ok("telegram_send unavailable: outbound channel is not ready.".to_string());
+        };
+
+        let chat_id_raw = arguments
+            .get("chat_id")
+            .and_then(|value| value.as_str())
+            .or_else(|| arguments.get("recipient").and_then(|value| value.as_str()))
+            .map(str::trim)
+            .unwrap_or("");
+        if chat_id_raw.is_empty() {
+            return Ok("telegram_send requires `chat_id`.".to_string());
+        }
+        let chat_id = match chat_id_raw.parse::<i64>() {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(
+                    "Invalid chat_id. Use numeric Telegram chat id (example: -1001234567890)."
+                        .to_string(),
+                )
+            }
+        };
+
+        let text = arguments
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        if text.is_empty() {
+            return Ok("telegram_send requires non-empty `text`.".to_string());
+        }
+
+        Self::send_outbound_text(
+            sender,
+            "telegram",
+            account_tag.map(|value| value.to_string()),
+            chat_id,
+            text,
+            None,
+        );
+        Ok(format!("Message sent to chat_id {}.", chat_id))
     }
 
     fn execute_vision_tool(
@@ -4250,15 +4650,67 @@ impl MasixRuntime {
     ) -> Result<String> {
         let observed_groups =
             Self::collect_observed_telegram_groups(config, account_tag, bot_context).await?;
+        let observed_users_in_chat = Self::collect_observed_telegram_users(
+            config,
+            account_tag,
+            bot_context,
+            envelope.chat_id,
+        )
+        .await?;
         let from_user_id = envelope
             .payload
             .get("from_user_id")
             .and_then(|v| v.as_i64())
             .unwrap_or_default();
+        let from_username = envelope
+            .payload
+            .get("from_username")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let mentioned_usernames = envelope
+            .payload
+            .get("mentioned_usernames")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let users_payload = observed_users_in_chat
+            .iter()
+            .take(50)
+            .map(|u| {
+                serde_json::json!({
+                    "user_id": u.user_id,
+                    "usernames": u.usernames,
+                    "display_names": u.display_names,
+                    "last_seen": u.last_seen,
+                    "chat_ids": u.chat_ids
+                })
+            })
+            .collect::<Vec<_>>();
         let payload = serde_json::json!({
             "channel": envelope.channel,
             "chat_id": envelope.chat_id,
             "from_user_id": from_user_id,
+            "from_username": from_username,
+            "from_display_name": envelope
+                .payload
+                .get("from_display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            "chat_title": envelope
+                .payload
+                .get("chat_title")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            "chat_username": envelope
+                .payload
+                .get("chat_username")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
             "account_tag": account_tag.unwrap_or("__default__"),
             "kind": match &envelope.kind {
                 MessageKind::Message { .. } => "message",
@@ -4267,9 +4719,162 @@ impl MasixRuntime {
                 MessageKind::Reply { .. } => "reply",
                 MessageKind::Error { .. } => "error",
             },
+            "mentioned_usernames_in_message": mentioned_usernames,
             "observed_group_chat_ids": observed_groups,
+            "observed_users_in_current_chat": users_payload,
+            "observed_users_in_current_chat_count": observed_users_in_chat.len(),
         });
         Ok(serde_json::to_string_pretty(&payload)?)
+    }
+
+    async fn execute_admin_acl_tool(
+        arguments: serde_json::Value,
+        config: &Config,
+        account_tag: Option<&str>,
+        bot_context: &BotContext,
+        permission: PermissionLevel,
+    ) -> Result<String> {
+        if permission != PermissionLevel::Admin {
+            return Ok("admin_acl is admin-only.".to_string());
+        }
+
+        let Some(account) = Self::get_telegram_account(config, account_tag) else {
+            return Ok("admin_acl unavailable: no Telegram account context.".to_string());
+        };
+
+        let action = arguments
+            .get("action")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_ascii_lowercase())
+            .unwrap_or_else(|| "list".to_string());
+
+        let path = Self::effective_register_file_path(account);
+        let mut payload = if path.exists() {
+            match fs::read_to_string(&path).await {
+                Ok(content) => serde_json::from_str::<serde_json::Value>(&content)
+                    .unwrap_or_else(|_| serde_json::json!({})),
+                Err(_) => serde_json::json!({}),
+            }
+        } else {
+            serde_json::json!({})
+        };
+        if !payload.is_object() {
+            payload = serde_json::json!({});
+        }
+        let mut acl = Self::parse_dynamic_acl(&payload);
+
+        match action.as_str() {
+            "list" => {
+                let mut admins: HashSet<i64> = account.admins.iter().copied().collect();
+                admins.extend(acl.admins.iter().copied());
+                let mut users: HashSet<i64> = account.users.iter().copied().collect();
+                users.extend(acl.users.iter().copied());
+                let mut readonly: HashSet<i64> = account.readonly.iter().copied().collect();
+                readonly.extend(acl.readonly.iter().copied());
+
+                Ok(format!(
+                    "ACL status\nAdmins: {}\nUsers: {}\nReadonly: {}\nRegister file: {}",
+                    Self::sorted_csv(&admins),
+                    Self::sorted_csv(&users),
+                    Self::sorted_csv(&readonly),
+                    path.display()
+                ))
+            }
+            "list_groups" => Ok(Self::render_observed_groups(config, account_tag, bot_context).await),
+            "list_users" => {
+                let chat_filter = arguments
+                    .get("chat_id")
+                    .and_then(|v| {
+                        v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+                    });
+                Ok(Self::render_observed_users(config, account_tag, bot_context, chat_filter).await)
+            }
+            "add_user" | "remove_user" | "promote_admin" | "demote_user" => {
+                let raw_user = arguments
+                    .get("user")
+                    .or_else(|| arguments.get("user_id"))
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::trim)
+                            .map(str::to_string)
+                            .or_else(|| v.as_i64().map(|n| n.to_string()))
+                    })
+                    .flatten()
+                    .unwrap_or_default();
+                if raw_user.is_empty() {
+                    return Ok(
+                        "admin_acl requires `user` (numeric ID or @username) for this action."
+                            .to_string(),
+                    );
+                }
+                let user_id = match Self::resolve_admin_target_user_id(
+                    &raw_user,
+                    config,
+                    account_tag,
+                    bot_context,
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(msg) => return Ok(msg),
+                };
+
+                match action.as_str() {
+                    "add_user" => {
+                        acl.users.insert(user_id);
+                        acl.admins.remove(&user_id);
+                        acl.readonly.remove(&user_id);
+                        if let Err(err) =
+                            Self::persist_dynamic_acl_payload(&path, &mut payload, &acl).await
+                        {
+                            return Ok(format!("Failed to persist ACL: {}", err));
+                        }
+                        Ok(format!("User {} added and active immediately.", user_id))
+                    }
+                    "remove_user" => {
+                        acl.admins.remove(&user_id);
+                        acl.users.remove(&user_id);
+                        acl.readonly.remove(&user_id);
+                        if let Some(obj) = payload.as_object_mut() {
+                            obj.remove(&user_id.to_string());
+                        }
+                        if let Err(err) =
+                            Self::persist_dynamic_acl_payload(&path, &mut payload, &acl).await
+                        {
+                            return Ok(format!("Failed to persist ACL: {}", err));
+                        }
+                        Ok(format!("User {} removed and deauthorized immediately.", user_id))
+                    }
+                    "promote_admin" => {
+                        acl.admins.insert(user_id);
+                        acl.users.remove(&user_id);
+                        acl.readonly.remove(&user_id);
+                        if let Err(err) =
+                            Self::persist_dynamic_acl_payload(&path, &mut payload, &acl).await
+                        {
+                            return Ok(format!("Failed to persist ACL: {}", err));
+                        }
+                        Ok(format!("User {} promoted to admin and active immediately.", user_id))
+                    }
+                    "demote_user" => {
+                        acl.admins.remove(&user_id);
+                        acl.users.insert(user_id);
+                        acl.readonly.remove(&user_id);
+                        if let Err(err) =
+                            Self::persist_dynamic_acl_payload(&path, &mut payload, &acl).await
+                        {
+                            return Ok(format!("Failed to persist ACL: {}", err));
+                        }
+                        Ok(format!("Admin {} demoted to user and active immediately.", user_id))
+                    }
+                    _ => Ok("Unsupported admin_acl action.".to_string()),
+                }
+            }
+            _ => Ok(
+                "Unknown admin_acl action. Use: list | list_users | list_groups | add_user | remove_user | promote_admin | demote_user"
+                    .to_string(),
+            ),
+        }
     }
 
     async fn execute_cron_instruction(
@@ -4380,6 +4985,7 @@ impl MasixRuntime {
         from_user_id: i64,
         permission: PermissionLevel,
         mcp_client: &Option<Arc<Mutex<McpClient>>>,
+        admin_only_modules: &HashSet<String>,
     ) -> Result<bool> {
         let Some(chat_id) = envelope.chat_id else {
             return Ok(false);
@@ -4425,7 +5031,6 @@ impl MasixRuntime {
                 edit_message_id: None,
                 inline_keyboard: Some(keyboard),
                 chat_action: None,
-                draft_id: None,
             };
             if let Err(e) = outbound_sender.send(msg) {
                 error!("Failed to send menu: {}", e);
@@ -4471,6 +5076,28 @@ impl MasixRuntime {
                 chat_id,
                 &help_text,
                 None,
+            );
+            return Ok(true);
+        }
+
+        let normalized_text = text.trim().to_ascii_lowercase();
+        if text.starts_with("/capabilities") || Self::is_capabilities_query(&normalized_text) {
+            let response = Self::render_runtime_capabilities(
+                config,
+                account_tag,
+                permission,
+                &envelope.channel,
+                mcp_client,
+                admin_only_modules,
+            )
+            .await;
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &response,
+                envelope.message_id,
             );
             return Ok(true);
         }
@@ -4531,7 +5158,6 @@ impl MasixRuntime {
                 edit_message_id: None,
                 inline_keyboard: Some(keyboard),
                 chat_action: None,
-                draft_id: None,
             };
             let _ = outbound_sender.send(msg);
             return Ok(true);
@@ -4675,6 +5301,66 @@ impl MasixRuntime {
             return Ok(true);
         }
 
+        if text == "/send" || text.starts_with("/send ") {
+            if permission != PermissionLevel::Admin {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag_owned.clone(),
+                    chat_id,
+                    "Admin only command.",
+                    None,
+                );
+                return Ok(true);
+            }
+            let payload = text.strip_prefix("/send").unwrap_or("").trim();
+            let mut parts = payload.splitn(2, char::is_whitespace);
+            let target = parts.next().unwrap_or("").trim();
+            let message = parts.next().unwrap_or("").trim();
+            if target.is_empty() || message.is_empty() {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag_owned.clone(),
+                    chat_id,
+                    "Usage: /send <chat_id> <message>",
+                    envelope.message_id,
+                );
+                return Ok(true);
+            }
+            let target_chat_id = match target.parse::<i64>() {
+                Ok(value) => value,
+                Err(_) => {
+                    Self::send_outbound_text(
+                        outbound_sender,
+                        &envelope.channel,
+                        account_tag_owned.clone(),
+                        chat_id,
+                        "Invalid chat_id. Use numeric Telegram chat id (example: -1001234567890).",
+                        envelope.message_id,
+                    );
+                    return Ok(true);
+                }
+            };
+            Self::send_outbound_text(
+                outbound_sender,
+                "telegram",
+                account_tag_owned.clone(),
+                target_chat_id,
+                message,
+                None,
+            );
+            Self::send_outbound_text(
+                outbound_sender,
+                &envelope.channel,
+                account_tag_owned.clone(),
+                chat_id,
+                &format!("Sent to {}.", target_chat_id),
+                envelope.message_id,
+            );
+            return Ok(true);
+        }
+
         Ok(false)
     }
 
@@ -4684,6 +5370,7 @@ impl MasixRuntime {
         outbound_sender: &broadcast::Sender<OutboundMessage>,
         storage: &Arc<Mutex<Storage>>,
         account_tag: Option<String>,
+        permission: PermissionLevel,
     ) -> Result<bool> {
         let trimmed = text.trim();
         if !(trimmed == "/cron" || trimmed.starts_with("/cron ")) {
@@ -4699,9 +5386,50 @@ impl MasixRuntime {
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("__default__");
-        let recipient = chat_id.to_string();
+        let mut effective_rest = rest.to_string();
+        let mut recipient = chat_id.to_string();
+        if let Some(target) = rest.strip_prefix("to ") {
+            if permission != PermissionLevel::Admin {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag.clone(),
+                    chat_id,
+                    "Only admins can target another chat. Use `/cron <command>` for current chat.",
+                    envelope.message_id,
+                );
+                return Ok(true);
+            }
+            let mut parts = target.splitn(2, char::is_whitespace);
+            let requested = parts.next().unwrap_or("").trim();
+            let remainder = parts.next().unwrap_or("").trim();
+            if requested.is_empty() {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag.clone(),
+                    chat_id,
+                    "Usage: /cron to <chat_id> <command>",
+                    envelope.message_id,
+                );
+                return Ok(true);
+            }
+            if requested.parse::<i64>().is_err() {
+                Self::send_outbound_text(
+                    outbound_sender,
+                    &envelope.channel,
+                    account_tag.clone(),
+                    chat_id,
+                    "Invalid chat_id. Use numeric Telegram chat id (example: -1001234567890).",
+                    envelope.message_id,
+                );
+                return Ok(true);
+            }
+            recipient = requested.to_string();
+            effective_rest = remainder.to_string();
+        }
         let response = Self::execute_cron_instruction(
-            rest,
+            effective_rest.as_str(),
             &envelope.channel,
             &recipient,
             scoped_account_tag,
@@ -4996,12 +5724,14 @@ impl MasixRuntime {
         if parts.len() < 2 {
             return "🛡️ Admin commands\n\
 /admin list\n\
-/admin add <user_id>\n\
-/admin remove <user_id>\n\
-/admin promote <user_id>\n\
-/admin demote <user_id>\n\
+/admin users [chat_id]\n\
+/admin add <user_id|@username>\n\
+/admin remove <user_id|@username>\n\
+/admin promote <user_id|@username>\n\
+/admin demote <user_id|@username>\n\
 /admin groups\n\
 /admin groups refresh\n\
+/send <chat_id> <message>\n\
 /admin tools user list\n\
 /admin tools user available\n\
 /admin tools user mode <none|selected>\n\
@@ -5071,82 +5801,113 @@ impl MasixRuntime {
             }
             "add" => {
                 if parts.len() < 3 {
-                    return "Usage: /admin add <user_id>".to_string();
+                    return "Usage: /admin add <user_id|@username>".to_string();
                 }
-                match parts[2].parse::<i64>() {
-                    Ok(user_id) => {
-                        acl.users.insert(user_id);
-                        acl.admins.remove(&user_id);
-                        acl.readonly.remove(&user_id);
-                        if let Err(err) =
-                            Self::persist_dynamic_acl_payload(&path, &mut payload, &acl).await
-                        {
-                            return format!("Failed to persist ACL: {}", err);
-                        }
-                        format!("User {} added and active immediately.", user_id)
-                    }
-                    Err(_) => "Invalid user ID. Use numeric ID.".to_string(),
+                let user_id = match Self::resolve_admin_target_user_id(
+                    parts[2],
+                    config,
+                    account_tag,
+                    bot_context,
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(msg) => return msg,
+                };
+                acl.users.insert(user_id);
+                acl.admins.remove(&user_id);
+                acl.readonly.remove(&user_id);
+                if let Err(err) = Self::persist_dynamic_acl_payload(&path, &mut payload, &acl).await
+                {
+                    return format!("Failed to persist ACL: {}", err);
                 }
+                format!("User {} added and active immediately.", user_id)
             }
             "remove" => {
                 if parts.len() < 3 {
-                    return "Usage: /admin remove <user_id>".to_string();
+                    return "Usage: /admin remove <user_id|@username>".to_string();
                 }
-                match parts[2].parse::<i64>() {
-                    Ok(user_id) => {
-                        acl.admins.remove(&user_id);
-                        acl.users.remove(&user_id);
-                        acl.readonly.remove(&user_id);
-                        if let Some(obj) = payload.as_object_mut() {
-                            obj.remove(&user_id.to_string());
-                        }
-                        if let Err(err) =
-                            Self::persist_dynamic_acl_payload(&path, &mut payload, &acl).await
-                        {
-                            return format!("Failed to persist ACL: {}", err);
-                        }
-                        format!("User {} removed and deauthorized immediately.", user_id)
-                    }
-                    Err(_) => "Invalid user ID.".to_string(),
+                let user_id = match Self::resolve_admin_target_user_id(
+                    parts[2],
+                    config,
+                    account_tag,
+                    bot_context,
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(msg) => return msg,
+                };
+                acl.admins.remove(&user_id);
+                acl.users.remove(&user_id);
+                acl.readonly.remove(&user_id);
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.remove(&user_id.to_string());
                 }
+                if let Err(err) = Self::persist_dynamic_acl_payload(&path, &mut payload, &acl).await
+                {
+                    return format!("Failed to persist ACL: {}", err);
+                }
+                format!("User {} removed and deauthorized immediately.", user_id)
             }
             "promote" => {
                 if parts.len() < 3 {
-                    return "Usage: /admin promote <user_id>".to_string();
+                    return "Usage: /admin promote <user_id|@username>".to_string();
                 }
-                match parts[2].parse::<i64>() {
-                    Ok(user_id) => {
-                        acl.admins.insert(user_id);
-                        acl.users.remove(&user_id);
-                        acl.readonly.remove(&user_id);
-                        if let Err(err) =
-                            Self::persist_dynamic_acl_payload(&path, &mut payload, &acl).await
-                        {
-                            return format!("Failed to persist ACL: {}", err);
-                        }
-                        format!("User {} promoted to admin and active immediately.", user_id)
-                    }
-                    Err(_) => "Invalid user ID.".to_string(),
+                let user_id = match Self::resolve_admin_target_user_id(
+                    parts[2],
+                    config,
+                    account_tag,
+                    bot_context,
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(msg) => return msg,
+                };
+                acl.admins.insert(user_id);
+                acl.users.remove(&user_id);
+                acl.readonly.remove(&user_id);
+                if let Err(err) = Self::persist_dynamic_acl_payload(&path, &mut payload, &acl).await
+                {
+                    return format!("Failed to persist ACL: {}", err);
                 }
+                format!("User {} promoted to admin and active immediately.", user_id)
             }
             "demote" => {
                 if parts.len() < 3 {
-                    return "Usage: /admin demote <user_id>".to_string();
+                    return "Usage: /admin demote <user_id|@username>".to_string();
                 }
-                match parts[2].parse::<i64>() {
-                    Ok(user_id) => {
-                        acl.admins.remove(&user_id);
-                        acl.users.insert(user_id);
-                        acl.readonly.remove(&user_id);
-                        if let Err(err) =
-                            Self::persist_dynamic_acl_payload(&path, &mut payload, &acl).await
-                        {
-                            return format!("Failed to persist ACL: {}", err);
-                        }
-                        format!("Admin {} demoted to user and active immediately.", user_id)
+                let user_id = match Self::resolve_admin_target_user_id(
+                    parts[2],
+                    config,
+                    account_tag,
+                    bot_context,
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(msg) => return msg,
+                };
+                acl.admins.remove(&user_id);
+                acl.users.insert(user_id);
+                acl.readonly.remove(&user_id);
+                if let Err(err) = Self::persist_dynamic_acl_payload(&path, &mut payload, &acl).await
+                {
+                    return format!("Failed to persist ACL: {}", err);
+                }
+                format!("Admin {} demoted to user and active immediately.", user_id)
+            }
+            "users" => {
+                let chat_filter = if let Some(raw) = parts.get(2) {
+                    match raw.trim().parse::<i64>() {
+                        Ok(value) => Some(value),
+                        Err(_) => return "Usage: /admin users [chat_id]".to_string(),
                     }
-                    Err(_) => "Invalid user ID.".to_string(),
-                }
+                } else {
+                    None
+                };
+                Self::render_observed_users(config, account_tag, bot_context, chat_filter).await
             }
             "groups" => {
                 if parts.len() > 2 && !parts[2].eq_ignore_ascii_case("refresh") {
@@ -5154,7 +5915,7 @@ impl MasixRuntime {
                 }
                 Self::render_observed_groups(config, account_tag, bot_context).await
             }
-            _ => "Unknown command. Use: add, remove, promote, demote, list, groups, tools"
+            _ => "Unknown command. Use: list, users, add, remove, promote, demote, groups, tools"
                 .to_string(),
         }
     }
@@ -5192,6 +5953,81 @@ impl MasixRuntime {
             }
             Err(err) => format!("Failed to load observed groups: {}", err),
         }
+    }
+
+    async fn render_observed_users(
+        config: &Config,
+        account_tag: Option<&str>,
+        bot_context: &BotContext,
+        chat_filter: Option<i64>,
+    ) -> String {
+        let users = match Self::collect_observed_telegram_users(
+            config,
+            account_tag,
+            bot_context,
+            chat_filter,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(err) => return format!("Failed to load observed users: {}", err),
+        };
+
+        if users.is_empty() {
+            if let Some(chat_id) = chat_filter {
+                return format!(
+                    "No observed Telegram users for chat {} yet. Ask users to send a message first.",
+                    chat_id
+                );
+            }
+            return "No observed Telegram users yet. Ask users to send a message first."
+                .to_string();
+        }
+
+        let Some(account) = Self::get_telegram_account(config, account_tag) else {
+            return "No Telegram account context found.".to_string();
+        };
+        let dynamic_acl = Self::load_dynamic_acl_for_account(account);
+
+        let mut lines = vec![format!("Observed Telegram users ({}):", users.len())];
+        for user in users {
+            let role = match Self::telegram_user_permission(account, &dynamic_acl, user.user_id) {
+                PermissionLevel::Admin => "admin",
+                PermissionLevel::User => "user",
+                PermissionLevel::Readonly => "readonly",
+                PermissionLevel::None => "none",
+            };
+            let username = user
+                .usernames
+                .first()
+                .map(|v| format!("@{}", v))
+                .unwrap_or_else(|| "-".to_string());
+            let display = user
+                .display_names
+                .first()
+                .cloned()
+                .or_else(|| user.first_names.first().cloned())
+                .unwrap_or_else(|| "-".to_string());
+            let last_name = user
+                .last_names
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "-".to_string());
+            let chats = if user.chat_ids.is_empty() {
+                "-".to_string()
+            } else {
+                user.chat_ids
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            lines.push(format!(
+                "- {} | {} | role={} | display={} | last_name={} | chats={} | last_seen={}",
+                user.user_id, username, role, display, last_name, chats, user.last_seen
+            ));
+        }
+        lines.join("\n")
     }
 
     async fn collect_observed_telegram_groups(
@@ -5237,6 +6073,116 @@ impl MasixRuntime {
         let mut out: Vec<i64> = groups.into_iter().collect();
         out.sort_unstable();
         Ok(out)
+    }
+
+    async fn collect_observed_telegram_users(
+        _config: &Config,
+        account_tag: Option<&str>,
+        bot_context: &BotContext,
+        chat_filter: Option<i64>,
+    ) -> Result<Vec<ObservedTelegramUser>> {
+        let account = Self::sanitize_scope_component(&Self::account_scope(account_tag));
+        let users_root = bot_context
+            .memory_dir
+            .join("accounts")
+            .join(account)
+            .join("users");
+
+        let mut users_dir = match fs::read_dir(&users_root).await {
+            Ok(dir) => dir,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let mut out = Vec::new();
+        while let Some(user_entry) = users_dir.next_entry().await? {
+            let user_path = user_entry.path();
+            let meta_path = user_path.join("meta.json");
+            let raw = match fs::read_to_string(&meta_path).await {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let meta = match serde_json::from_str::<UserMemoryMeta>(&raw) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if !meta.channels.iter().any(|ch| ch == "telegram") {
+                continue;
+            }
+            let Ok(user_id) = meta.user_id.parse::<i64>() else {
+                continue;
+            };
+            if let Some(chat_id) = chat_filter {
+                if !meta.chat_ids.iter().any(|cid| *cid == chat_id) {
+                    continue;
+                }
+            }
+            out.push(ObservedTelegramUser {
+                user_id,
+                usernames: meta.usernames,
+                first_names: meta.first_names,
+                last_names: meta.last_names,
+                display_names: meta.display_names,
+                last_seen: meta.last_seen,
+                chat_ids: meta.chat_ids,
+            });
+        }
+
+        out.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        Ok(out)
+    }
+
+    async fn resolve_admin_target_user_id(
+        token: &str,
+        config: &Config,
+        account_tag: Option<&str>,
+        bot_context: &BotContext,
+    ) -> std::result::Result<i64, String> {
+        let trimmed = token.trim().trim_end_matches(',');
+        if trimmed.is_empty() {
+            return Err("Missing user identifier. Use numeric ID or @username.".to_string());
+        }
+        if let Ok(value) = trimmed.parse::<i64>() {
+            return Ok(value);
+        }
+
+        let username = trimmed.trim_start_matches('@').to_lowercase();
+        if username.is_empty() {
+            return Err("Invalid username token. Use @username or numeric ID.".to_string());
+        }
+
+        let observed =
+            Self::collect_observed_telegram_users(config, account_tag, bot_context, None)
+                .await
+                .map_err(|e| format!("Failed to load observed users: {}", e))?;
+        let mut matches = observed
+            .into_iter()
+            .filter(|user| {
+                user.usernames
+                    .iter()
+                    .any(|u| u.eq_ignore_ascii_case(&username))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by_key(|u| u.user_id);
+        matches.dedup_by_key(|u| u.user_id);
+
+        match matches.len() {
+            1 => Ok(matches[0].user_id),
+            0 => Err(format!(
+                "Cannot resolve '@{}'. Ask the user to message the bot first, then use /admin users and retry.",
+                username
+            )),
+            _ => {
+                let ids = matches
+                    .iter()
+                    .map(|u| u.user_id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(format!(
+                    "Ambiguous username '@{}' matches multiple IDs: {}. Use numeric ID.",
+                    username, ids
+                ))
+            }
+        }
     }
 
     async fn handle_admin_tools_subcommand(
@@ -5679,6 +6625,125 @@ impl MasixRuntime {
         fs::read_to_string(&context.memory_file).await.ok()
     }
 
+    async fn build_pre_search_memory_digest(context: &BotContext) -> Option<String> {
+        const MAX_FILES: usize = 8;
+        const MAX_PER_FILE_CHARS: usize = 700;
+        const MAX_TOTAL_CHARS: usize = 3500;
+        const PRIORITY_FILES: &[&str] = &[
+            "VERITA.md",
+            "CORREZIONI.md",
+            "CORREZZIONI.md",
+            "ARTE.md",
+            "SOUL.md",
+            "IDENTITY.md",
+            "USER.md",
+            "MEMORY.md",
+        ];
+
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let profile_dir = context.workdir.join("profile");
+
+        for name in PRIORITY_FILES {
+            let path = if *name == "MEMORY.md" {
+                context.memory_file.clone()
+            } else {
+                profile_dir.join(name)
+            };
+            if seen.insert(path.clone()) {
+                candidates.push(path);
+            }
+        }
+
+        if let Ok(mut dir) = fs::read_dir(&profile_dir).await {
+            while let Ok(Some(entry)) = dir.next_entry().await {
+                let path = entry.path();
+                let is_md = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.eq_ignore_ascii_case("md"))
+                    .unwrap_or(false);
+                if !is_md {
+                    continue;
+                }
+                if seen.insert(path.clone()) {
+                    candidates.push(path);
+                }
+                if candidates.len() >= MAX_FILES * 2 {
+                    break;
+                }
+            }
+        }
+
+        let mut out = String::new();
+        let mut total_chars = 0usize;
+        for path in candidates.into_iter().take(MAX_FILES) {
+            let Ok(raw) = fs::read_to_string(&path).await else {
+                continue;
+            };
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let filename = path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .unwrap_or("unknown.md");
+            let snippet = Self::truncate_for_prompt(trimmed, MAX_PER_FILE_CHARS);
+            if snippet.is_empty() {
+                continue;
+            }
+
+            let section = format!("## {}\n{}\n\n", filename, snippet);
+            total_chars = total_chars.saturating_add(section.len());
+            if total_chars > MAX_TOTAL_CHARS && !out.is_empty() {
+                break;
+            }
+            out.push_str(&section);
+        }
+
+        if out.trim().is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    fn truncate_for_prompt(input: &str, max_chars: usize) -> String {
+        if max_chars == 0 {
+            return String::new();
+        }
+
+        let mut collapsed = String::with_capacity(input.len());
+        let mut prev_space = false;
+        for ch in input.chars() {
+            if ch.is_whitespace() {
+                if !prev_space {
+                    collapsed.push(' ');
+                }
+                prev_space = true;
+            } else {
+                collapsed.push(ch);
+                prev_space = false;
+            }
+        }
+        let collapsed = collapsed.trim();
+        if collapsed.is_empty() {
+            return String::new();
+        }
+
+        let mut out = String::new();
+        for (idx, ch) in collapsed.chars().enumerate() {
+            if idx >= max_chars {
+                out.push_str("...");
+                break;
+            }
+            out.push(ch);
+        }
+        out
+    }
+
     fn resolve_user_scope_id(envelope: &Envelope) -> Option<String> {
         if let MessageKind::Message { from, .. } = &envelope.kind {
             let trimmed = from.trim();
@@ -5933,61 +6998,11 @@ impl MasixRuntime {
 
     fn telegram_permission_for_group(
         account: &masix_config::TelegramAccount,
-        user_perm: PermissionLevel,
         user_id: i64,
         chat_id: i64,
         is_bot_tagged: bool,
     ) -> PermissionLevel {
-        let is_private = user_id == chat_id;
-        if is_private {
-            return user_perm;
-        }
-
-        match account.group_mode {
-            GroupMode::All => {
-                if user_perm == PermissionLevel::Admin {
-                    PermissionLevel::Admin
-                } else {
-                    PermissionLevel::User
-                }
-            }
-            GroupMode::UsersOnly => {
-                if user_perm == PermissionLevel::None {
-                    PermissionLevel::None
-                } else {
-                    user_perm
-                }
-            }
-            GroupMode::TagOnly => {
-                if is_bot_tagged {
-                    if user_perm == PermissionLevel::Admin {
-                        PermissionLevel::Admin
-                    } else {
-                        PermissionLevel::User
-                    }
-                } else {
-                    PermissionLevel::None
-                }
-            }
-            GroupMode::UsersOrTag => {
-                if user_perm != PermissionLevel::None {
-                    user_perm
-                } else if is_bot_tagged {
-                    PermissionLevel::User
-                } else {
-                    PermissionLevel::None
-                }
-            }
-            GroupMode::ListenOnly => {
-                if user_perm == PermissionLevel::Admin && is_bot_tagged {
-                    PermissionLevel::Admin
-                } else if is_bot_tagged {
-                    PermissionLevel::User
-                } else {
-                    PermissionLevel::None
-                }
-            }
-        }
+        account.get_permission_for_group(user_id, chat_id, is_bot_tagged)
     }
 
     fn should_silently_ignore_telegram_permission_denial(
@@ -6009,10 +7024,29 @@ impl MasixRuntime {
             return false;
         }
 
-        matches!(
-            account.group_mode,
-            GroupMode::TagOnly | GroupMode::UsersOrTag | GroupMode::ListenOnly
-        )
+        if let Some(mode) = account.access_mode {
+            return match mode {
+                AccessMode::AssistantAutoregister
+                | AccessMode::GroupTagResponse
+                | AccessMode::GroupProfiler => true,
+                AccessMode::AdminOnlyRegistered | AccessMode::GroupAllResponse => false,
+            };
+        }
+
+        let group_cfg = account.groups.get(&chat_id.to_string());
+        if matches!(group_cfg, Some(cfg) if !cfg.enabled) {
+            return true;
+        }
+        let require_mention = group_cfg
+            .map(|cfg| cfg.require_mention)
+            .unwrap_or(account.group_require_mention);
+        if !require_mention {
+            return false;
+        }
+        let effective_policy = group_cfg
+            .and_then(|cfg| cfg.group_policy)
+            .unwrap_or(account.group_policy);
+        matches!(effective_policy, GroupPolicy::Open | GroupPolicy::Allowlist)
     }
 
     fn get_permission_level(
@@ -6029,22 +7063,9 @@ impl MasixRuntime {
                 let Some(account) = Self::get_telegram_account(config, account_tag) else {
                     return PermissionLevel::None;
                 };
-                let dynamic_acl = Self::load_dynamic_acl_for_account(account);
-                let user_perm = Self::telegram_user_permission(account, &dynamic_acl, user_id);
                 let is_bot_tagged = Self::is_bot_tagged(text, account);
-                Self::telegram_permission_for_group(
-                    account,
-                    user_perm,
-                    user_id,
-                    chat_id,
-                    is_bot_tagged,
-                )
+                Self::telegram_permission_for_group(account, user_id, chat_id, is_bot_tagged)
             }
-            "whatsapp" => config
-                .whatsapp
-                .as_ref()
-                .map(|whatsapp| whatsapp.get_permission_level(sender))
-                .unwrap_or(PermissionLevel::None),
             "sms" => config
                 .sms
                 .as_ref()
@@ -6117,11 +7138,219 @@ impl MasixRuntime {
         let Some(account) = Self::get_telegram_account(config, account_tag) else {
             return false;
         };
-        if !account.should_auto_register() {
+        if !account.uses_dm_pairing() {
             return false;
         }
-        let dynamic_acl = Self::load_dynamic_acl_for_account(account);
-        Self::telegram_user_permission(account, &dynamic_acl, user_id) == PermissionLevel::None
+        account.get_permission_for_group(user_id, chat_id, false) == PermissionLevel::None
+    }
+
+    fn parse_memory_scope(raw: &str) -> Option<MemoryScope> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "user_private" | "private" | "user" => Some(MemoryScope::UserPrivate),
+            "shared_user_kb" | "shared" | "kb" => Some(MemoryScope::SharedUserKb),
+            "admin_kb" | "admin" => Some(MemoryScope::AdminKb),
+            _ => None,
+        }
+    }
+
+    fn sanitize_relative_memory_path(raw: Option<&str>) -> Result<PathBuf> {
+        let value = raw.unwrap_or("MEMORY.md").trim();
+        if value.is_empty() {
+            return Ok(PathBuf::from("MEMORY.md"));
+        }
+        if value.starts_with('/') || value.contains("..") {
+            return Err(anyhow!(
+                "Invalid memory path. Use a relative path without '..'."
+            ));
+        }
+        Ok(PathBuf::from(value))
+    }
+
+    fn memory_scopes_root(context: &BotContext, account_tag: Option<&str>) -> PathBuf {
+        let account = Self::sanitize_scope_component(&Self::account_scope(account_tag));
+        context
+            .memory_dir
+            .join("accounts")
+            .join(account)
+            .join("scopes")
+    }
+
+    fn memory_scope_base_dir(
+        context: &BotContext,
+        account_tag: Option<&str>,
+        scope: MemoryScope,
+        target_user_id: Option<i64>,
+        caller_user_id: i64,
+    ) -> PathBuf {
+        let root = Self::memory_scopes_root(context, account_tag);
+        match scope {
+            MemoryScope::UserPrivate => {
+                let effective_user = target_user_id.unwrap_or(caller_user_id);
+                root.join("user_private")
+                    .join(Self::sanitize_scope_component(&effective_user.to_string()))
+            }
+            MemoryScope::SharedUserKb => root.join("shared_user_kb"),
+            MemoryScope::AdminKb => root.join("admin_kb"),
+        }
+    }
+
+    fn can_access_memory_scope(
+        permission: PermissionLevel,
+        scope: MemoryScope,
+        caller_user_id: i64,
+        target_user_id: Option<i64>,
+    ) -> bool {
+        match permission {
+            PermissionLevel::Admin => true,
+            PermissionLevel::User => match scope {
+                MemoryScope::UserPrivate => target_user_id
+                    .map(|target| target == caller_user_id)
+                    .unwrap_or(true),
+                MemoryScope::SharedUserKb => true,
+                MemoryScope::AdminKb => false,
+            },
+            PermissionLevel::Readonly => match scope {
+                MemoryScope::UserPrivate => target_user_id
+                    .map(|target| target == caller_user_id)
+                    .unwrap_or(true),
+                MemoryScope::SharedUserKb => true,
+                MemoryScope::AdminKb => false,
+            },
+            PermissionLevel::None => false,
+        }
+    }
+
+    fn can_write_memory_scope(
+        permission: PermissionLevel,
+        scope: MemoryScope,
+        caller_user_id: i64,
+        target_user_id: Option<i64>,
+    ) -> bool {
+        match permission {
+            PermissionLevel::Admin => true,
+            PermissionLevel::User => match scope {
+                MemoryScope::UserPrivate => target_user_id
+                    .map(|target| target == caller_user_id)
+                    .unwrap_or(true),
+                MemoryScope::SharedUserKb => true,
+                MemoryScope::AdminKb => false,
+            },
+            PermissionLevel::Readonly | PermissionLevel::None => false,
+        }
+    }
+
+    async fn backup_memory_file(target_path: &Path, backup_root: &Path) -> Result<Option<PathBuf>> {
+        if !target_path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read(target_path).await?;
+        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let stem = target_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("memory");
+        fs::create_dir_all(backup_root).await?;
+        let backup_path = backup_root.join(format!("{}.{}.bak", stem, ts));
+        fs::write(&backup_path, content).await?;
+        Ok(Some(backup_path))
+    }
+
+    async fn execute_memory_read_tool(
+        arguments: serde_json::Value,
+        bot_context: &BotContext,
+        account_tag: Option<&str>,
+        caller_user_id: i64,
+        permission: PermissionLevel,
+    ) -> Result<String> {
+        let scope = arguments
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .and_then(Self::parse_memory_scope)
+            .ok_or_else(|| {
+                anyhow!("memory_read requires scope: user_private|shared_user_kb|admin_kb")
+            })?;
+        let target_user_id = arguments.get("target_user_id").and_then(|v| v.as_i64());
+        if !Self::can_access_memory_scope(permission, scope, caller_user_id, target_user_id) {
+            return Ok(format!("Access denied for scope '{}'.", scope.as_str()));
+        }
+        let relative =
+            Self::sanitize_relative_memory_path(arguments.get("path").and_then(|v| v.as_str()))?;
+        let base = Self::memory_scope_base_dir(
+            bot_context,
+            account_tag,
+            scope,
+            target_user_id,
+            caller_user_id,
+        );
+        let full_path = base.join(relative);
+        match fs::read_to_string(&full_path).await {
+            Ok(content) => {
+                if content.len() > 12000 {
+                    Ok(format!(
+                        "{}\n\n... [truncated, {} bytes total]",
+                        &content[..12000],
+                        content.len()
+                    ))
+                } else {
+                    Ok(content)
+                }
+            }
+            Err(e) => Ok(format!("Error reading scoped memory: {}", e)),
+        }
+    }
+
+    async fn execute_memory_write_tool(
+        arguments: serde_json::Value,
+        bot_context: &BotContext,
+        account_tag: Option<&str>,
+        caller_user_id: i64,
+        permission: PermissionLevel,
+    ) -> Result<String> {
+        let scope = arguments
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .and_then(Self::parse_memory_scope)
+            .ok_or_else(|| {
+                anyhow!("memory_write requires scope: user_private|shared_user_kb|admin_kb")
+            })?;
+        let content = arguments
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("memory_write requires `content`"))?;
+        let target_user_id = arguments.get("target_user_id").and_then(|v| v.as_i64());
+        if !Self::can_write_memory_scope(permission, scope, caller_user_id, target_user_id) {
+            return Ok(format!("Access denied for scope '{}'.", scope.as_str()));
+        }
+        let relative =
+            Self::sanitize_relative_memory_path(arguments.get("path").and_then(|v| v.as_str()))?;
+        let base = Self::memory_scope_base_dir(
+            bot_context,
+            account_tag,
+            scope,
+            target_user_id,
+            caller_user_id,
+        );
+        fs::create_dir_all(&base).await?;
+        let full_path = base.join(&relative);
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let backup_root = Self::memory_scopes_root(bot_context, account_tag)
+            .join(".backups")
+            .join(scope.as_str());
+        let backup = Self::backup_memory_file(&full_path, &backup_root).await?;
+        fs::write(&full_path, content).await?;
+        let backup_msg = backup
+            .as_ref()
+            .map(|p| format!(" backup: {}", p.display()))
+            .unwrap_or_else(|| " backup: (new file)".to_string());
+        Ok(format!(
+            "Scoped memory updated in '{}' at {} ({} bytes).{}",
+            scope.as_str(),
+            full_path.display(),
+            content.len(),
+            backup_msg
+        ))
     }
 
     fn user_memory_dir(
@@ -6177,6 +7406,7 @@ impl MasixRuntime {
         user_scope_id: Option<&str>,
         chat_id: Option<i64>,
         channel: &str,
+        payload: &serde_json::Value,
     ) -> Result<()> {
         let account = Self::account_scope(account_tag);
         let user_id = Self::normalized_user_id(user_scope_id, chat_id);
@@ -6193,6 +7423,10 @@ impl MasixRuntime {
                 last_seen: now.clone(),
                 channels: Vec::new(),
                 chat_ids: Vec::new(),
+                usernames: Vec::new(),
+                first_names: Vec::new(),
+                last_names: Vec::new(),
+                display_names: Vec::new(),
             }),
             Err(_) => UserMemoryMeta {
                 account_tag: account.clone(),
@@ -6201,6 +7435,10 @@ impl MasixRuntime {
                 last_seen: now.clone(),
                 channels: Vec::new(),
                 chat_ids: Vec::new(),
+                usernames: Vec::new(),
+                first_names: Vec::new(),
+                last_names: Vec::new(),
+                display_names: Vec::new(),
             },
         };
 
@@ -6220,9 +7458,37 @@ impl MasixRuntime {
             meta.chat_ids.sort_unstable();
         }
 
+        if channel == "telegram" {
+            if let Some(value) = payload.get("from_username").and_then(|v| v.as_str()) {
+                let normalized = value.trim().trim_start_matches('@').to_lowercase();
+                Self::push_unique_string(&mut meta.usernames, &normalized);
+            }
+            if let Some(value) = payload.get("from_first_name").and_then(|v| v.as_str()) {
+                Self::push_unique_string(&mut meta.first_names, value.trim());
+            }
+            if let Some(value) = payload.get("from_last_name").and_then(|v| v.as_str()) {
+                Self::push_unique_string(&mut meta.last_names, value.trim());
+            }
+            if let Some(value) = payload.get("from_display_name").and_then(|v| v.as_str()) {
+                Self::push_unique_string(&mut meta.display_names, value.trim());
+            }
+        }
+
         let body = serde_json::to_string_pretty(&meta)?;
         fs::write(meta_path, body).await?;
         Ok(())
+    }
+
+    fn push_unique_string(target: &mut Vec<String>, value: &str) {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if target.iter().any(|v| v.eq_ignore_ascii_case(trimmed)) {
+            return;
+        }
+        target.push(trimmed.to_string());
+        target.sort();
     }
 
     async fn load_chat_memory_history(
@@ -6406,7 +7672,6 @@ impl MasixRuntime {
             edit_message_id: None,
             inline_keyboard: None,
             chat_action: None,
-            draft_id: None,
         });
     }
 
@@ -6556,7 +7821,6 @@ impl MasixRuntime {
                     edit_message_id: None,
                     inline_keyboard: None,
                     chat_action: Some("typing".to_string()),
-                    draft_id: None,
                 });
                 tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
             }
@@ -7434,5 +8698,127 @@ impl MasixRuntime {
             lines.push(format!("• {}", name));
         }
         lines.join("\n")
+    }
+
+    async fn render_runtime_capabilities(
+        config: &Config,
+        account_tag: Option<&str>,
+        permission: PermissionLevel,
+        channel: &str,
+        mcp_client: &Option<Arc<Mutex<McpClient>>>,
+        admin_only_modules: &HashSet<String>,
+    ) -> String {
+        let runtime_access =
+            Self::runtime_tool_access_for_message(config, account_tag, channel, permission);
+        let tools = if runtime_access.is_enabled() {
+            let all = Self::get_mcp_tools(mcp_client).await;
+            let filtered = runtime_access.filter_tools(all);
+            Self::filter_visible_tools_by_permission(filtered, admin_only_modules, permission)
+        } else {
+            Vec::new()
+        };
+
+        let mut names: Vec<String> = tools.iter().map(|t| t.function.name.clone()).collect();
+        names.sort();
+        names.dedup();
+
+        let role = match permission {
+            PermissionLevel::Admin => "admin",
+            PermissionLevel::User => "user",
+            PermissionLevel::Readonly => "readonly",
+            PermissionLevel::None => "none",
+        };
+
+        let mut lines = vec![
+            "Runtime capabilities (live):".to_string(),
+            format!("role: {}", role),
+            format!("channel: {}", channel),
+            String::new(),
+        ];
+
+        if names.is_empty() {
+            lines.push("runtime_tools: none".to_string());
+        } else {
+            lines.push(format!("runtime_tools: {}", names.len()));
+            for name in names {
+                lines.push(format!("- {}", name));
+            }
+        }
+
+        lines.push(String::new());
+        lines.push(
+            "commands: /help /whoiam /provider /model /cron /termux /capabilities".to_string(),
+        );
+        if permission == PermissionLevel::Admin {
+            lines
+                .push("admin_commands: /admin /groups /send /plugin /mcp /tools /exec".to_string());
+        }
+
+        lines.join("\n")
+    }
+
+    fn is_capabilities_query(normalized_text: &str) -> bool {
+        let text = normalized_text.trim();
+        if text.is_empty() || text.starts_with('/') {
+            return false;
+        }
+
+        matches!(
+            text,
+            "what can you do"
+                | "what can u do"
+                | "what tools do you have"
+                | "which tools do you have"
+                | "cosa puoi fare"
+                | "cosa sai fare"
+                | "quali tool hai"
+                | "quali strumenti hai"
+                | "capabilities"
+        )
+    }
+
+    fn filter_visible_tools_by_permission(
+        tools: Vec<ToolDefinition>,
+        admin_only_modules: &HashSet<String>,
+        permission: PermissionLevel,
+    ) -> Vec<ToolDefinition> {
+        if permission == PermissionLevel::Admin {
+            return tools;
+        }
+        tools
+            .into_iter()
+            .filter(|tool| !is_admin_only_tool(&tool.function.name, admin_only_modules))
+            .collect()
+    }
+
+    fn should_stream_telegram_response(
+        config: &Config,
+        account_tag: Option<&str>,
+        envelope: &Envelope,
+    ) -> bool {
+        if envelope.channel != "telegram" {
+            return false;
+        }
+        let chat_id = match envelope.chat_id {
+            Some(value) => value,
+            None => return false,
+        };
+        let from_user_id = envelope
+            .payload
+            .get("from_user_id")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_default();
+        if from_user_id != 0 && from_user_id == chat_id {
+            return true;
+        }
+
+        let text = match &envelope.kind {
+            MessageKind::Message { text, .. } => text.as_str(),
+            _ => return false,
+        };
+        let Some(account) = Self::get_telegram_account(config, account_tag) else {
+            return false;
+        };
+        Self::is_bot_tagged(text, account)
     }
 }

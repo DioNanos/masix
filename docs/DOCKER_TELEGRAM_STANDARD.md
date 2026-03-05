@@ -44,8 +44,11 @@ Registration state:
 
 ## 5) Policy defaults
 
-- `group_mode = "all"`
-- `auto_register_users = true`
+- `dm_policy = "pairing"`
+- `access_mode = "assistant_autoregister"`
+- `group_policy = "allowlist"`
+- `group_require_mention = true`
+- `group_allow_known_untagged = false`
 - `notify_admin_on_new_user = true`
 - `user_tools_mode = "none"`
 - `user_allowed_tools = []`
@@ -61,4 +64,3 @@ Admins can later grant user tools via Telegram:
 - no Linux capabilities,
 - no-new-privileges,
 - writable only `/data` and `/tmp`.
-

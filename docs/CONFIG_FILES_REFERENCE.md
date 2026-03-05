@@ -24,16 +24,16 @@ Streaming quick example (Telegram progressive output):
 ```toml
 [core.streaming]
 enabled = true
-mode = "telegram_draft" # off | telegram_draft | telegram_chunked
+mode = "telegram_chunked" # off | telegram_edit | telegram_chunked
 flush_interval_ms = 900
 max_message_edits = 20
 finalize_timeout_secs = 10
 ```
 
 Notes:
-- `telegram_draft` uses Telegram Bot API `sendMessageDraft` for private chats.
-- `telegram_chunked` is the portable fallback for non-private chats.
-- `telegram_edit` remains accepted for backward compatibility, but is deprecated.
+- `telegram_edit` updates a single message progressively (legacy-compatible mode).
+- `telegram_chunked` emits chunked responses and is the safe default.
+- Streaming is runtime-scoped (DM or tagged group, based on policy).
 
 MCP server timeout controls:
 - `timeout_secs`
@@ -66,6 +66,8 @@ Prefer CLI commands to change state. Do not edit generated runtime files manuall
 ## 6) Telegram Registration Controls
 
 For each `[[telegram.accounts]]`:
-- `auto_register_users` enables private-chat auto-registration when `group_mode = "all"`.
+- `access_mode = "assistant_autoregister"` enables private-chat auto-registration flow.
+- `dm_policy` and `group_policy` define baseline gate behavior.
+- `group_require_mention` and `group_allow_known_untagged` refine group handling.
 - `notify_admin_on_new_user` notifies admins on first auto-registration event.
 - `new_user_welcome_message` sends a one-time welcome text to newly registered users.

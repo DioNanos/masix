@@ -4,6 +4,8 @@ Official Termux package for MasiX (MIT).
 
 MasiX is an AI-friendly modular assistant runtime in Rust, optimized for smartphone (Termux/Android) and compatible with Linux/macOS.
 
+Current package line: `0.3.7`.
+
 ## Function Summary
 
 - Telegram bot automation with interactive inline menus

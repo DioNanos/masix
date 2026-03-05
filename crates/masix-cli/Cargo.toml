@@ -16,8 +16,6 @@ full = ["stt"]
 minimal = []
 stt = ["masix-core/stt"]
 sms = ["masix-core/sms"]
-whatsapp = ["masix-core/whatsapp"]
-whatsapp-ro = ["whatsapp"]
 
 [dependencies]
 # Internal - core (always required)

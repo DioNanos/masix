@@ -31,7 +31,7 @@ const NPM_PACKAGE_NAME: &str = "@mmmbuto/masix";
 const UPDATE_CACHE_FILE: &str = ".masix/.update-check";
 const UPDATE_CACHE_DURATION_SECS: u64 = 24 * 60 * 60;
 const WHISPER_MODEL_URL_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
-const MASIX_GITHUB_RELEASES_BASE_URL: &str = "https://github.com/DioNanos/masix/releases/download";
+const MASIX_GITHUB_RELEASES_BASE_URL: &str = "https://github.com/DioNanos/MasiX/releases/download";
 const MASIX_STT_PREBUILT_ASSET_PREFIX: &str = "masix-stt-whisper-cli";
 const AI_CONTRACT_SCHEMA_VERSION: &str = "masix.ai.contract.v1";
 const AI_DEFAULT_PLUGIN_SERVER_URL: &str = "https://masix.wellanet.dev";
@@ -132,13 +132,6 @@ enum Commands {
     Telegram {
         #[command(subcommand)]
         action: TelegramCommands,
-    },
-
-    #[cfg(feature = "whatsapp")]
-    /// WhatsApp commands
-    Whatsapp {
-        #[command(subcommand)]
-        action: WhatsappCommands,
     },
 
     #[cfg(feature = "sms")]
@@ -273,15 +266,6 @@ enum TelegramCommands {
         #[arg(short, long)]
         json: bool,
     },
-}
-
-#[cfg(feature = "whatsapp")]
-#[derive(Subcommand)]
-enum WhatsappCommands {
-    /// Start WhatsApp adapter
-    Start,
-    /// Login to WhatsApp (QR code)
-    Login,
 }
 
 #[cfg(feature = "sms")]
@@ -428,6 +412,9 @@ enum ConfigCommands {
         /// Group mode: all|users_only|tag_only|users_or_tag|listen_only in non-interactive mode
         #[arg(long)]
         group_mode: Option<String>,
+        /// Access mode: admin_only_registered|assistant_autoregister|group_tag_response|group_profiler|group_all_response
+        #[arg(long)]
+        access_mode: Option<String>,
         /// Auto-register users in non-interactive mode
         #[arg(long, action = clap::ArgAction::Set)]
         auto_register_users: Option<bool>,
@@ -563,7 +550,7 @@ enum PluginCommands {
     },
     /// Store and validate a plugin key for private modules
     Auth {
-        /// Plugin id to validate against (e.g. whatsapp-ro)
+        /// Plugin id to validate against (e.g. masix-whatsapp-business)
         plugin: String,
         /// License / access key
         #[arg(short, long)]
@@ -942,42 +929,6 @@ async fn main() -> Result<()> {
             }
         },
 
-        #[cfg(feature = "whatsapp")]
-        Commands::Whatsapp { action } => {
-            #[cfg(feature = "whatsapp")]
-            {
-                match action {
-                    WhatsappCommands::Start => {
-                        println!("Starting WhatsApp adapter...");
-                        let config = load_config(cli.config)?;
-                        if let Some(whatsapp_config) = &config.whatsapp {
-                            if whatsapp_config.enabled {
-                                let adapter =
-                                    masix_whatsapp::WhatsAppAdapter::from_config(whatsapp_config);
-                                if let Err(e) = adapter.start().await {
-                                    eprintln!("WhatsApp adapter error: {}", e);
-                                }
-                            } else {
-                                eprintln!("WhatsApp is not enabled in config");
-                            }
-                        }
-                    }
-                    WhatsappCommands::Login => {
-                        println!("WhatsApp login flow is handled by the transport bridge.");
-                        println!(
-                            "Run `masix whatsapp start` and scan the QR when bridge prints it."
-                        );
-                        println!("Mode is read-only: outbound send is disabled by design.");
-                    }
-                }
-            }
-            #[cfg(not(feature = "whatsapp"))]
-            {
-                let _ = action;
-                eprintln!("WhatsApp support not compiled in. Rebuild with --features whatsapp");
-            }
-        }
-
         #[cfg(feature = "sms")]
         Commands::Sms { action } => {
             #[cfg(feature = "sms")]
@@ -1265,6 +1216,7 @@ async fn main() -> Result<()> {
                 remove_readonly,
                 allowed_chats,
                 group_mode,
+                access_mode,
                 auto_register_users,
                 notify_admin_on_new_user,
                 new_user_welcome_message,
@@ -1288,6 +1240,7 @@ async fn main() -> Result<()> {
                     || remove_readonly.is_some()
                     || allowed_chats.is_some()
                     || group_mode.is_some()
+                    || access_mode.is_some()
                     || auto_register_users.is_some()
                     || notify_admin_on_new_user.is_some()
                     || new_user_welcome_message.is_some()
@@ -1318,6 +1271,7 @@ async fn main() -> Result<()> {
                             remove_readonly,
                             allowed_chats,
                             group_mode,
+                            access_mode,
                             auto_register_users,
                             notify_admin_on_new_user,
                             new_user_welcome_message,
@@ -1611,13 +1565,6 @@ fn print_redacted_config(config: &Config) -> Result<()> {
                 *api_key = json!("***REDACTED***");
             }
         }
-    }
-
-    if let Some(secret) = value
-        .get_mut("whatsapp")
-        .and_then(|w| w.get_mut("ingress_shared_secret"))
-    {
-        *secret = json!("***REDACTED***");
     }
 
     println!("{}", serde_json::to_string_pretty(&value)?);
@@ -2882,8 +2829,15 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
                     isolated: true,
                     shared_memory_with: vec![],
                     allow_self_memory_edit: true,
-                    group_mode: masix_config::GroupMode::All,
-                    auto_register_users: false,
+                    dm_policy: masix_config::DmPolicy::Allowlist,
+                    dm_allow_from: vec![],
+                    access_mode: None,
+                    group_policy: masix_config::GroupPolicy::Open,
+                    group_require_mention: false,
+                    group_allow_known_untagged: true,
+                    group_allow_from: vec![],
+                    groups: std::collections::BTreeMap::new(),
+                    pairing: Default::default(),
                     notify_admin_on_new_user: true,
                     new_user_welcome_message: None,
                     register_to_file: None,
@@ -3030,136 +2984,6 @@ fn run_config_wizard(config_path: Option<String>) -> Result<()> {
         println!("✓ MCP enabled (filesystem + memory servers)");
     }
 
-    #[cfg(feature = "whatsapp")]
-    {
-        // WhatsApp (read-only)
-        println!("\n── WhatsApp Read-Only Setup ──");
-        let existing_whatsapp = config.whatsapp.clone();
-        let whatsapp_enabled_default = existing_whatsapp
-            .as_ref()
-            .map(|w| w.enabled)
-            .unwrap_or(false);
-        if prompt_confirm(
-            "Enable WhatsApp read-only listener?",
-            whatsapp_enabled_default,
-        )? {
-            let existing = existing_whatsapp.unwrap_or(masix_config::WhatsappConfig {
-                enabled: false,
-                read_only: true,
-                transport_path: None,
-                ingress_shared_secret: None,
-                max_message_chars: None,
-                allowed_senders: Vec::new(),
-                admins: Vec::new(),
-                users: Vec::new(),
-                forward_to_telegram_chat_id: None,
-                forward_to_telegram_account_tag: None,
-                forward_prefix: None,
-                accounts: Vec::new(),
-            });
-
-            let transport_default = existing
-                .transport_path
-                .as_deref()
-                .unwrap_or("crates/masix-whatsapp/whatsapp-transport.js");
-            let transport_path = prompt_input("WhatsApp transport path", transport_default)?;
-
-            let max_chars_default = existing
-                .max_message_chars
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "4000".to_string());
-            let max_chars_input = prompt_input("Max inbound message chars", &max_chars_default)?;
-            let max_message_chars = max_chars_input
-                .trim()
-                .parse::<usize>()
-                .map_err(|_| anyhow!("Invalid max chars '{}'", max_chars_input))?;
-
-            let allowed_default = existing.allowed_senders.join(",");
-            let allowed_input = prompt_input(
-                "Allowed sender IDs (comma-separated, empty = allow all)",
-                &allowed_default,
-            )?;
-            let allowed_senders = parse_csv_list(&allowed_input);
-
-            let secret_default = existing.ingress_shared_secret.unwrap_or_default();
-            let secret_input = prompt_input(
-                "Ingress shared secret (empty = no signature check)",
-                &secret_default,
-            )?;
-            let ingress_shared_secret = if secret_input.trim().is_empty() {
-                None
-            } else {
-                Some(secret_input.trim().to_string())
-            };
-
-            let forward_default = existing.forward_to_telegram_chat_id.is_some();
-            let (forward_to_telegram_chat_id, forward_to_telegram_account_tag, forward_prefix) =
-                if prompt_confirm("Forward WhatsApp summaries to Telegram?", forward_default)? {
-                    let chat_default = existing
-                        .forward_to_telegram_chat_id
-                        .map(|value| value.to_string())
-                        .unwrap_or_default();
-                    let chat_id_input =
-                        prompt_input("Telegram chat id for forwarding", &chat_default)?;
-                    let chat_id = chat_id_input
-                        .trim()
-                        .parse::<i64>()
-                        .map_err(|_| anyhow!("Invalid Telegram chat id '{}'", chat_id_input))?;
-
-                    let account_tag_default =
-                        existing.forward_to_telegram_account_tag.unwrap_or_default();
-                    let account_tag_input = prompt_input(
-                        "Telegram account tag for forwarding (empty = first account)",
-                        &account_tag_default,
-                    )?;
-                    let account_tag = if account_tag_input.trim().is_empty() {
-                        None
-                    } else {
-                        Some(account_tag_input.trim().to_string())
-                    };
-
-                    let prefix_default = existing
-                        .forward_prefix
-                        .unwrap_or_else(|| "WhatsApp Alert".to_string());
-                    let prefix_input = prompt_input("Forward prefix", &prefix_default)?;
-                    let prefix = if prefix_input.trim().is_empty() {
-                        None
-                    } else {
-                        Some(prefix_input.trim().to_string())
-                    };
-                    (Some(chat_id), account_tag, prefix)
-                } else {
-                    (None, None, None)
-                };
-
-            config.whatsapp = Some(masix_config::WhatsappConfig {
-                enabled: true,
-                read_only: true,
-                transport_path: if transport_path.trim().is_empty() {
-                    None
-                } else {
-                    Some(transport_path.trim().to_string())
-                },
-                ingress_shared_secret,
-                max_message_chars: Some(max_message_chars),
-                allowed_senders,
-                admins: existing.admins.clone(),
-                users: existing.users.clone(),
-                forward_to_telegram_chat_id,
-                forward_to_telegram_account_tag,
-                forward_prefix,
-                accounts: existing.accounts,
-            });
-            println!("✓ WhatsApp read-only listener configured");
-        } else if let Some(existing) = existing_whatsapp {
-            config.whatsapp = Some(masix_config::WhatsappConfig {
-                enabled: false,
-                ..existing
-            });
-            println!("✓ WhatsApp listener disabled");
-        }
-    }
-
     #[cfg(feature = "sms")]
     configure_sms_watcher(&mut config)?;
     configure_local_stt(&mut config)?;
@@ -3212,6 +3036,7 @@ struct TelegramDirectUpdate {
     remove_readonly: Option<String>,
     allowed_chats: Option<String>,
     group_mode: Option<String>,
+    access_mode: Option<String>,
     auto_register_users: Option<bool>,
     notify_admin_on_new_user: Option<bool>,
     new_user_welcome_message: Option<String>,
@@ -3279,8 +3104,15 @@ fn run_telegram_non_interactive_update(
                 isolated: true,
                 shared_memory_with: Vec::new(),
                 allow_self_memory_edit: true,
-                group_mode: masix_config::GroupMode::All,
-                auto_register_users: false,
+                dm_policy: masix_config::DmPolicy::Allowlist,
+                dm_allow_from: Vec::new(),
+                access_mode: None,
+                group_policy: masix_config::GroupPolicy::Open,
+                group_require_mention: false,
+                group_allow_known_untagged: true,
+                group_allow_from: Vec::new(),
+                groups: std::collections::BTreeMap::new(),
+                pairing: Default::default(),
                 notify_admin_on_new_user: true,
                 new_user_welcome_message: None,
                 register_to_file: None,
@@ -3332,11 +3164,28 @@ fn run_telegram_non_interactive_update(
         }
 
         if let Some(mode) = update.group_mode {
-            account.group_mode = parse_group_mode(&mode)?;
+            let parsed = parse_group_mode(&mode)?;
+            apply_legacy_group_mode(account, parsed);
+        }
+
+        if let Some(mode) = update.access_mode {
+            account.access_mode = Some(parse_access_mode(&mode)?);
         }
 
         if let Some(auto) = update.auto_register_users {
-            account.auto_register_users = auto;
+            account.dm_policy = if auto {
+                masix_config::DmPolicy::Pairing
+            } else {
+                masix_config::DmPolicy::Allowlist
+            };
+            if auto {
+                account.access_mode = Some(masix_config::AccessMode::AssistantAutoregister);
+            } else if matches!(
+                account.access_mode,
+                Some(masix_config::AccessMode::AssistantAutoregister)
+            ) {
+                account.access_mode = Some(masix_config::AccessMode::AdminOnlyRegistered);
+            }
         }
 
         if let Some(notify) = update.notify_admin_on_new_user {
@@ -4768,8 +4617,13 @@ fn print_telegram_accounts_and_channels(config: &Config) {
         let profile = account.bot_profile.as_deref().unwrap_or("(none)");
         println!("  {:2}. tag={} profile={}", index + 1, account_tag, profile);
         println!(
-            "      auto_register={} notify_admin_on_new_user={} welcome_message={} register_file={}",
-            account.auto_register_users,
+            "      access_mode={} dm_policy={:?} group_mode={} notify_admin_on_new_user={} welcome_message={} register_file={}",
+            account
+                .access_mode
+                .map(|m| access_mode_label(m).to_string())
+                .unwrap_or_else(|| "(none)".to_string()),
+            account.dm_policy,
+            detect_legacy_group_mode(account).as_str(),
             account.notify_admin_on_new_user,
             if account.new_user_welcome_message.is_some() {
                 "set"
@@ -4981,17 +4835,15 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
     println!("  5. listen_only  - Listen only, respond when tagged by admin");
     let group_mode_input = prompt_input("Group mode (1-5, default: all)", "")?;
     let group_mode = match group_mode_input.trim() {
-        "2" | "users_only" => masix_config::GroupMode::UsersOnly,
-        "3" | "tag_only" => masix_config::GroupMode::TagOnly,
-        "4" | "users_or_tag" => masix_config::GroupMode::UsersOrTag,
-        "5" | "listen_only" => masix_config::GroupMode::ListenOnly,
-        _ => masix_config::GroupMode::All,
+        "2" | "users_only" => LegacyGroupMode::UsersOnly,
+        "3" | "tag_only" => LegacyGroupMode::TagOnly,
+        "4" | "users_or_tag" => LegacyGroupMode::UsersOrTag,
+        "5" | "listen_only" => LegacyGroupMode::ListenOnly,
+        _ => LegacyGroupMode::All,
     };
     if matches!(
         group_mode,
-        masix_config::GroupMode::TagOnly
-            | masix_config::GroupMode::UsersOrTag
-            | masix_config::GroupMode::ListenOnly
+        LegacyGroupMode::TagOnly | LegacyGroupMode::UsersOrTag | LegacyGroupMode::ListenOnly
     ) && bot_name.trim().is_empty()
     {
         if let Some(detected) = detected_bot_username.as_deref() {
@@ -5007,12 +4859,10 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
         }
     }
 
-    let auto_register = group_mode == masix_config::GroupMode::All
+    let auto_register = matches!(group_mode, LegacyGroupMode::All)
         && prompt_confirm("Auto-register unknown users?", false)?;
-    let notify_admin_on_new_user = prompt_confirm(
-        "Notify admins when a new user is auto-registered?",
-        true,
-    )?;
+    let notify_admin_on_new_user =
+        prompt_confirm("Notify admins when a new user is auto-registered?", true)?;
     let new_user_welcome_default = existing
         .and_then(|account| account.new_user_welcome_message.clone())
         .unwrap_or_default();
@@ -5030,7 +4880,7 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
         Some(register_to_file_input.trim().to_string())
     };
 
-    let account = masix_config::TelegramAccount {
+    let mut account = masix_config::TelegramAccount {
         bot_token,
         bot_name: if bot_name.trim().is_empty() {
             None
@@ -5049,8 +4899,19 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
         isolated: true,
         shared_memory_with: vec![],
         allow_self_memory_edit: true,
-        group_mode,
-        auto_register_users: auto_register,
+        dm_policy: if auto_register {
+            masix_config::DmPolicy::Pairing
+        } else {
+            masix_config::DmPolicy::Allowlist
+        },
+        dm_allow_from: vec![],
+        access_mode: None,
+        group_policy: masix_config::GroupPolicy::Open,
+        group_require_mention: false,
+        group_allow_known_untagged: true,
+        group_allow_from: vec![],
+        groups: std::collections::BTreeMap::new(),
+        pairing: Default::default(),
         notify_admin_on_new_user,
         new_user_welcome_message: if new_user_welcome_input.trim().is_empty() {
             None
@@ -5061,6 +4922,10 @@ fn run_telegram_wizard(config_path: Option<String>) -> Result<()> {
         user_tools_mode,
         user_allowed_tools,
     };
+    apply_legacy_group_mode(&mut account, group_mode);
+    if auto_register {
+        account.access_mode = Some(masix_config::AccessMode::AssistantAutoregister);
+    }
 
     let (replaced, stored_tag) = upsert_telegram_account(&mut config, account);
     config.validate()?;
@@ -6006,17 +5871,115 @@ fn parse_provider_list(input: &str) -> Vec<String> {
     parse_csv_list(input)
 }
 
-fn parse_group_mode(input: &str) -> Result<masix_config::GroupMode> {
+#[derive(Debug, Clone, Copy)]
+enum LegacyGroupMode {
+    All,
+    UsersOnly,
+    TagOnly,
+    UsersOrTag,
+    ListenOnly,
+}
+
+impl LegacyGroupMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::UsersOnly => "users_only",
+            Self::TagOnly => "tag_only",
+            Self::UsersOrTag => "users_or_tag",
+            Self::ListenOnly => "listen_only",
+        }
+    }
+}
+
+fn parse_group_mode(input: &str) -> Result<LegacyGroupMode> {
     match input.trim().to_lowercase().as_str() {
-        "all" | "1" => Ok(masix_config::GroupMode::All),
-        "users_only" | "2" => Ok(masix_config::GroupMode::UsersOnly),
-        "tag_only" | "3" => Ok(masix_config::GroupMode::TagOnly),
-        "users_or_tag" | "4" => Ok(masix_config::GroupMode::UsersOrTag),
-        "listen_only" | "5" => Ok(masix_config::GroupMode::ListenOnly),
+        "all" | "1" => Ok(LegacyGroupMode::All),
+        "users_only" | "2" => Ok(LegacyGroupMode::UsersOnly),
+        "tag_only" | "3" => Ok(LegacyGroupMode::TagOnly),
+        "users_or_tag" | "4" => Ok(LegacyGroupMode::UsersOrTag),
+        "listen_only" | "5" => Ok(LegacyGroupMode::ListenOnly),
         value => anyhow::bail!(
             "Invalid group mode '{}'. Use all|users_only|tag_only|users_or_tag|listen_only",
             value
         ),
+    }
+}
+
+fn parse_access_mode(input: &str) -> Result<masix_config::AccessMode> {
+    match input.trim().to_lowercase().as_str() {
+        "admin_only_registered" | "1" => Ok(masix_config::AccessMode::AdminOnlyRegistered),
+        "assistant_autoregister" | "2" => Ok(masix_config::AccessMode::AssistantAutoregister),
+        "group_tag_response" | "3" => Ok(masix_config::AccessMode::GroupTagResponse),
+        "group_profiler" | "4" => Ok(masix_config::AccessMode::GroupProfiler),
+        "group_all_response" | "5" => Ok(masix_config::AccessMode::GroupAllResponse),
+        value => anyhow::bail!(
+            "Invalid access mode '{}'. Use admin_only_registered|assistant_autoregister|group_tag_response|group_profiler|group_all_response",
+            value
+        ),
+    }
+}
+
+fn access_mode_label(mode: masix_config::AccessMode) -> &'static str {
+    match mode {
+        masix_config::AccessMode::AdminOnlyRegistered => "admin_only_registered",
+        masix_config::AccessMode::AssistantAutoregister => "assistant_autoregister",
+        masix_config::AccessMode::GroupTagResponse => "group_tag_response",
+        masix_config::AccessMode::GroupProfiler => "group_profiler",
+        masix_config::AccessMode::GroupAllResponse => "group_all_response",
+    }
+}
+
+fn apply_legacy_group_mode(account: &mut masix_config::TelegramAccount, mode: LegacyGroupMode) {
+    match mode {
+        LegacyGroupMode::All => {
+            account.access_mode = Some(masix_config::AccessMode::GroupAllResponse);
+            account.group_policy = masix_config::GroupPolicy::Open;
+            account.group_require_mention = false;
+            account.group_allow_known_untagged = true;
+        }
+        LegacyGroupMode::UsersOnly => {
+            account.access_mode = Some(masix_config::AccessMode::AdminOnlyRegistered);
+            account.group_policy = masix_config::GroupPolicy::Allowlist;
+            account.group_require_mention = false;
+            account.group_allow_known_untagged = true;
+        }
+        LegacyGroupMode::TagOnly | LegacyGroupMode::ListenOnly => {
+            account.access_mode = Some(masix_config::AccessMode::GroupTagResponse);
+            account.group_policy = masix_config::GroupPolicy::Open;
+            account.group_require_mention = true;
+            account.group_allow_known_untagged = false;
+        }
+        LegacyGroupMode::UsersOrTag => {
+            account.access_mode = Some(masix_config::AccessMode::AssistantAutoregister);
+            account.group_policy = masix_config::GroupPolicy::Open;
+            account.group_require_mention = true;
+            account.group_allow_known_untagged = true;
+        }
+    }
+}
+
+fn detect_legacy_group_mode(account: &masix_config::TelegramAccount) -> LegacyGroupMode {
+    if let Some(mode) = account.access_mode {
+        return match mode {
+            masix_config::AccessMode::AdminOnlyRegistered => LegacyGroupMode::UsersOnly,
+            masix_config::AccessMode::AssistantAutoregister => LegacyGroupMode::UsersOrTag,
+            masix_config::AccessMode::GroupTagResponse => LegacyGroupMode::TagOnly,
+            masix_config::AccessMode::GroupProfiler => LegacyGroupMode::ListenOnly,
+            masix_config::AccessMode::GroupAllResponse => LegacyGroupMode::All,
+        };
+    }
+
+    if !account.group_require_mention {
+        if account.group_policy == masix_config::GroupPolicy::Allowlist {
+            LegacyGroupMode::UsersOnly
+        } else {
+            LegacyGroupMode::All
+        }
+    } else if account.group_allow_known_untagged {
+        LegacyGroupMode::UsersOrTag
+    } else {
+        LegacyGroupMode::TagOnly
     }
 }
 
@@ -7036,7 +6999,10 @@ async fn run_doctor(
                 );
             }
             None => {
-                println!("✗ Plugin auth store: invalid JSON ({})", auth_path.display());
+                println!(
+                    "✗ Plugin auth store: invalid JSON ({})",
+                    auth_path.display()
+                );
                 failed += 1;
             }
         }
@@ -7067,12 +7033,18 @@ async fn run_doctor(
                 );
             }
             None => {
-                println!("✗ Installed plugins registry: invalid JSON ({})", installed_path.display());
+                println!(
+                    "✗ Installed plugins registry: invalid JSON ({})",
+                    installed_path.display()
+                );
                 failed += 1;
             }
         }
     } else {
-        println!("! Installed plugins registry: missing ({})", installed_path.display());
+        println!(
+            "! Installed plugins registry: missing ({})",
+            installed_path.display()
+        );
     }
 
     if !offline {
@@ -7185,8 +7157,15 @@ mod tests {
             isolated: true,
             shared_memory_with: vec![],
             allow_self_memory_edit: true,
-            group_mode: masix_config::GroupMode::All,
-            auto_register_users: false,
+            dm_policy: masix_config::DmPolicy::Allowlist,
+            dm_allow_from: vec![],
+            access_mode: None,
+            group_policy: masix_config::GroupPolicy::Open,
+            group_require_mention: false,
+            group_allow_known_untagged: true,
+            group_allow_from: vec![],
+            groups: std::collections::BTreeMap::new(),
+            pairing: Default::default(),
             notify_admin_on_new_user: true,
             new_user_welcome_message: None,
             register_to_file: None,

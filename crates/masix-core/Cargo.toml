@@ -10,8 +10,6 @@ license.workspace = true
 default = []
 stt = []
 sms = []
-whatsapp = []
-whatsapp-ro = ["whatsapp"]
 
 [dependencies]
 # Internal

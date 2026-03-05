@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.7 - 2026-03-05
+
+- Ported stable runtime delta from internal DEV line:
+  - access mode + scoped memory policy hardening
+  - telegram capability visibility and stream scope enforcement
+  - policy-v2 runtime validation and related test coverage improvements
+- Kept MIT track sanitized/aligned for public release metadata (`README`, npm package metadata).
+- Verified MIT free offline package track remains bundled (`discovery`, `codex-backend`, `codex-tools`).
+
 ## 0.3.6 - 2026-03-03
 
 - Fixed Telegram streaming UX: removed placeholder preamble and added real progressive updates path.

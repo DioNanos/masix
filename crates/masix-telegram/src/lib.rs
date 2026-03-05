@@ -48,6 +48,10 @@ pub struct TelegramMessage {
     pub from: Option<TelegramUser>,
     #[serde(default)]
     pub reply_to_message: Option<Box<TelegramReplyToMessage>>,
+    #[serde(default)]
+    pub entities: Option<Vec<TelegramMessageEntity>>,
+    #[serde(default)]
+    pub caption_entities: Option<Vec<TelegramMessageEntity>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +120,14 @@ pub struct TelegramChat {
     pub id: i64,
     #[serde(rename = "type")]
     pub chat_type: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub first_name: Option<String>,
+    #[serde(default)]
+    pub last_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +147,18 @@ pub struct TelegramUser {
 pub struct TelegramReplyToMessage {
     pub message_id: i64,
     pub from: Option<TelegramUser>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramMessageEntity {
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    #[serde(default)]
+    pub offset: Option<i64>,
+    #[serde(default)]
+    pub length: Option<i64>,
+    #[serde(default)]
+    pub user: Option<TelegramUser>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -612,6 +636,7 @@ impl TelegramAdapter {
             { "command": "language", "description": "Set language" },
             { "command": "provider", "description": "Manage provider" },
             { "command": "model", "description": "Set model" },
+            { "command": "capabilities", "description": "Show live capabilities" },
             { "command": "admin", "description": "Manage ACL and user tools" },
             { "command": "mcp", "description": "Show MCP status" },
             { "command": "tools", "description": "List runtime tools" },
@@ -710,15 +735,49 @@ impl TelegramAdapter {
                         if let Some(username) = from.username.as_ref() {
                             obj.insert("from_username".to_string(), serde_json::json!(username));
                         }
-                        obj.insert("from_first_name".to_string(), serde_json::json!(from.first_name));
+                        obj.insert(
+                            "from_first_name".to_string(),
+                            serde_json::json!(from.first_name),
+                        );
                         if let Some(last_name) = from.last_name.as_ref() {
                             obj.insert("from_last_name".to_string(), serde_json::json!(last_name));
+                        }
+                        let display_name = format!(
+                            "{}{}",
+                            from.first_name.clone().unwrap_or_default(),
+                            from.last_name
+                                .as_ref()
+                                .map(|v| format!(" {}", v))
+                                .unwrap_or_default()
+                        )
+                        .trim()
+                        .to_string();
+                        if !display_name.is_empty() {
+                            obj.insert(
+                                "from_display_name".to_string(),
+                                serde_json::json!(display_name),
+                            );
                         }
                     }
                 }
                 if let Some(from_user_id) = from_user_id {
                     if let Some(obj) = payload.as_object_mut() {
                         obj.insert("from_user_id".to_string(), serde_json::json!(from_user_id));
+                    }
+                }
+                if let Some(obj) = payload.as_object_mut() {
+                    if let Some(title) = message.chat.title.as_ref() {
+                        obj.insert("chat_title".to_string(), serde_json::json!(title));
+                    }
+                    if let Some(username) = message.chat.username.as_ref() {
+                        obj.insert("chat_username".to_string(), serde_json::json!(username));
+                    }
+                    let mentions = Self::extract_message_mentions(message, &text);
+                    if !mentions.is_empty() {
+                        obj.insert(
+                            "mentioned_usernames".to_string(),
+                            serde_json::json!(mentions),
+                        );
                     }
                 }
                 if let Some(media) = Self::extract_media_payload(message) {
@@ -745,6 +804,48 @@ impl TelegramAdapter {
                 info!("No event bus configured, message not forwarded");
             }
         }
+    }
+
+    fn extract_message_mentions(message: &TelegramMessage, text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+
+        // Raw @username scan (works for plain mentions in message/caption text).
+        for token in text.split_whitespace() {
+            if let Some(raw) = token.strip_prefix('@') {
+                let candidate = raw
+                    .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .to_lowercase();
+                if candidate.len() >= 3
+                    && candidate.len() <= 32
+                    && candidate
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                    && seen.insert(candidate.clone())
+                {
+                    out.push(candidate);
+                }
+            }
+        }
+
+        // text_mention entities can carry user object even without @username.
+        for entities in [&message.entities, &message.caption_entities] {
+            let Some(items) = entities else { continue };
+            for item in items {
+                if item.entity_type == "text_mention" {
+                    if let Some(user) = item.user.as_ref() {
+                        if let Some(username) = user.username.as_ref() {
+                            let normalized = username.trim().trim_start_matches('@').to_lowercase();
+                            if normalized.len() >= 3 && seen.insert(normalized.clone()) {
+                                out.push(normalized);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        out
     }
 
     fn extract_media_payload(message: &TelegramMessage) -> Option<serde_json::Value> {
@@ -948,8 +1049,15 @@ mod tests {
             isolated: true,
             shared_memory_with: vec![],
             allow_self_memory_edit: true,
-            group_mode: masix_config::GroupMode::All,
-            auto_register_users: false,
+            dm_policy: masix_config::DmPolicy::Allowlist,
+            dm_allow_from: vec![],
+            access_mode: None,
+            group_policy: masix_config::GroupPolicy::Open,
+            group_require_mention: false,
+            group_allow_known_untagged: false,
+            group_allow_from: vec![],
+            groups: std::collections::BTreeMap::new(),
+            pairing: Default::default(),
             notify_admin_on_new_user: true,
             new_user_welcome_message: None,
             register_to_file: None,

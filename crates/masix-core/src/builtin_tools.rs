@@ -106,6 +106,60 @@ pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             tool_type: "function".to_string(),
             function: masix_providers::FunctionDefinition {
+                name: "memory_read".to_string(),
+                description: "Read scoped memory content. Scopes: user_private, shared_user_kb, admin_kb.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "description": "Memory scope: user_private | shared_user_kb | admin_kb"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Relative file path inside scope (defaults to MEMORY.md)"
+                        },
+                        "target_user_id": {
+                            "type": "integer",
+                            "description": "Optional target user id for admin reads in user_private scope"
+                        }
+                    },
+                    "required": ["scope"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: masix_providers::FunctionDefinition {
+                name: "memory_write".to_string(),
+                description: "Write scoped memory content with automatic backup-before-write. Scopes: user_private, shared_user_kb, admin_kb.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "description": "Memory scope: user_private | shared_user_kb | admin_kb"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Relative file path inside scope (defaults to MEMORY.md)"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "New content to write"
+                        },
+                        "target_user_id": {
+                            "type": "integer",
+                            "description": "Optional target user id for admin writes in user_private scope"
+                        }
+                    },
+                    "required": ["scope", "content"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: masix_providers::FunctionDefinition {
                 name: "web_fetch".to_string(),
                 description: "Fetch and extract text content from a web page. Returns cleaned text suitable for reading.".to_string(),
                 parameters: serde_json::json!({
@@ -136,13 +190,17 @@ pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
             tool_type: "function".to_string(),
             function: masix_providers::FunctionDefinition {
                 name: "cron".to_string(),
-                description: "Manage reminders for the current chat/account. Commands: 'list', 'cancel <id>', or natural language schedule like 'domani alle 9 \"Meeting\"'.".to_string(),
+                description: "Manage reminders. Commands: 'list', 'cancel <id>', or natural language schedule like 'domani alle 9 \"Meeting\"'. Optional `recipient` (chat id) is admin-only for targeting another chat/group.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "command": {
                             "type": "string",
                             "description": "Cron command body (without /cron prefix). Examples: 'list', 'cancel 12', 'domani alle 9 \"Meeting\"'"
+                        },
+                        "recipient": {
+                            "type": "string",
+                            "description": "Optional target Telegram chat_id (example: -1001234567890). Admin-only; defaults to current chat."
                         }
                     },
                     "required": ["command"]
@@ -170,6 +228,52 @@ pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "type": "object",
                     "properties": {},
                     "required": []
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: masix_providers::FunctionDefinition {
+                name: "telegram_send".to_string(),
+                description: "Send a Telegram message to a specific chat_id. Admin-only runtime action; useful to post in a group from DM context.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "chat_id": {
+                            "type": "string",
+                            "description": "Target Telegram chat_id (example: -1001234567890)"
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "Message text to send"
+                        }
+                    },
+                    "required": ["chat_id", "text"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: masix_providers::FunctionDefinition {
+                name: "admin_acl".to_string(),
+                description: "Admin-only runtime ACL management for Telegram users/groups. Actions: list, list_users, list_groups, add_user, remove_user, promote_admin, demote_user.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "description": "Action: list | list_users | list_groups | add_user | remove_user | promote_admin | demote_user"
+                        },
+                        "user": {
+                            "type": "string",
+                            "description": "Target user identifier: numeric ID or @username (for add/remove/promote/demote actions)"
+                        },
+                        "chat_id": {
+                            "type": "string",
+                            "description": "Optional Telegram chat_id filter for list_users"
+                        }
+                    },
+                    "required": ["action"]
                 }),
             },
         },
@@ -386,6 +490,14 @@ pub async fn execute_builtin_tool(
                 Err(e) => Ok(format!("Error listing directory: {}", e)),
             }
         }
+        "memory_read" => Ok(
+            "memory_read requires runtime context and is executed by the runtime coordinator."
+                .to_string(),
+        ),
+        "memory_write" => Ok(
+            "memory_write requires runtime context and is executed by the runtime coordinator."
+                .to_string(),
+        ),
         "web_fetch" => {
             let url = arguments["url"]
                 .as_str()
@@ -407,6 +519,14 @@ pub async fn execute_builtin_tool(
         ),
         "chat_context" => Ok(
             "chat_context tool requires runtime envelope context and is executed by the runtime coordinator."
+                .to_string(),
+        ),
+        "telegram_send" => Ok(
+            "telegram_send requires runtime envelope/outbound context and is executed by the runtime coordinator."
+                .to_string(),
+        ),
+        "admin_acl" => Ok(
+            "admin_acl requires runtime config/account context and is executed by the runtime coordinator."
                 .to_string(),
         ),
         "intent" => {
@@ -440,11 +560,15 @@ pub fn is_builtin_tool(tool_name: &str) -> bool {
             | "read_file"
             | "write_file"
             | "list_dir"
+            | "memory_read"
+            | "memory_write"
             | "web_fetch"
             | "device_info"
             | "cron"
             | "vision"
             | "chat_context"
+            | "telegram_send"
+            | "admin_acl"
             | "intent"
     );
     core_tools

@@ -71,7 +71,6 @@ pub struct OutboundMessage {
     pub text: String,
     pub reply_to: Option<i64>,
     pub edit_message_id: Option<i64>,
-    pub draft_id: Option<i64>,
     pub inline_keyboard: Option<Vec<Vec<InlineButton>>>,
     pub chat_action: Option<String>,
 }

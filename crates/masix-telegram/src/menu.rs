@@ -175,11 +175,11 @@ pub fn language_menu(lang: Language) -> (String, Vec<Vec<InlineButton>>) {
 
 pub fn help_text(lang: Language, is_admin: bool) -> String {
     let mut text = match lang {
-        Language::English => "📚 *Help - Available Commands*\n\n/start - Show main menu\n/menu - Show main menu\n/new - Reset conversation\n/help - Show this help\n/whoiam - Show user/chat IDs\n/language - Change language\n/provider - Manage LLM provider\n/model - Change model\n/cron - Manage reminders\n/termux - Termux tools\n\nJust send a message to chat with me!",
-        Language::Spanish => "📚 *Ayuda - Comandos Disponibles*\n\n/start - Mostrar menú principal\n/menu - Mostrar menú principal\n/new - Reiniciar conversación\n/help - Mostrar esta ayuda\n/whoiam - Mostrar IDs de usuario/chat\n/language - Cambiar idioma\n/provider - Gestionar proveedor LLM\n/model - Cambiar modelo\n/cron - Gestionar recordatorios\n/termux - Herramientas Termux\n\n¡Solo envía un mensaje para chatear conmigo!",
-        Language::Chinese => "📚 *帮助 - 可用命令*\n\n/start - 显示主菜单\n/menu - 显示主菜单\n/new - 重置对话\n/help - 显示帮助\n/whoiam - 查看用户/聊天ID\n/language - 更改语言\n/provider - 管理LLM提供商\n/model - 更改模型\n/cron - 管理提醒\n/termux - Termux工具\n\n只需发送消息与我聊天！",
-        Language::Russian => "📚 *Помощь - Доступные команды*\n\n/start - Показать главное меню\n/menu - Показать главное меню\n/new - Сбросить разговор\n/help - Показать помощь\n/whoiam - Показать ID пользователя/чата\n/language - Сменить язык\n/provider - Управление провайдером\n/model - Изменить модель\n/cron - Напоминания\n/termux - Инструменты Termux\n\nПросто отправьте сообщение, чтобы пообщаться!",
-        Language::Italian => "📚 *Aiuto - Comandi Disponibili*\n\n/start - Mostra menu principale\n/menu - Mostra menu principale\n/new - Resetta conversazione\n/help - Mostra aiuto\n/whoiam - Mostra ID utente/chat\n/language - Cambia lingua\n/provider - Gestisci provider LLM\n/model - Cambia modello\n/cron - Gestisci promemoria\n/termux - Strumenti Termux\n\nInvia un messaggio per chiacchierare con me!",
+        Language::English => "📚 *Help - Available Commands*\n\n/start - Show main menu\n/menu - Show main menu\n/new - Reset conversation\n/help - Show this help\n/whoiam - Show user/chat IDs\n/language - Change language\n/provider - Manage LLM provider\n/model - Change model\n/cron - Manage reminders\n/termux - Termux tools\n/capabilities - Show live runtime capabilities\n\nJust send a message to chat with me!",
+        Language::Spanish => "📚 *Ayuda - Comandos Disponibles*\n\n/start - Mostrar menú principal\n/menu - Mostrar menú principal\n/new - Reiniciar conversación\n/help - Mostrar esta ayuda\n/whoiam - Mostrar IDs de usuario/chat\n/language - Cambiar idioma\n/provider - Gestionar proveedor LLM\n/model - Cambiar modelo\n/cron - Gestionar recordatorios\n/termux - Herramientas Termux\n/capabilities - Mostrar capacidades runtime en vivo\n\n¡Solo envía un mensaje para chatear conmigo!",
+        Language::Chinese => "📚 *帮助 - 可用命令*\n\n/start - 显示主菜单\n/menu - 显示主菜单\n/new - 重置对话\n/help - 显示帮助\n/whoiam - 查看用户/聊天ID\n/language - 更改语言\n/provider - 管理LLM提供商\n/model - 更改模型\n/cron - 管理提醒\n/termux - Termux工具\n/capabilities - 显示实时运行能力\n\n只需发送消息与我聊天！",
+        Language::Russian => "📚 *Помощь - Доступные команды*\n\n/start - Показать главное меню\n/menu - Показать главное меню\n/new - Сбросить разговор\n/help - Показать помощь\n/whoiam - Показать ID пользователя/чата\n/language - Сменить язык\n/provider - Управление провайдером\n/model - Изменить модель\n/cron - Напоминания\n/termux - Инструменты Termux\n/capabilities - Показать актуальные runtime-возможности\n\nПросто отправьте сообщение, чтобы пообщаться!",
+        Language::Italian => "📚 *Aiuto - Comandi Disponibili*\n\n/start - Mostra menu principale\n/menu - Mostra menu principale\n/new - Resetta conversazione\n/help - Mostra aiuto\n/whoiam - Mostra ID utente/chat\n/language - Cambia lingua\n/provider - Gestisci provider LLM\n/model - Cambia modello\n/cron - Gestisci promemoria\n/termux - Strumenti Termux\n/capabilities - Mostra capability runtime reali\n\nInvia un messaggio per chiacchierare con me!",
     }
     .to_string();
 
@@ -199,11 +199,11 @@ pub fn help_text(lang: Language, is_admin: bool) -> String {
 
 pub fn command_list(lang: Language, is_admin: bool) -> String {
     let mut text = match lang {
-        Language::English => "📋 *Commands*\n\n/start - Main menu\n/menu - Main menu\n/new - Reset session\n/help - Help\n/whoiam - Show user/chat IDs\n/language - Language\n/provider - LLM provider\n/model - Change model\n/cron - Reminders\n/termux - Termux tools",
-        Language::Spanish => "📋 *Comandos*\n\n/start - Menú principal\n/menu - Menú principal\n/new - Reiniciar sesión\n/help - Ayuda\n/whoiam - Mostrar IDs usuario/chat\n/language - Idioma\n/provider - Proveedor LLM\n/model - Cambiar modelo\n/cron - Recordatorios\n/termux - Herramientas Termux",
-        Language::Chinese => "📋 *命令*\n\n/start - 主菜单\n/menu - 主菜单\n/new - 重置会话\n/help - 帮助\n/whoiam - 查看用户/聊天ID\n/language - 语言\n/provider - LLM提供商\n/model - 更改模型\n/cron - 提醒\n/termux - Termux工具",
-        Language::Russian => "📋 *Команды*\n\n/start - Главное меню\n/menu - Главное меню\n/new - Сброс сессии\n/help - Помощь\n/whoiam - Показать ID пользователя/чата\n/language - Язык\n/provider - Провайдер LLM\n/model - Изменить модель\n/cron - Напоминания\n/termux - Инструменты Termux",
-        Language::Italian => "📋 *Comandi*\n\n/start - Menu principale\n/menu - Menu principale\n/new - Reset sessione\n/help - Aiuto\n/whoiam - Mostra ID utente/chat\n/language - Lingua\n/provider - Provider LLM\n/model - Cambia modello\n/cron - Promemoria\n/termux - Strumenti Termux",
+        Language::English => "📋 *Commands*\n\n/start - Main menu\n/menu - Main menu\n/new - Reset session\n/help - Help\n/whoiam - Show user/chat IDs\n/language - Language\n/provider - LLM provider\n/model - Change model\n/cron - Reminders\n/termux - Termux tools\n/capabilities - Live runtime capabilities",
+        Language::Spanish => "📋 *Comandos*\n\n/start - Menú principal\n/menu - Menú principal\n/new - Reiniciar sesión\n/help - Ayuda\n/whoiam - Mostrar IDs usuario/chat\n/language - Idioma\n/provider - Proveedor LLM\n/model - Cambiar modelo\n/cron - Recordatorios\n/termux - Herramientas Termux\n/capabilities - Capacidades runtime en vivo",
+        Language::Chinese => "📋 *命令*\n\n/start - 主菜单\n/menu - 主菜单\n/new - 重置会话\n/help - 帮助\n/whoiam - 查看用户/聊天ID\n/language - 语言\n/provider - LLM提供商\n/model - 更改模型\n/cron - 提醒\n/termux - Termux工具\n/capabilities - 实时运行能力",
+        Language::Russian => "📋 *Команды*\n\n/start - Главное меню\n/menu - Главное меню\n/new - Сброс сессии\n/help - Помощь\n/whoiam - Показать ID пользователя/чата\n/language - Язык\n/provider - Провайдер LLM\n/model - Изменить модель\n/cron - Напоминания\n/termux - Инструменты Termux\n/capabilities - Актуальные runtime-возможности",
+        Language::Italian => "📋 *Comandi*\n\n/start - Menu principale\n/menu - Menu principale\n/new - Reset sessione\n/help - Aiuto\n/whoiam - Mostra ID utente/chat\n/language - Lingua\n/provider - Provider LLM\n/model - Cambia modello\n/cron - Promemoria\n/termux - Strumenti Termux\n/capabilities - Capability runtime reali",
     }
     .to_string();
 
@@ -453,7 +453,6 @@ fn action_message(
         text,
         reply_to: None,
         edit_message_id: message_id,
-        draft_id: None,
         inline_keyboard: keyboard,
         chat_action: None,
     }
