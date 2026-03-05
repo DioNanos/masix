@@ -6998,11 +6998,24 @@ impl MasixRuntime {
 
     fn telegram_permission_for_group(
         account: &masix_config::TelegramAccount,
+        dynamic_acl: &DynamicAcl,
         user_id: i64,
         chat_id: i64,
         is_bot_tagged: bool,
     ) -> PermissionLevel {
-        account.get_permission_for_group(user_id, chat_id, is_bot_tagged)
+        // Apply dynamic ACL (auto-registered users/admins/readonly) to the effective
+        // permission evaluation by extending a temporary account view.
+        let mut effective = account.clone();
+        effective.admins.extend(dynamic_acl.admins.iter().copied());
+        effective.users.extend(dynamic_acl.users.iter().copied());
+        effective.readonly.extend(dynamic_acl.readonly.iter().copied());
+        effective.admins.sort_unstable();
+        effective.users.sort_unstable();
+        effective.readonly.sort_unstable();
+        effective.admins.dedup();
+        effective.users.dedup();
+        effective.readonly.dedup();
+        effective.get_permission_for_group(user_id, chat_id, is_bot_tagged)
     }
 
     fn should_silently_ignore_telegram_permission_denial(
@@ -7063,8 +7076,15 @@ impl MasixRuntime {
                 let Some(account) = Self::get_telegram_account(config, account_tag) else {
                     return PermissionLevel::None;
                 };
+                let dynamic_acl = Self::load_dynamic_acl_for_account(account);
                 let is_bot_tagged = Self::is_bot_tagged(text, account);
-                Self::telegram_permission_for_group(account, user_id, chat_id, is_bot_tagged)
+                Self::telegram_permission_for_group(
+                    account,
+                    &dynamic_acl,
+                    user_id,
+                    chat_id,
+                    is_bot_tagged,
+                )
             }
             "sms" => config
                 .sms
